@@ -1794,6 +1794,639 @@ async def get_game_details(params: GetGameDetailsParams) -> str:
     return "\n".join(lines)
 
 
+# ── Coding Agent Mode ────────────────────────────────────────────────────────
+
+_coding_mode = False
+_coding_working_dir: str | None = None
+_LOCK_EXPIRE_SECONDS = 300  # 5 minutes
+
+
+def _resolve_coding_path(rel_path: str) -> str:
+    """Resolve a path relative to coding working directory."""
+    if not _coding_working_dir:
+        raise ValueError("No working directory set. Use set_working_dir first.")
+    if os.path.isabs(rel_path):
+        return rel_path
+    return os.path.normpath(os.path.join(_coding_working_dir, rel_path))
+
+
+def _lock_path(directory: str) -> str:
+    return os.path.join(directory, ".marvin.lock")
+
+
+def _acquire_lock(directory: str, tool_name: str) -> str | None:
+    """Acquire a directory lock. Returns None on success, error string on failure."""
+    lp = _lock_path(directory)
+    if os.path.exists(lp):
+        try:
+            with open(lp) as f:
+                lock_info = json.loads(f.read())
+            lock_time = lock_info.get("time", 0)
+            if _time.time() - lock_time < _LOCK_EXPIRE_SECONDS:
+                pid = lock_info.get("pid", "?")
+                owner = lock_info.get("tool", "?")
+                age = int(_time.time() - lock_time)
+                return (
+                    f"🔒 Directory locked by '{owner}' (PID {pid}, {age}s ago). "
+                    f"Cannot proceed — another operation is in progress."
+                )
+            # Stale lock, remove it
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupted lock, overwrite
+
+    lock_data = {
+        "pid": os.getpid(),
+        "user": os.environ.get("USER", "unknown"),
+        "time": _time.time(),
+        "tool": tool_name,
+    }
+    try:
+        with open(lp, "w") as f:
+            f.write(json.dumps(lock_data))
+    except OSError as e:
+        return f"Failed to acquire lock: {e}"
+    return None
+
+
+def _release_lock(directory: str):
+    """Release a directory lock."""
+    lp = _lock_path(directory)
+    try:
+        if os.path.exists(lp):
+            with open(lp) as f:
+                lock_info = json.loads(f.read())
+            if lock_info.get("pid") == os.getpid():
+                os.remove(lp)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _read_instructions_file() -> str:
+    """Read .marvin-instructions from working directory if it exists."""
+    if not _coding_working_dir:
+        return ""
+    for name in (".marvin-instructions", ".marvin/instructions.md"):
+        p = os.path.join(_coding_working_dir, name)
+        if os.path.isfile(p):
+            try:
+                with open(p) as f:
+                    return f.read().strip()
+            except OSError:
+                pass
+    return ""
+
+
+class SetWorkingDirParams(BaseModel):
+    path: str = Field(description="Absolute path to the working directory for coding operations")
+
+
+class GetWorkingDirParams(BaseModel):
+    pass
+
+
+class CreateFileParams(BaseModel):
+    path: str = Field(description="File path (relative to working dir or absolute)")
+    content: str = Field(description="File content to write")
+
+
+class ApplyPatchParams(BaseModel):
+    path: str = Field(description="File path to edit (relative to working dir or absolute)")
+    old_str: str = Field(description="Exact string to find in the file (must match exactly)")
+    new_str: str = Field(description="Replacement string")
+
+
+class CodeGrepParams(BaseModel):
+    pattern: str = Field(description="Regex pattern to search for")
+    glob_filter: str = Field(default="*", description="Glob pattern to filter files (e.g. '*.py', '*.ts')")
+    context_lines: int = Field(default=2, description="Lines of context before and after match")
+    max_results: int = Field(default=20, description="Maximum matches to return")
+
+
+class TreeParams(BaseModel):
+    path: str = Field(default=".", description="Directory to list (relative to working dir)")
+    max_depth: int = Field(default=3, description="Maximum depth to traverse")
+    respect_gitignore: bool = Field(default=True, description="Skip .gitignore'd files")
+
+
+class ReadFileParams(BaseModel):
+    path: str = Field(description="File path (relative to working dir or absolute)")
+    start_line: int | None = Field(default=None, description="Start line (1-based)")
+    end_line: int | None = Field(default=None, description="End line (1-based, inclusive)")
+
+
+class GitStatusParams(BaseModel):
+    pass
+
+
+class GitDiffParams(BaseModel):
+    staged: bool = Field(default=False, description="Show staged changes only")
+    path: str | None = Field(default=None, description="Specific file to diff")
+
+
+class GitCommitParams(BaseModel):
+    message: str = Field(description="Commit message")
+    add_all: bool = Field(default=True, description="Stage all changes before committing")
+
+
+class GitLogParams(BaseModel):
+    max_count: int = Field(default=10, description="Number of commits to show")
+    oneline: bool = Field(default=True, description="One-line format")
+
+
+class GitCheckoutParams(BaseModel):
+    target: str = Field(description="Branch name, commit hash, or file path to checkout")
+    create_branch: bool = Field(default=False, description="Create a new branch")
+
+
+class RunCommandParams(BaseModel):
+    command: str = Field(description="Shell command to execute")
+    timeout: int = Field(default=60, description="Timeout in seconds")
+
+
+class LaunchAgentParams(BaseModel):
+    prompt: str = Field(description="The task/prompt for the sub-agent to execute")
+    model: str = Field(
+        default="auto",
+        description=(
+            "Model to use: 'auto' (assess task), 'codex' (gpt-5.3-codex, cheap local edits), "
+            "'opus' (claude-opus-4.6, complex multi-file), 'sonnet' (claude-sonnet-4.5, docs), "
+            "'haiku' (claude-haiku-4.5, summaries/formatting)"
+        )
+    )
+    working_dir: str | None = Field(default=None, description="Working directory (defaults to current coding dir)")
+
+
+# ── Coding tools ─────────────────────────────────────────────────────────────
+
+@define_tool(
+    description="Set the working directory for coding operations. All file paths will be relative to this."
+)
+async def set_working_dir(params: SetWorkingDirParams) -> str:
+    global _coding_working_dir
+    p = os.path.expanduser(params.path)
+    if not os.path.isdir(p):
+        return f"Directory does not exist: {p}"
+    _coding_working_dir = os.path.abspath(p)
+    return f"✅ Working directory set to: {_coding_working_dir}"
+
+
+@define_tool(description="Get the current working directory for coding operations.")
+async def get_working_dir(params: GetWorkingDirParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set. Use set_working_dir to set one."
+    return f"Working directory: {_coding_working_dir}"
+
+
+@define_tool(
+    description=(
+        "Create a new file. Acquires a directory lock first. "
+        "Refuses if the file already exists. Path is relative to working dir."
+    )
+)
+async def create_file(params: CreateFileParams) -> str:
+    try:
+        full = _resolve_coding_path(params.path)
+    except ValueError as e:
+        return str(e)
+
+    if os.path.exists(full):
+        return f"File already exists: {full}. Use apply_patch to edit it."
+
+    parent = os.path.dirname(full)
+    os.makedirs(parent, exist_ok=True)
+    err = _acquire_lock(parent, "create_file")
+    if err:
+        return err
+    try:
+        with open(full, "w") as f:
+            f.write(params.content)
+    except OSError as e:
+        return f"Failed to create file: {e}"
+    finally:
+        _release_lock(parent)
+
+    lines = params.content.count("\n") + 1
+    return f"✅ Created {full} ({lines} lines)"
+
+
+@define_tool(
+    description=(
+        "Edit a file by replacing an exact string match with new content. "
+        "Acquires a directory lock. The old_str must match exactly one location in the file."
+    )
+)
+async def apply_patch(params: ApplyPatchParams) -> str:
+    try:
+        full = _resolve_coding_path(params.path)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.isfile(full):
+        return f"File not found: {full}"
+
+    parent = os.path.dirname(full)
+    err = _acquire_lock(parent, "apply_patch")
+    if err:
+        return err
+    try:
+        with open(full) as f:
+            content = f.read()
+
+        count = content.count(params.old_str)
+        if count == 0:
+            return f"old_str not found in {full}. Make sure it matches exactly."
+        if count > 1:
+            return f"old_str matches {count} locations in {full}. Make it more specific."
+
+        new_content = content.replace(params.old_str, params.new_str, 1)
+        with open(full, "w") as f:
+            f.write(new_content)
+    except OSError as e:
+        return f"Failed to edit file: {e}"
+    finally:
+        _release_lock(parent)
+
+    return f"✅ Patched {full}"
+
+
+@define_tool(
+    description=(
+        "Search for a regex pattern in files within the working directory. "
+        "Returns matching lines with file paths, line numbers, and context."
+    )
+)
+async def code_grep(params: CodeGrepParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set. Use set_working_dir first."
+
+    import re
+    try:
+        pat = re.compile(params.pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Invalid regex: {e}"
+
+    import fnmatch
+    matches = []
+    for root, dirs, files in os.walk(_coding_working_dir):
+        # Skip hidden dirs and common noise
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__", ".git", "venv", ".venv")]
+        for fname in files:
+            if not fnmatch.fnmatch(fname, params.glob_filter):
+                continue
+            fpath = os.path.join(root, fname)
+            rel = os.path.relpath(fpath, _coding_working_dir)
+            try:
+                with open(fpath, errors="replace") as f:
+                    lines = f.readlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for i, line in enumerate(lines):
+                if pat.search(line):
+                    start = max(0, i - params.context_lines)
+                    end = min(len(lines), i + params.context_lines + 1)
+                    ctx = []
+                    for j in range(start, end):
+                        marker = ">" if j == i else " "
+                        ctx.append(f"  {marker} {j+1:4d} | {lines[j].rstrip()}")
+                    matches.append(f"{rel}:{i+1}\n" + "\n".join(ctx))
+                    if len(matches) >= params.max_results:
+                        break
+            if len(matches) >= params.max_results:
+                break
+
+    if not matches:
+        return f"No matches for '{params.pattern}' in {_coding_working_dir}"
+
+    return f"Found {len(matches)} match(es):\n\n" + "\n\n".join(matches)
+
+
+@define_tool(
+    description="List directory tree structure. Respects .gitignore by default."
+)
+async def tree(params: TreeParams) -> str:
+    try:
+        root = _resolve_coding_path(params.path)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.isdir(root):
+        return f"Not a directory: {root}"
+
+    # Try git ls-files first for gitignore support
+    gitignore_files = set()
+    if params.respect_gitignore:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "ls-files", "--cached", "--others", "--exclude-standard",
+                cwd=root, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0:
+                gitignore_files = set(stdout.decode().strip().split("\n"))
+        except Exception:
+            pass
+
+    lines = [os.path.basename(root) + "/"]
+    file_count = 0
+
+    def _walk(path: str, prefix: str, depth: int):
+        nonlocal file_count
+        if depth > params.max_depth:
+            return
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError:
+            return
+        entries = [e for e in entries if not e.startswith(".")]
+        dirs_list = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+        files_list = [e for e in entries if not os.path.isdir(os.path.join(path, e))]
+
+        # Filter gitignored
+        if gitignore_files:
+            rel_base = os.path.relpath(path, root)
+            files_list = [f for f in files_list if
+                          os.path.join(rel_base, f).lstrip("./") in gitignore_files or not gitignore_files]
+
+        all_items = dirs_list + files_list
+        for i, name in enumerate(all_items):
+            is_last = i == len(all_items) - 1
+            connector = "└── " if is_last else "├── "
+            full = os.path.join(path, name)
+            if os.path.isdir(full):
+                if name in ("node_modules", "__pycache__", ".git", "venv", ".venv"):
+                    continue
+                lines.append(f"{prefix}{connector}{name}/")
+                ext = "    " if is_last else "│   "
+                _walk(full, prefix + ext, depth + 1)
+            else:
+                lines.append(f"{prefix}{connector}{name}")
+                file_count += 1
+
+    _walk(root, "", 1)
+    lines.append(f"\n{file_count} files")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description="Read a file's contents. Optionally specify a line range."
+)
+async def read_file(params: ReadFileParams) -> str:
+    try:
+        full = _resolve_coding_path(params.path)
+    except ValueError as e:
+        return str(e)
+
+    if not os.path.isfile(full):
+        return f"File not found: {full}"
+
+    try:
+        with open(full, errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return f"Failed to read file: {e}"
+
+    total = len(lines)
+    start = (params.start_line or 1) - 1
+    end = params.end_line or total
+    start = max(0, min(start, total))
+    end = max(start, min(end, total))
+    selected = lines[start:end]
+
+    numbered = []
+    for i, line in enumerate(selected, start + 1):
+        numbered.append(f"{i:4d} | {line.rstrip()}")
+
+    header = f"{os.path.relpath(full, _coding_working_dir or '.')} ({total} lines)"
+    if params.start_line or params.end_line:
+        header += f" [showing {start+1}-{end}]"
+    return header + "\n" + "\n".join(numbered)
+
+
+# ── Git tools ────────────────────────────────────────────────────────────────
+
+async def _git_run(*args: str, cwd: str | None = None) -> str:
+    """Run a git command and return output."""
+    wd = cwd or _coding_working_dir
+    if not wd:
+        return "No working directory set. Use set_working_dir first."
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args,
+            cwd=wd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            return f"git {' '.join(args)} failed:\n{err or out}"
+        return out or "(no output)"
+    except Exception as e:
+        return f"git error: {e}"
+
+
+@define_tool(description="Show git status of the working directory.")
+async def git_status(params: GitStatusParams) -> str:
+    return await _git_run("status", "--short", "--branch")
+
+
+@define_tool(description="Show git diff. Use staged=true for staged changes, or path for a specific file.")
+async def git_diff(params: GitDiffParams) -> str:
+    args = ["--no-pager", "diff"]
+    if params.staged:
+        args.append("--cached")
+    if params.path:
+        try:
+            full = _resolve_coding_path(params.path)
+            args.extend(["--", full])
+        except ValueError as e:
+            return str(e)
+    return await _git_run(*args)
+
+
+@define_tool(
+    description="Stage and commit changes. Acquires directory lock."
+)
+async def git_commit(params: GitCommitParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set."
+    err = _acquire_lock(_coding_working_dir, "git_commit")
+    if err:
+        return err
+    try:
+        if params.add_all:
+            result = await _git_run("add", "-A")
+            if "failed" in result:
+                return result
+        return await _git_run("commit", "-m", params.message)
+    finally:
+        _release_lock(_coding_working_dir)
+
+
+@define_tool(description="Show recent git commits.")
+async def git_log(params: GitLogParams) -> str:
+    fmt = "--oneline" if params.oneline else "--format=medium"
+    return await _git_run("--no-pager", "log", fmt, f"-{params.max_count}")
+
+
+@define_tool(
+    description="Checkout a branch, commit, or file. Acquires directory lock for safety."
+)
+async def git_checkout(params: GitCheckoutParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set."
+    err = _acquire_lock(_coding_working_dir, "git_checkout")
+    if err:
+        return err
+    try:
+        if params.create_branch:
+            return await _git_run("checkout", "-b", params.target)
+        return await _git_run("checkout", params.target)
+    finally:
+        _release_lock(_coding_working_dir)
+
+
+# ── Shell execution tool ─────────────────────────────────────────────────────
+
+# Global reference for the user-prompt callback (set by curses UI or CLI)
+_command_prompt_callback = None
+
+
+@define_tool(
+    description=(
+        "Execute a shell command in the working directory. The command is ALWAYS "
+        "shown to the user and requires confirmation (Enter) before running. "
+        "Use for builds, tests, installs, or any shell operation."
+    )
+)
+async def run_command(params: RunCommandParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set. Use set_working_dir first."
+
+    # Always show command and prompt for confirmation
+    if _command_prompt_callback:
+        confirmed = await _command_prompt_callback(params.command)
+        if not confirmed:
+            return "Command cancelled by user."
+    else:
+        print(f"\n  $ {params.command}")
+        print("  Press Enter to execute, or Ctrl+C to cancel...")
+        try:
+            input()
+        except (KeyboardInterrupt, EOFError):
+            return "Command cancelled by user."
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            params.command,
+            cwd=_coding_working_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=params.timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"Command timed out after {params.timeout}s"
+    except Exception as e:
+        return f"Command failed: {e}"
+
+    out = stdout.decode(errors="replace").strip()
+    err = stderr.decode(errors="replace").strip()
+    result = []
+    if out:
+        result.append(out)
+    if err:
+        result.append(f"STDERR:\n{err}")
+    if not result:
+        result.append("(no output)")
+    exit_str = f"[exit code: {proc.returncode}]"
+    return "\n".join(result) + f"\n{exit_str}"
+
+
+# ── Sub-agent dispatch ───────────────────────────────────────────────────────
+
+_AGENT_MODELS = {
+    "codex": "gpt-5.3-codex",
+    "opus": "claude-opus-4.6",
+    "sonnet": "claude-sonnet-4.5",
+    "haiku": "claude-haiku-4.5",
+}
+
+
+def _auto_select_model(prompt: str) -> str:
+    """Heuristic model selection based on task description."""
+    p = prompt.lower()
+    # Summaries, formatting, simple tasks
+    if any(w in p for w in ("summarize", "summary", "format", "lint", "rename variable", "fix typo", "fix whitespace")):
+        return "haiku"
+    # Documentation
+    if any(w in p for w in ("document", "readme", "docstring", "jsdoc", "comment")):
+        return "sonnet"
+    # Complex multi-file operations
+    if any(w in p for w in ("refactor", "architect", "redesign", "multi-file", "across files", "migrate")):
+        return "opus"
+    # Default: cheap local edits
+    return "codex"
+
+
+@define_tool(
+    description=(
+        "Launch a sub-agent to execute a specific task in non-interactive mode. "
+        "The sub-agent runs as a separate process with its own context. "
+        "Recursion depth is limited to 1 (sub-agents cannot launch further sub-agents). "
+        "Model is auto-selected based on task complexity, or specify manually: "
+        "codex (cheap edits), opus (complex multi-file), sonnet (docs), haiku (summaries)."
+    )
+)
+async def launch_agent(params: LaunchAgentParams) -> str:
+    # Check recursion depth
+    depth = int(os.environ.get("MARVIN_DEPTH", "0"))
+    if depth >= 1:
+        return "🚫 Recursion limit reached. Sub-agents cannot launch further sub-agents."
+
+    # Model selection
+    if params.model == "auto":
+        tier = _auto_select_model(params.prompt)
+    else:
+        tier = params.model
+    model_name = _AGENT_MODELS.get(tier)
+    if not model_name:
+        return f"Unknown model tier '{tier}'. Use: codex, opus, sonnet, haiku, or auto."
+
+    wd = params.working_dir or _coding_working_dir
+    if not wd:
+        return "No working directory set for sub-agent."
+
+    # Build sub-agent command
+    agent_env = os.environ.copy()
+    agent_env["MARVIN_DEPTH"] = str(depth + 1)
+    agent_env["MARVIN_MODEL"] = model_name
+
+    import sys
+    app_path = os.path.abspath(sys.argv[0])
+    cmd = [sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", params.prompt]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=wd, env=agent_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"Sub-agent timed out after 300s"
+    except Exception as e:
+        return f"Failed to launch sub-agent: {e}"
+
+    out = stdout.decode(errors="replace").strip()
+    err = stderr.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        return f"Sub-agent failed (exit {proc.returncode}):\n{err or out}"
+
+    return f"[{tier} / {model_name}] Sub-agent result:\n\n{out}"
+
+
 # ── Tool: Steam store & API ──────────────────────────────────────────────────
 
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "")
@@ -4285,7 +4918,7 @@ COMMANDS = [
     "find", "search", "nearby", "open now", "best", "cheapest",
     "directions to", "tell me about", "compare",
     "preferences", "profiles", "usage", "saved", "quit", "exit", "help",
-    "!shell", "!sh",
+    "!shell", "!sh", "!code",
 ]
 
 
@@ -4486,6 +5119,36 @@ def _build_system_message() -> str:
         "playlists — not just greatest hits but deep cuts and related artists too."
     )
     base += f"\n\nActive profile: {_active_profile}"
+
+    # Coding mode instructions
+    if _coding_mode:
+        base += (
+            "\n\nCODING MODE ACTIVE 🔧 You are now a careful coding agent. Rules:\n"
+            "1. ALWAYS use set_working_dir first if not set. All file paths are relative to it.\n"
+            "2. BEFORE editing or creating any file, the tool acquires a directory lock. "
+            "If you get a contention error, STOP and report it — do NOT retry.\n"
+            "3. BEFORE running any shell command via run_command, the command is shown to "
+            "the user and they must press Enter to confirm. NEVER bypass this.\n"
+            "4. Make the SMALLEST possible changes. Prefer apply_patch (search-replace) "
+            "over rewriting entire files. Verify old_str matches exactly.\n"
+            "5. After editing code, verify changes don't break the build by using run_command "
+            "to run the project's existing tests/linter.\n"
+            "6. Use read_file and code_grep to understand code BEFORE editing it.\n"
+            "7. Use tree to understand project structure before making changes.\n"
+            "8. Use git_status and git_diff to review changes before committing.\n"
+            "9. You can dispatch sub-tasks to launch_agent for parallel work or "
+            "simpler tasks that don't need your full context.\n"
+            "10. NEVER delete files or directories unless explicitly asked.\n"
+        )
+        if _coding_working_dir:
+            base += f"Working directory: {_coding_working_dir}\n"
+
+    # Instructions file from working directory
+    if _coding_working_dir:
+        instructions = _read_instructions_file()
+        if instructions:
+            base += f"\n\nPROJECT INSTRUCTIONS (from .marvin-instructions):\n{instructions}\n"
+
     if prefs.strip():
         base += (
             "\n\nThe user has the following preferences. Use these to filter, "
@@ -7518,6 +8181,12 @@ def _build_all_tools():
         search_games, get_game_details,
         steam_search, steam_app_details, steam_featured,
         steam_player_stats, steam_user_games, steam_user_summary,
+        # Coding agent tools
+        set_working_dir, get_working_dir,
+        create_file, apply_patch, code_grep, tree, read_file,
+        git_status, git_diff, git_commit, git_log, git_checkout,
+        run_command, launch_agent,
+        # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,
         recipe_search, recipe_lookup,
@@ -7686,13 +8355,16 @@ class SessionManager:
         """
         if not force_sdk and self.active_provider != "copilot":
             try:
+                rounds = 50 if _coding_mode else 10
                 result, conv = await _run_tool_loop(
                     user_prompt, self.all_tools, _build_system_message(),
                     provider=self.active_provider,
                     history=self._conversation,
+                    max_rounds=rounds,
                 )
                 # Keep conversation history (cap to avoid unbounded growth)
-                self._conversation = conv[-40:]
+                cap = 100 if _coding_mode else 40
+                self._conversation = conv[-cap:]
                 # Return result first so UI displays immediately;
                 # save to chat log after (cached, fast)
                 stripped = result.strip() if result else ""
@@ -7716,7 +8388,7 @@ class SessionManager:
 
 async def _run_curses_interactive(stdscr):
     """Run the curses UI as a thin display wrapper around the core app logic."""
-    global _profile_switch_requested, _compact_session_requested
+    global _profile_switch_requested, _compact_session_requested, _coding_mode
     import sys as _sys
     import curses_ui
 
@@ -7874,6 +8546,18 @@ async def _run_curses_interactive(stdscr):
                                     lines.append(f"  📍 {p['address']}")
                             ui.add_message("system", "\n".join(lines))
                         ui.render()
+                    elif lower == "!code":
+                        _coding_mode = not _coding_mode
+                        state = "ON 🔧" if _coding_mode else "OFF"
+                        info = f"Coding mode {state}"
+                        if _coding_mode:
+                            info += "\n  Max tool rounds: 50 | Context: 100 msgs"
+                            if _coding_working_dir:
+                                info += f"\n  Working dir: {_coding_working_dir}"
+                            else:
+                                info += "\n  Set working dir with: set_working_dir"
+                        ui.add_message("system", info)
+                        ui.render()
                     else:
                         try:
                             notifs = await _check_all_subscriptions()
@@ -7946,8 +8630,59 @@ class _CursesRequested(Exception):
     pass
 
 
+async def _run_non_interactive():
+    """Run a single prompt non-interactively (for sub-agent dispatch)."""
+    global _coding_mode, _coding_working_dir
+
+    # Parse args
+    prompt_text = None
+    working_dir = None
+    skip_next = False
+    for i, a in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--prompt" and i < len(sys.argv) - 1:
+            prompt_text = sys.argv[i + 1]
+            skip_next = True
+        elif a == "--working-dir" and i < len(sys.argv) - 1:
+            working_dir = sys.argv[i + 1]
+            skip_next = True
+
+    if not prompt_text:
+        print("Error: --prompt is required in non-interactive mode", file=sys.stderr)
+        sys.exit(1)
+
+    # Set up coding mode
+    _coding_mode = True
+    if working_dir:
+        _coding_working_dir = os.path.abspath(working_dir)
+
+    # Use model from env if specified
+    model_override = os.environ.get("MARVIN_MODEL")
+
+    all_tools = _build_all_tools()
+    system_msg = _build_system_message()
+
+    # Run via tool loop with the appropriate provider
+    try:
+        result, _ = await _run_tool_loop(
+            prompt_text, all_tools, system_msg,
+            max_rounds=50,
+        )
+        print(result or "(no output)")
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 async def main():
-    global _profile_switch_requested, _compact_session_requested
+    global _profile_switch_requested, _compact_session_requested, _coding_mode, _coding_working_dir
+
+    # Non-interactive sub-agent mode
+    if "--non-interactive" in sys.argv:
+        await _run_non_interactive()
+        return
 
     # Curses is default; --plain disables it
     use_plain = "--plain" in sys.argv
@@ -8045,6 +8780,23 @@ async def main():
                     state = "ON" if shell_mode else "OFF"
                     print(f"Shell mode {state}. "
                           f"{'Type commands directly. !shell to exit.' if shell_mode else 'Back to Marvin.'}\n")
+                    continue
+
+                # Toggle coding mode
+                if prompt.lower() == "!code":
+                    global _coding_mode
+                    _coding_mode = not _coding_mode
+                    state = "ON 🔧" if _coding_mode else "OFF"
+                    print(f"Coding mode {state}")
+                    if _coding_mode:
+                        print("  Max tool rounds: 50 | Context: 100 msgs")
+                        if _coding_working_dir:
+                            print(f"  Working dir: {_coding_working_dir}")
+                        else:
+                            print("  Set working dir with: set_working_dir")
+                    print()
+                    if _coding_mode and mgr.active_provider != "copilot":
+                        await mgr.rebuild_sdk_session()
                     continue
 
                 # Voice mode toggle

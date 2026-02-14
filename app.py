@@ -3768,7 +3768,7 @@ async def main():
     args = [a for a in sys.argv[1:] if a not in ("--plain", "--curses")]
 
     if not GOOGLE_API_KEY and not shutil.which("gcloud"):
-        print("Note: No GOOGLE_PLACES_API_KEY set — places search will use OpenStreetMap.")
+        pass  # Places will silently fall back to OpenStreetMap
 
     _ensure_prefs_file()
     _profile_switch_requested = asyncio.Event()

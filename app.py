@@ -5702,7 +5702,7 @@ async def _run_tool_loop(
     tool_funcs: list,
     system_message: str,
     provider: str | None = None,
-    max_rounds: int = 3,
+    max_rounds: int = 10,
 ) -> str:
     """Run a full tool-calling loop via any OpenAI-compatible provider.
     Returns the final assistant response text."""
@@ -5773,6 +5773,7 @@ async def _run_tool_loop(
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
+                "name": fn_name,
                 "content": str(result),
             })
 

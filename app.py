@@ -2283,7 +2283,7 @@ def _compact_history() -> str:
         return ""
     try:
         with open(hp) as f:
-            lines = [l.strip() for l in f if l.strip()]
+            lines = [l.strip() for l in f if l.strip() and not l.startswith("_HiStOrY_V2_")]
     except Exception:
         return ""
     if not lines:

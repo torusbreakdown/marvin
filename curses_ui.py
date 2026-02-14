@@ -550,12 +550,14 @@ async def curses_main(stdscr, app_module):
             update_status()
             ui.render()
     finally:
-        # Save curses input history to readline history file
+        # Save curses input history in readline-compatible format
         try:
-            os.makedirs(os.path.dirname(hp), exist_ok=True)
-            with open(hp, "w") as f:
-                for line in ui.input_history[-1000:]:
-                    f.write(line + "\n")
+            if ui.input_history:
+                os.makedirs(os.path.dirname(hp), exist_ok=True)
+                with open(hp, "w") as f:
+                    f.write("_HiStOrY_V2_\n")
+                    for line in ui.input_history[-1000:]:
+                        f.write(line + "\n")
         except Exception:
             pass
         _save_last_profile()

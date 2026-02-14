@@ -6095,24 +6095,17 @@ async def _run_curses_interactive(stdscr):
     _art_path = os.path.join(os.path.dirname(__file__), "marvin.txt")
     ui.render_splash(_art_path)
 
-    # Show history summary or welcome message
+    # Load full chat log into the UI as scrollable messages
     chat_log = _load_chat_log()
     if chat_log:
-        recent = chat_log[-20:]
-        lines = []
-        for entry in recent:
-            role = entry.get("role", "?")
+        for entry in chat_log:
+            role = entry.get("role", "system")
             text = entry.get("text", "")
-            if len(text) > 200:
-                text = text[:200] + "…"
-            prefix = "You" if role == "you" else "Assistant"
-            lines.append(f"  {prefix}: {text}")
-        summary = "\n".join(lines)
+            ui.add_message(role, text)
         ui.add_message("system",
-            f"Welcome back! Profile: {_active_profile}\n"
-            f"{mgr.emoji} Provider: {mgr.label}\n"
-            f"Recent conversation:\n{summary}\n\n"
-            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+Q to quit."
+            f"─── Session resumed ───\n"
+            f"Profile: {_active_profile} │ {mgr.emoji} Provider: {mgr.label}\n"
+            f"Scroll: PgUp/PgDn, Shift+↑↓, mouse wheel. Ctrl+Q to quit."
         )
     else:
         ui.add_message("system",

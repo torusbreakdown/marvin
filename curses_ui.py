@@ -59,6 +59,7 @@ class CursesUI:
         self.input_buf = ""
         self.cursor_pos = 0
         self.scroll_offset = 0
+        self._total_lines = 0  # updated each render for scroll bounds
         self.status_text = ""
         self.streaming_chunks: list[str] = []
         self.is_streaming = False
@@ -68,6 +69,7 @@ class CursesUI:
         _init_colors()
         curses.curs_set(1)
         curses.raw()  # disable flow control so Ctrl+Q works
+        curses.mousemask(curses.BUTTON4_PRESSED | curses.BUTTON5_PRESSED)
         stdscr.keypad(True)
         stdscr.nodelay(True)  # non-blocking getch
 
@@ -178,6 +180,10 @@ class CursesUI:
 
         # Apply scroll offset (offset 0 = show bottom)
         total = len(display_lines)
+        self._total_lines = total  # cache for scroll bounds
+        max_offset = max(0, total - chat_height)
+        if self.scroll_offset > max_offset:
+            self.scroll_offset = max_offset
         visible_start = max(0, total - chat_height - self.scroll_offset)
         visible_end = visible_start + chat_height
         visible = display_lines[visible_start:visible_end]
@@ -355,12 +361,27 @@ class CursesUI:
         elif key == 11:  # Ctrl+K — kill to end of line
             self.input_buf = self.input_buf[:self.cursor_pos]
         elif key == curses.KEY_PPAGE:  # Page Up
+            max_off = max(0, self._total_lines - (self.height - 4))
             self.scroll_offset = min(
-                self.scroll_offset + (self.height // 2),
-                max(0, len(self.messages) * 4)  # rough upper bound
+                self.scroll_offset + (self.height // 2), max_off
             )
         elif key == curses.KEY_NPAGE:  # Page Down
             self.scroll_offset = max(0, self.scroll_offset - (self.height // 2))
+        elif key == curses.KEY_SR:  # Shift+Up — scroll up 1 line
+            max_off = max(0, self._total_lines - (self.height - 4))
+            self.scroll_offset = min(self.scroll_offset + 1, max_off)
+        elif key == curses.KEY_SF:  # Shift+Down — scroll down 1 line
+            self.scroll_offset = max(0, self.scroll_offset - 1)
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, _, _, _, bstate = curses.getmouse()
+                max_off = max(0, self._total_lines - (self.height - 4))
+                if bstate & curses.BUTTON4_PRESSED:  # scroll up
+                    self.scroll_offset = min(self.scroll_offset + 3, max_off)
+                elif bstate & curses.BUTTON5_PRESSED:  # scroll down
+                    self.scroll_offset = max(0, self.scroll_offset - 3)
+            except curses.error:
+                pass
         elif key == curses.KEY_UP:
             # Browse input history
             if self.input_history:

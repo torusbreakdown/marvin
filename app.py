@@ -1738,6 +1738,157 @@ def _format_places(data: dict) -> str:
     return "\n\n".join(lines)
 
 
+    return "\n\n".join(lines)
+
+
+# ── OSM Nominatim / Overpass fallback ────────────────────────────────────────
+
+_NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+
+async def _nominatim_search(
+    query: str,
+    lat: float = 0.0,
+    lng: float = 0.0,
+    limit: int = 5,
+) -> str:
+    """Search OpenStreetMap via Nominatim as a fallback for Google Places."""
+    params: dict = {
+        "q": query,
+        "format": "jsonv2",
+        "addressdetails": 1,
+        "limit": limit,
+        "extratags": 1,
+    }
+    if lat and lng:
+        params["viewbox"] = f"{lng-0.05},{lat+0.05},{lng+0.05},{lat-0.05}"
+        params["bounded"] = 1
+    headers = {"User-Agent": "LocalFinder/1.0"}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(_NOMINATIM_URL, params=params, headers=headers)
+        if resp.status_code != 200:
+            return f"Nominatim error {resp.status_code}: {resp.text}"
+        results = resp.json()
+
+    if not results:
+        # Retry without bounding box
+        if lat and lng:
+            params.pop("viewbox", None)
+            params.pop("bounded", None)
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(_NOMINATIM_URL, params=params, headers=headers)
+                results = resp.json() if resp.status_code == 200 else []
+        if not results:
+            return "No results found on OpenStreetMap."
+
+    lines = [f"Results from OpenStreetMap (Google Places unavailable):"]
+    for i, r in enumerate(results[:limit], 1):
+        name = r.get("display_name", "Unknown")
+        cat = r.get("category", "")
+        rtype = r.get("type", "")
+        addr = r.get("address", {})
+        road = addr.get("road", "")
+        city = addr.get("city") or addr.get("town") or addr.get("village", "")
+        tags = r.get("extratags", {})
+        phone = tags.get("phone", "")
+        website = tags.get("website", "")
+        cuisine = tags.get("cuisine", "")
+        opening = tags.get("opening_hours", "")
+
+        parts = [f"{i}. {name}"]
+        if cat and rtype:
+            parts.append(f"   Type: {cat}/{rtype}")
+        if cuisine:
+            parts.append(f"   Cuisine: {cuisine}")
+        if road and city:
+            parts.append(f"   Address: {road}, {city}")
+        if phone:
+            parts.append(f"   Phone: {phone}")
+        if website:
+            parts.append(f"   Web: {website}")
+        if opening:
+            parts.append(f"   Hours: {opening}")
+        lines.append("\n".join(parts))
+    return "\n\n".join(lines)
+
+
+async def _overpass_nearby(
+    lat: float,
+    lng: float,
+    place_types: list[str],
+    radius: float = 5000.0,
+    limit: int = 5,
+) -> str:
+    """Search nearby places using Overpass API as fallback for Google Nearby."""
+    osm_tags = {
+        "restaurant": '"amenity"="restaurant"',
+        "cafe": '"amenity"="cafe"',
+        "bakery": '"shop"="bakery"',
+        "bar": '"amenity"="bar"',
+        "gym": '"leisure"="fitness_centre"',
+        "gas_station": '"amenity"="fuel"',
+        "pharmacy": '"amenity"="pharmacy"',
+        "hospital": '"amenity"="hospital"',
+        "supermarket": '"shop"="supermarket"',
+        "park": '"leisure"="park"',
+        "hotel": '"tourism"="hotel"',
+        "bank": '"amenity"="bank"',
+        "library": '"amenity"="library"',
+    }
+
+    filters = []
+    for pt in place_types:
+        tag = osm_tags.get(pt, f'"amenity"="{pt}"')
+        filters.append(f'node[{tag}](around:{radius},{lat},{lng});')
+        filters.append(f'way[{tag}](around:{radius},{lat},{lng});')
+
+    query = f"""[out:json][timeout:15];
+(
+  {"".join(filters)}
+);
+out center {limit};"""
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(_OVERPASS_URL, data={"data": query})
+        if resp.status_code != 200:
+            return f"Overpass API error {resp.status_code}: {resp.text}"
+        data = resp.json()
+
+    elements = data.get("elements", [])
+    if not elements:
+        return "No nearby results found on OpenStreetMap."
+
+    lines = [f"Nearby results from OpenStreetMap (Google Places unavailable):"]
+    for i, el in enumerate(elements[:limit], 1):
+        tags = el.get("tags", {})
+        name = tags.get("name", "Unknown")
+        cuisine = tags.get("cuisine", "")
+        phone = tags.get("phone", "")
+        website = tags.get("website", "")
+        opening = tags.get("opening_hours", "")
+        street = tags.get("addr:street", "")
+        city = tags.get("addr:city", "")
+
+        parts = [f"{i}. {name}"]
+        if cuisine:
+            parts.append(f"   Cuisine: {cuisine}")
+        if street:
+            addr_str = street
+            if city:
+                addr_str += f", {city}"
+            parts.append(f"   Address: {addr_str}")
+        if phone:
+            parts.append(f"   Phone: {phone}")
+        if website:
+            parts.append(f"   Web: {website}")
+        if opening:
+            parts.append(f"   Hours: {opening}")
+        lines.append("\n".join(parts))
+    return "\n\n".join(lines)
+
+
 # ── Tool 1: Text Search (natural language queries) ───────────────────────────
 
 class TextSearchParams(BaseModel):
@@ -1791,18 +1942,25 @@ async def places_text_search(params: TextSearchParams) -> str:
 
     headers = _get_google_headers()
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers=headers,
-            content=json.dumps(body),
-        )
-        if resp.status_code != 200:
-            hint = ""
-            if resp.status_code in (401, 403):
-                hint = " Call setup_google_auth to fix authentication and enable the API."
-            return f"Google Places API error {resp.status_code}: {resp.text}{hint}"
-        return _format_places(resp.json())
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://places.googleapis.com/v1/places:searchText",
+                headers=headers,
+                content=json.dumps(body),
+            )
+            if resp.status_code == 200:
+                return _format_places(resp.json())
+    except Exception:
+        pass
+
+    # Fallback to OpenStreetMap Nominatim
+    return await _nominatim_search(
+        params.text_query,
+        lat=params.latitude,
+        lng=params.longitude,
+        limit=params.max_results,
+    )
 
 
 # ── Tool 2: Nearby Search (structured type + location) ───────────────────────
@@ -1854,18 +2012,26 @@ async def places_nearby_search(params: NearbySearchParams) -> str:
 
     headers = _get_google_headers()
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "https://places.googleapis.com/v1/places:searchNearby",
-            headers=headers,
-            content=json.dumps(body),
-        )
-        if resp.status_code != 200:
-            hint = ""
-            if resp.status_code in (401, 403):
-                hint = " Call setup_google_auth to fix authentication and enable the API."
-            return f"Google Places API error {resp.status_code}: {resp.text}{hint}"
-        return _format_places(resp.json())
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://places.googleapis.com/v1/places:searchNearby",
+                headers=headers,
+                content=json.dumps(body),
+            )
+            if resp.status_code == 200:
+                return _format_places(resp.json())
+    except Exception:
+        pass
+
+    # Fallback to OpenStreetMap Overpass
+    return await _overpass_nearby(
+        params.latitude,
+        params.longitude,
+        params.included_types,
+        radius=params.radius,
+        limit=params.max_results,
+    )
 
 
 # ── Tool: Travel time estimate via OSRM ─────────────────────────────────────
@@ -2948,7 +3114,7 @@ class CalendarAddParams(BaseModel):
     description: str = Field(default="", description="Event description/notes")
 
 
-@define_tool("calendar_add_event", "Save an event to the user's calendar (.ics file)")
+@define_tool(description="Save an event to the user's calendar (.ics file)")
 async def calendar_add_event(params: CalendarAddParams) -> str:
     events = _load_events()
     uid = str(_uuid.uuid4())
@@ -2983,6 +3149,7 @@ async def calendar_add_event(params: CalendarAddParams) -> str:
     if params.location:
         parts.append(f"   Where: {params.location}")
     parts.append(f"   UID: {uid}")
+    _schedule_calendar_reminders()
     return "\n".join(parts)
 
 
@@ -2991,7 +3158,7 @@ class CalendarDeleteParams(BaseModel):
     title: str = Field(default="", description="Title substring to match (case-insensitive). Used if uid is empty.")
 
 
-@define_tool("calendar_delete_event", "Delete an event from the calendar by UID or title")
+@define_tool(description="Delete an event from the calendar by UID or title")
 async def calendar_delete_event(params: CalendarDeleteParams) -> str:
     events = _load_events()
     if not events:
@@ -3016,9 +3183,12 @@ class CalendarViewParams(BaseModel):
     year: int = Field(default=0, description="Year. 0 = current year.")
 
 
-@define_tool("calendar_view",
-             "Display a calendar view for a given month with events marked. "
-             "Returns a text calendar grid plus a list of events in that month.")
+@define_tool(
+    description=(
+        "Display a calendar view for a given month with events marked. "
+        "Returns a text calendar grid plus a list of events in that month."
+    )
+)
 async def calendar_view(params: CalendarViewParams) -> str:
     now = _dt.now()
     year = params.year if params.year > 0 else now.year
@@ -3090,8 +3260,9 @@ class CalendarListParams(BaseModel):
     days: int = Field(default=7, description="Number of days ahead to show upcoming events")
 
 
-@define_tool("calendar_list_upcoming",
-             "List upcoming events in the next N days (default 7)")
+@define_tool(
+    description="List upcoming events in the next N days (default 7)"
+)
 async def calendar_list_upcoming(params: CalendarListParams) -> str:
     events = _load_events()
     if not events:
@@ -3121,6 +3292,98 @@ async def calendar_list_upcoming(params: CalendarListParams) -> str:
     return "\n".join(lines)
 
 
+    return "\n".join(lines)
+
+
+###############################################################################
+# Calendar reminders — cron-based notifications at 1h and 30min before events
+###############################################################################
+
+_CALENDAR_REMINDER_DIR = os.path.join(
+    os.path.expanduser("~/.config/local-finder"), "calendar_reminders"
+)
+
+
+def _schedule_calendar_reminders():
+    """Scan calendar events and install cron reminders (desktop + ntfy) for upcoming events."""
+    events = _load_events()
+    if not events:
+        return
+    os.makedirs(_CALENDAR_REMINDER_DIR, exist_ok=True)
+    now = _dt.now()
+    cutoff = now + _td(days=7)
+
+    # Find first ntfy topic for push notifications
+    subs = _load_ntfy_subs()
+    ntfy_topic = ""
+    if subs:
+        first = next(iter(subs))
+        ntfy_topic = first
+
+    # Read existing crontab
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        existing_cron = result.stdout if result.returncode == 0 else ""
+    except Exception:
+        existing_cron = ""
+
+    new_lines = [l for l in existing_cron.strip().split("\n")
+                 if l and "# calremind_" not in l]
+
+    for ev in events:
+        ds = _parse_ics_dt(ev.get("DTSTART", ""))
+        if not ds or ds < now or ds > cutoff:
+            continue
+        uid = ev.get("UID", "")[:8]
+        title = ev.get("SUMMARY", "Event")
+        loc = ev.get("LOCATION", "")
+        loc_str = f" at {loc}" if loc else ""
+
+        for offset_min, label in [(60, "1hr"), (30, "30min")]:
+            remind_at = ds - _td(minutes=offset_min)
+            if remind_at <= now:
+                continue
+            tag = f"calremind_{uid}_{offset_min}"
+            safe_title = title.replace("'", "'\\''")
+            safe_msg = f"{label} until: {safe_title}{loc_str}".replace("'", "'\\''")
+
+            # ntfy push line
+            ntfy_cmd = ""
+            if ntfy_topic:
+                ntfy_cmd = (
+                    f'\ncurl -sf -H "Title: 📅 {safe_title}" '
+                    f'-d \'{safe_msg}\' '
+                    f'{_NTFY_BASE}/{ntfy_topic} >/dev/null 2>&1 || true'
+                )
+
+            script_path = os.path.join(_CALENDAR_REMINDER_DIR, f"{tag}.sh")
+            script = f"""#!/bin/bash
+# Calendar reminder: {title} ({label} before)
+export DISPLAY=${{DISPLAY:-:0}}
+export DBUS_SESSION_BUS_ADDRESS=${{DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}
+notify-send -u normal -t 30000 "📅 {safe_title}" '{safe_msg}' 2>/dev/null || true
+if command -v paplay &>/dev/null; then
+    paplay /usr/share/sounds/freedesktop/stereo/message-new-instant.oga 2>/dev/null || true
+fi{ntfy_cmd}
+# Self-destruct
+crontab -l 2>/dev/null | grep -v '{tag}' | crontab -
+rm -f '{script_path}'
+"""
+            with open(script_path, "w") as f:
+                f.write(script)
+            os.chmod(script_path, 0o755)
+
+            cron_time = f"{remind_at.minute} {remind_at.hour} {remind_at.day} {remind_at.month} *"
+            new_lines.append(f"{cron_time} {script_path} # {tag}")
+
+    try:
+        cron_text = "\n".join(new_lines) + "\n" if new_lines else ""
+        subprocess.run(["crontab", "-"], input=cron_text,
+                        capture_output=True, text=True)
+    except Exception:
+        pass
+
+
 ###############################################################################
 # File tools — read lines & apply unified-diff patch
 ###############################################################################
@@ -3138,8 +3401,7 @@ class FileReadLinesParams(BaseModel):
 
 
 @define_tool(
-    "file_read_lines",
-    "Read lines from a file with line numbers. Use to inspect file contents before editing."
+    description="Read lines from a file with line numbers. Use to inspect file contents before editing."
 )
 async def file_read_lines(params: FileReadLinesParams) -> str:
     path = os.path.expanduser(params.path)
@@ -3286,9 +3548,10 @@ def _apply_unified_diff(lines: list[str], patch_text: str) -> tuple[list[str], l
 
 
 @define_tool(
-    "file_apply_patch",
-    "Apply a patch (unified diff or simple REPLACE/INSERT/DELETE commands) to a file. "
-    "Always use file_read_lines first to see the current content and line numbers."
+    description=(
+        "Apply a patch (unified diff or simple REPLACE/INSERT/DELETE commands) to a file. "
+        "Always use file_read_lines first to see the current content and line numbers."
+    )
 )
 async def file_apply_patch(params: FileApplyPatchParams) -> str:
     path = os.path.expanduser(params.path)
@@ -3412,6 +3675,9 @@ async def main():
             done.set()
 
     session.on(on_event)
+
+    # Schedule calendar reminders on startup
+    _schedule_calendar_reminders()
 
     if interactive:
         _setup_readline()

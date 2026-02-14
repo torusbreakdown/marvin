@@ -899,6 +899,76 @@ async def scrape_page(params: ScrapePageParams) -> str:
     return result[:max_len]
 
 
+# ── Tool: Lynx web browser ───────────────────────────────────────────────────
+
+_BROWSE_MIN_DELAY = 1.0
+_browse_last_request: float = 0.0
+
+
+class BrowseWebParams(BaseModel):
+    url: str = Field(description="The URL to browse")
+    max_length: int = Field(
+        default=4000,
+        description="Maximum characters to return (1-8000)",
+    )
+
+
+@define_tool(
+    description=(
+        "Browse a web page using Lynx and return clean, human-readable text. "
+        "Much faster than scrape_page (no browser startup) but cannot render "
+        "JavaScript-heavy pages. Use this first for static pages like articles, "
+        "blog posts, restaurant info pages, wiki pages, and docs. "
+        "Fall back to scrape_page only if the page needs JavaScript. "
+        "Rate-limited to 1 request per second."
+    )
+)
+async def browse_web(params: BrowseWebParams) -> str:
+    global _browse_last_request
+    elapsed = _time.monotonic() - _browse_last_request
+    if elapsed < _BROWSE_MIN_DELAY:
+        await asyncio.sleep(_BROWSE_MIN_DELAY - elapsed)
+    _browse_last_request = _time.monotonic()
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "lynx", "-dump", "-nolist", "-width=120",
+            "-accept_all_cookies", "-noreferer",
+            "-useragent=Mozilla/5.0", params.url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except asyncio.TimeoutError:
+        return f"Lynx timed out fetching {params.url}"
+    except Exception as e:
+        return f"Lynx failed: {e}"
+
+    text = stdout.decode("utf-8", errors="replace")
+    if not text.strip():
+        err = stderr.decode("utf-8", errors="replace").strip()
+        return f"No content from {params.url}" + (f" — {err}" if err else "")
+
+    # Collapse excessive blank lines
+    lines = text.split("\n")
+    cleaned = []
+    blank_count = 0
+    for line in lines:
+        if not line.strip():
+            blank_count += 1
+            if blank_count <= 2:
+                cleaned.append("")
+        else:
+            blank_count = 0
+            cleaned.append(line)
+
+    max_len = min(params.max_length, 8000)
+    result = "\n".join(cleaned).strip()
+    if len(result) > max_len:
+        result = result[:max_len] + "\n\n[... truncated]"
+    return result
+
+
 def _format_places(data: dict) -> str:
     """Format Google Places API response into readable text."""
     places = data.get("places", [])
@@ -1805,7 +1875,7 @@ async def main():
         places_text_search, places_nearby_search,
         estimate_travel_time, estimate_traffic_adjusted_time,
         web_search, get_usage,
-        scrape_page,
+        scrape_page, browse_web,
         save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,
         switch_profile, update_preferences, exit_app,

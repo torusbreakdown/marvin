@@ -9298,12 +9298,20 @@ async def _run_non_interactive():
             chunks: list[str] = []
 
             def _on_event(event):
-                etype = event.get("type", "")
-                if etype == "content.delta":
-                    delta = event.get("delta", "")
+                try:
+                    etype = event.type.value
+                except AttributeError:
+                    etype = event.get("type", "") if isinstance(event, dict) else ""
+                if etype == "assistant.message_delta":
+                    delta = getattr(getattr(event, "data", None), "delta_content", "") or ""
+                    if not delta and isinstance(event, dict):
+                        delta = event.get("delta", "")
                     chunks.append(delta)
-                    # Each delta on its own line so subprocess pipe can stream
-                    print(delta, flush=True)
+                    print(delta, end="", flush=True)
+                elif etype == "content.delta":
+                    delta = event.get("delta", "") if isinstance(event, dict) else ""
+                    chunks.append(delta)
+                    print(delta, end="", flush=True)
                 elif etype == "assistant.message":
                     _usage.record_llm_turn(sdk_model)
                 elif etype == "session.idle":
@@ -9318,10 +9326,7 @@ async def _run_non_interactive():
             })
             session.on(_on_event)
             await session.send({"prompt": prompt_text})
-            try:
-                await asyncio.wait_for(done.wait(), timeout=900)
-            except asyncio.TimeoutError:
-                print("\n(timed out after 900s)", file=sys.stderr)
+            await done.wait()
             print()  # final newline
             await session.destroy()
             await client.stop()

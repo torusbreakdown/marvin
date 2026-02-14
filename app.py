@@ -1067,6 +1067,176 @@ async def web_search(params: WebSearchParams) -> str:
     return "\n\n".join(lines)
 
 
+# ── Tool: Academic paper search ─────────────────────────────────────────────
+
+class SearchPapersParams(BaseModel):
+    query: str = Field(description="Search query for academic papers")
+    max_results: int = Field(default=5, description="Maximum results to return (1-20)")
+    year_min: int = Field(default=0, description="Filter papers from this year onward (0 = no filter)")
+    year_max: int = Field(default=0, description="Filter papers up to this year (0 = no filter)")
+    open_access_only: bool = Field(default=False, description="Only return papers with free PDF links")
+
+
+class SearchArxivParams(BaseModel):
+    query: str = Field(description="Search query for arXiv preprints")
+    max_results: int = Field(default=5, description="Maximum results (1-20)")
+    sort_by: str = Field(
+        default="relevance",
+        description="Sort by: 'relevance', 'lastUpdatedDate', or 'submittedDate'",
+    )
+
+
+@define_tool(
+    description=(
+        "Search for academic papers using Semantic Scholar. Returns titles, "
+        "authors, year, citation count, abstract, and PDF links when available. "
+        "Use this for general academic/scientific paper searches. Free, no API key."
+    )
+)
+async def search_papers(params: SearchPapersParams) -> str:
+    api_params = {
+        "query": params.query,
+        "limit": min(params.max_results, 20),
+        "fields": "title,authors,year,citationCount,abstract,url,openAccessPdf,externalIds",
+    }
+    if params.year_min or params.year_max:
+        yr_min = str(params.year_min) if params.year_min else ""
+        yr_max = str(params.year_max) if params.year_max else ""
+        api_params["year"] = f"{yr_min}-{yr_max}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params=api_params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Semantic Scholar search failed: {e}"
+
+    papers = data.get("data", [])
+    if not papers:
+        return f"No papers found for '{params.query}'."
+
+    lines = []
+    for i, p in enumerate(papers, 1):
+        title = p.get("title", "Untitled")
+        authors = ", ".join(a.get("name", "") for a in (p.get("authors") or [])[:4])
+        if len(p.get("authors") or []) > 4:
+            authors += " et al."
+        year = p.get("year", "N/A")
+        cites = p.get("citationCount", 0)
+        url = p.get("url", "")
+        abstract = (p.get("abstract") or "")[:200]
+        if abstract and len(p.get("abstract", "")) > 200:
+            abstract += "..."
+        pdf = ""
+        oa = p.get("openAccessPdf")
+        if oa and oa.get("url"):
+            pdf = f"\n   📄 PDF: {oa['url']}"
+
+        if params.open_access_only and not pdf:
+            continue
+
+        arxiv_id = (p.get("externalIds") or {}).get("ArXiv", "")
+        arxiv_link = f"\n   arXiv: https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
+
+        entry = f"{i}. {title}\n   {authors} ({year}) — {cites} citations\n   {url}{pdf}{arxiv_link}"
+        if abstract:
+            entry += f"\n   {abstract}"
+        lines.append(entry)
+
+    if not lines:
+        return f"No open-access papers found for '{params.query}'."
+
+    total = data.get("total", len(lines))
+    header = f"Found {total} papers for '{params.query}' (showing {len(lines)}):\n"
+    return header + "\n\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Search arXiv for preprints. Returns titles, authors, abstract, "
+        "and direct PDF links. Best for recent/cutting-edge research in "
+        "physics, CS, math, biology, and other sciences. Free, no API key."
+    )
+)
+async def search_arxiv(params: SearchArxivParams) -> str:
+    import xml.etree.ElementTree as ET
+
+    sort_map = {
+        "relevance": "relevance",
+        "lastUpdatedDate": "lastUpdatedDate",
+        "submittedDate": "submittedDate",
+    }
+    sort_by = sort_map.get(params.sort_by, "relevance")
+
+    api_params = {
+        "search_query": f"all:{params.query}",
+        "start": 0,
+        "max_results": min(params.max_results, 20),
+        "sortBy": sort_by,
+        "sortOrder": "descending",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://export.arxiv.org/api/query",
+                params=api_params,
+            )
+            resp.raise_for_status()
+    except Exception as e:
+        return f"arXiv search failed: {e}"
+
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    try:
+        root = ET.fromstring(resp.text)
+    except ET.ParseError as e:
+        return f"Failed to parse arXiv response: {e}"
+
+    entries = root.findall("atom:entry", ns)
+    if not entries:
+        return f"No arXiv preprints found for '{params.query}'."
+
+    lines = []
+    for i, entry in enumerate(entries, 1):
+        title = (entry.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
+        authors = [a.findtext("atom:name", "", ns) for a in entry.findall("atom:author", ns)]
+        author_str = ", ".join(authors[:4])
+        if len(authors) > 4:
+            author_str += " et al."
+        published = (entry.findtext("atom:published", "", ns) or "")[:10]
+        abstract = (entry.findtext("atom:summary", "", ns) or "").strip().replace("\n", " ")[:200]
+        if len(entry.findtext("atom:summary", "", ns) or "") > 200:
+            abstract += "..."
+
+        abs_url = ""
+        pdf_url = ""
+        for link in entry.findall("atom:link", ns):
+            if link.get("title") == "pdf":
+                pdf_url = link.get("href", "")
+            elif link.get("rel") == "alternate":
+                abs_url = link.get("href", "")
+
+        categories = [c.get("term", "") for c in entry.findall("atom:category", ns)]
+        cat_str = ", ".join(categories[:3]) if categories else ""
+
+        result = f"{i}. {title}\n   {author_str} ({published})"
+        if cat_str:
+            result += f" [{cat_str}]"
+        result += f"\n   {abs_url}"
+        if pdf_url:
+            result += f"\n   📄 PDF: {pdf_url}"
+        if abstract:
+            result += f"\n   {abstract}"
+        lines.append(result)
+
+    header = f"arXiv results for '{params.query}' ({len(lines)} papers):\n"
+    return header + "\n\n".join(lines)
+
+
 # ── Tool: Selenium page scraper ──────────────────────────────────────────────
 
 import time as _time
@@ -2214,6 +2384,7 @@ async def main():
         places_text_search, places_nearby_search,
         estimate_travel_time, estimate_traffic_adjusted_time,
         web_search, get_usage,
+        search_papers, search_arxiv,
         scrape_page, browse_web,
         save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,

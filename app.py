@@ -5155,6 +5155,205 @@ async def search_history_backups(params: SearchHistoryBackupsParams) -> str:
     return header + "\n" + "\n".join(matches)
 
 
+# ── Blender MCP Tools ────────────────────────────────────────────────────────
+#
+# Connects to the Blender-MCP addon's socket server (default localhost:9876).
+# The addon must be enabled in Blender: Preferences → Add-ons → BlenderMCP.
+
+BLENDER_MCP_HOST = os.environ.get("BLENDER_MCP_HOST", "127.0.0.1")
+BLENDER_MCP_PORT = int(os.environ.get("BLENDER_MCP_PORT", "9876"))
+_blender_available: bool | None = None
+
+
+async def _blender_send(command: dict, timeout: float = 30.0) -> dict:
+    """Send a JSON command to Blender MCP addon and return the response."""
+    global _blender_available
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(BLENDER_MCP_HOST, BLENDER_MCP_PORT),
+            timeout=5.0,
+        )
+        payload = json.dumps(command).encode("utf-8")
+        writer.write(payload)
+        await writer.drain()
+
+        chunks = []
+        while True:
+            chunk = await asyncio.wait_for(reader.read(65536), timeout=timeout)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        writer.close()
+        _blender_available = True
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+        if data.get("status") == "error":
+            return {"error": data.get("message", "Unknown Blender error")}
+        return data.get("result", data)
+    except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as e:
+        _blender_available = False
+        return {"error": f"Blender not connected ({e}). Enable the BlenderMCP addon and click 'Start'."}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class BlenderSceneParams(BaseModel):
+    pass
+
+
+@define_tool(
+    description=(
+        "Get information about the current Blender scene: objects, lights, "
+        "cameras, materials. Use this to understand what exists before making changes."
+    )
+)
+async def blender_get_scene(params: BlenderSceneParams) -> str:
+    result = await _blender_send({"type": "get_scene_info"})
+    return json.dumps(result, indent=2)
+
+
+class BlenderObjectInfoParams(BaseModel):
+    object_name: str = Field(description="Name of the Blender object to inspect")
+
+
+@define_tool(
+    description=(
+        "Get detailed info about a specific Blender object: mesh data, "
+        "materials, transforms, modifiers."
+    )
+)
+async def blender_get_object(params: BlenderObjectInfoParams) -> str:
+    result = await _blender_send({
+        "type": "get_object_info",
+        "params": {"object_name": params.object_name},
+    })
+    return json.dumps(result, indent=2)
+
+
+class BlenderCreateObjectParams(BaseModel):
+    object_type: str = Field(
+        description="Primitive type: cube, sphere, cylinder, cone, torus, plane, uv_sphere, ico_sphere"
+    )
+    name: str = Field(default="", description="Object name (optional)")
+    location: list[float] = Field(default=[0, 0, 0], description="XYZ location")
+    scale: list[float] = Field(default=[1, 1, 1], description="XYZ scale")
+    rotation: list[float] = Field(default=[0, 0, 0], description="XYZ rotation in radians")
+
+
+@define_tool(
+    description="Create a primitive 3D object in the Blender scene."
+)
+async def blender_create_object(params: BlenderCreateObjectParams) -> str:
+    cmd: dict = {
+        "type": "create_object",
+        "params": {
+            "object_type": params.object_type,
+            "location": params.location,
+            "scale": params.scale,
+            "rotation": params.rotation,
+        },
+    }
+    if params.name:
+        cmd["params"]["name"] = params.name
+    result = await _blender_send(cmd)
+    return json.dumps(result, indent=2)
+
+
+class BlenderModifyObjectParams(BaseModel):
+    object_name: str = Field(description="Name of the object to modify")
+    location: list[float] | None = Field(default=None, description="New XYZ location")
+    scale: list[float] | None = Field(default=None, description="New XYZ scale")
+    rotation: list[float] | None = Field(default=None, description="New XYZ rotation in radians")
+
+
+@define_tool(
+    description="Modify an existing Blender object's position, scale, or rotation."
+)
+async def blender_modify_object(params: BlenderModifyObjectParams) -> str:
+    p: dict = {"object_name": params.object_name}
+    if params.location is not None:
+        p["location"] = params.location
+    if params.scale is not None:
+        p["scale"] = params.scale
+    if params.rotation is not None:
+        p["rotation"] = params.rotation
+    result = await _blender_send({"type": "modify_object", "params": p})
+    return json.dumps(result, indent=2)
+
+
+class BlenderDeleteObjectParams(BaseModel):
+    object_name: str = Field(description="Name of the object to delete")
+
+
+@define_tool(
+    description="Delete an object from the Blender scene by name."
+)
+async def blender_delete_object(params: BlenderDeleteObjectParams) -> str:
+    result = await _blender_send({
+        "type": "delete_object",
+        "params": {"object_name": params.object_name},
+    })
+    return json.dumps(result, indent=2)
+
+
+class BlenderSetMaterialParams(BaseModel):
+    object_name: str = Field(description="Name of the object to apply material to")
+    material_name: str = Field(default="", description="Material name")
+    color: list[float] = Field(
+        default=[0.8, 0.8, 0.8, 1.0],
+        description="RGBA color values (0-1 range)",
+    )
+
+
+@define_tool(
+    description="Apply or modify a material/color on a Blender object."
+)
+async def blender_set_material(params: BlenderSetMaterialParams) -> str:
+    p: dict = {
+        "object_name": params.object_name,
+        "material_data": {"color": params.color},
+    }
+    if params.material_name:
+        p["material_name"] = params.material_name
+    result = await _blender_send({"type": "set_material", "params": p})
+    return json.dumps(result, indent=2)
+
+
+class BlenderExecuteCodeParams(BaseModel):
+    code: str = Field(description="Python code to execute inside Blender (bpy context)")
+
+
+@define_tool(
+    description=(
+        "Execute arbitrary Python code inside Blender. Has full access to bpy "
+        "and the Blender API. Use for complex operations not covered by other "
+        "Blender tools (e.g., adding modifiers, keyframes, compositing nodes)."
+    )
+)
+async def blender_execute_code(params: BlenderExecuteCodeParams) -> str:
+    result = await _blender_send({
+        "type": "execute_blender_code",
+        "params": {"code": params.code},
+    })
+    return json.dumps(result, indent=2)
+
+
+class BlenderScreenshotParams(BaseModel):
+    max_size: int = Field(default=512, description="Max dimension of the screenshot in pixels")
+
+
+@define_tool(
+    description="Capture a screenshot of the current Blender viewport."
+)
+async def blender_screenshot(params: BlenderScreenshotParams) -> str:
+    result = await _blender_send({
+        "type": "get_viewport_screenshot",
+        "params": {"max_size": params.max_size},
+    })
+    if isinstance(result, dict) and "error" not in result:
+        return "Screenshot captured. Image data returned from Blender."
+    return json.dumps(result, indent=2)
+
+
 # ── LLM Provider Infrastructure ─────────────────────────────────────────────
 #
 # Providers (set via LLM_PROVIDER env var or --provider flag):
@@ -5685,6 +5884,9 @@ async def main():
         bookmark_save, bookmark_list, bookmark_search,
         compact_history,
         search_history_backups,
+        blender_get_scene, blender_get_object, blender_create_object,
+        blender_modify_object, blender_delete_object, blender_set_material,
+        blender_execute_code, blender_screenshot,
     ]
 
     # ── Determine active provider ──────────────────────────────────────────
@@ -5812,6 +6014,10 @@ async def main():
         if _check_stt_deps() and GROQ_API_KEY:
             _stt_enabled = True
             print("🎤 Voice: '!v' for one-shot, '!voice' to toggle always-on")
+        # Check Blender connection
+        _bl_test = await _blender_send({"type": "get_scene_info"})
+        if "error" not in _bl_test:
+            print("🎨 Blender connected — use natural language to control 3D scenes")
         print()
         shell_mode = False
         voice_mode = False
@@ -5851,6 +6057,16 @@ async def main():
                     voice_mode = not voice_mode
                     state = "ON 🎤" if voice_mode else "OFF"
                     print(f"Voice mode {state}\n")
+                    continue
+
+                # Blender connection status
+                if prompt.lower() == "!blender":
+                    _bl_test = await _blender_send({"type": "get_scene_info"})
+                    if "error" in _bl_test:
+                        print(f"❌ Blender: {_bl_test['error']}\n")
+                    else:
+                        obj_count = _bl_test.get("object_count", "?")
+                        print(f"🎨 Blender connected — {obj_count} objects in scene\n")
                     continue
 
                 # One-shot voice input

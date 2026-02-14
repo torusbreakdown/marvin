@@ -970,6 +970,9 @@ def _generate_topic() -> str:
     return "-".join(chosen)
 
 
+_generate_ntfy_topic_name = _generate_topic  # alias for CLI usage
+
+
 async def _poll_ntfy_topic(topic: str) -> list[dict]:
     """Poll a ntfy topic for messages since last check."""
     try:
@@ -2362,6 +2365,8 @@ async def git_checkout(params: GitCheckoutParams) -> str:
 _command_prompt_callback = None
 # Auto-approve all commands (set in non-interactive/sub-agent mode)
 _auto_approve_commands = False
+# Override ntfy topic for pipeline notifications (set via --ntfy flag)
+_ntfy_override_topic: str | None = None
 
 
 @define_tool(
@@ -2498,10 +2503,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     async def _notify_pipeline(msg: str, title: str = "Marvin Pipeline"):
         """Send a ntfy notification for pipeline status updates."""
-        subs = _load_ntfy_subs()
-        if not subs:
-            return
-        topic = next(iter(subs))
+        topic = _ntfy_override_topic
+        if not topic:
+            subs = _load_ntfy_subs()
+            if not subs:
+                return
+            topic = next(iter(subs))
         try:
             proc = await asyncio.create_subprocess_exec(
                 "curl", "-s", "-d", msg,
@@ -2522,6 +2529,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
         cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
+        if _ntfy_override_topic:
+            cmd.extend(["--ntfy", _ntfy_override_topic])
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -9105,7 +9114,7 @@ class _CursesRequested(Exception):
 
 async def _run_non_interactive():
     """Run a single prompt non-interactively (for sub-agent dispatch)."""
-    global _coding_mode, _coding_working_dir, _auto_approve_commands
+    global _coding_mode, _coding_working_dir, _auto_approve_commands, _ntfy_override_topic
 
     _auto_approve_commands = True  # sub-agents don't prompt for shell commands
 
@@ -9122,6 +9131,9 @@ async def _run_non_interactive():
             skip_next = True
         elif a == "--working-dir" and i < len(sys.argv) - 1:
             working_dir = sys.argv[i + 1]
+            skip_next = True
+        elif a == "--ntfy" and i < len(sys.argv) - 1:
+            _ntfy_override_topic = sys.argv[i + 1]
             skip_next = True
 
     if not prompt_text:
@@ -9198,7 +9210,7 @@ async def _run_non_interactive():
 
 
 async def main():
-    global _profile_switch_requested, _compact_session_requested, _coding_mode, _coding_working_dir
+    global _profile_switch_requested, _compact_session_requested, _coding_mode, _coding_working_dir, _ntfy_override_topic
 
     # Non-interactive sub-agent mode
     if "--non-interactive" in sys.argv:
@@ -9210,7 +9222,7 @@ async def main():
     # Filter out flags from prompt args
     skip_next = False
     args = []
-    for a in sys.argv[1:]:
+    for i, a in enumerate(sys.argv[1:], 1):
         if skip_next:
             skip_next = False
             continue
@@ -9220,6 +9232,13 @@ async def main():
             skip_next = True
             continue
         if a.startswith("--provider="):
+            continue
+        if a == "--ntfy":
+            if i < len(sys.argv) - 1 and not sys.argv[i + 1].startswith("--"):
+                _ntfy_override_topic = sys.argv[i + 1]
+                skip_next = True
+            else:
+                _ntfy_override_topic = _generate_ntfy_topic_name()
             continue
         args.append(a)
 

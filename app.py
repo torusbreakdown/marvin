@@ -2912,9 +2912,20 @@ class WriteNoteParams(BaseModel):
     )
 )
 async def write_note(params: WriteNoteParams) -> str:
-    rel = params.path.lstrip("/")
+    rel = params.path.strip()
+    # Handle cases where LLM passes full path or ~/Notes prefix
+    expanded = os.path.expanduser(rel)
+    if expanded.startswith(_NOTES_DIR):
+        rel = expanded[len(_NOTES_DIR):].lstrip("/")
+    elif rel.startswith("~/Notes/"):
+        rel = rel[len("~/Notes/"):]
+    elif rel.startswith("Notes/"):
+        rel = rel[len("Notes/"):]
+    rel = rel.lstrip("/")
     if ".." in rel:
         return "Path cannot contain '..'."
+    if not rel:
+        return "Please provide a filename, e.g. 'todo.md'."
     full = os.path.join(_NOTES_DIR, rel)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     mode = "a" if params.append else "w"
@@ -2937,7 +2948,15 @@ class ReadNoteParams(BaseModel):
     description="Read a Markdown note from ~/Notes."
 )
 async def read_note(params: ReadNoteParams) -> str:
-    rel = params.path.lstrip("/")
+    rel = params.path.strip()
+    expanded = os.path.expanduser(rel)
+    if expanded.startswith(_NOTES_DIR):
+        rel = expanded[len(_NOTES_DIR):].lstrip("/")
+    elif rel.startswith("~/Notes/"):
+        rel = rel[len("~/Notes/"):]
+    elif rel.startswith("Notes/"):
+        rel = rel[len("Notes/"):]
+    rel = rel.lstrip("/")
     if ".." in rel:
         return "Path cannot contain '..'."
     full = os.path.join(_NOTES_DIR, rel)
@@ -2960,7 +2979,15 @@ class NotesMkdirParams(BaseModel):
     description="Create a subdirectory inside ~/Notes for organizing notes."
 )
 async def notes_mkdir(params: NotesMkdirParams) -> str:
-    rel = params.path.lstrip("/")
+    rel = params.path.strip()
+    expanded = os.path.expanduser(rel)
+    if expanded.startswith(_NOTES_DIR):
+        rel = expanded[len(_NOTES_DIR):].lstrip("/")
+    elif rel.startswith("~/Notes/"):
+        rel = rel[len("~/Notes/"):]
+    elif rel.startswith("Notes/"):
+        rel = rel[len("Notes/"):]
+    rel = rel.lstrip("/")
     if ".." in rel:
         return "Path cannot contain '..'."
     full = os.path.join(_NOTES_DIR, rel)
@@ -2979,7 +3006,18 @@ class NotesLsParams(BaseModel):
     description="List files and directories inside ~/Notes."
 )
 async def notes_ls(params: NotesLsParams) -> str:
-    rel = params.path.strip().lstrip("/") if params.path else ""
+    rel = params.path.strip() if params.path else ""
+    if rel:
+        expanded = os.path.expanduser(rel)
+        if expanded.startswith(_NOTES_DIR):
+            rel = expanded[len(_NOTES_DIR):].lstrip("/")
+        elif rel.startswith("~/Notes/"):
+            rel = rel[len("~/Notes/"):]
+        elif rel.startswith("~/Notes"):
+            rel = ""
+        elif rel.startswith("Notes/"):
+            rel = rel[len("Notes/"):]
+        rel = rel.lstrip("/")
     if ".." in rel:
         return "Path cannot contain '..'."
     full = os.path.join(_NOTES_DIR, rel) if rel else _NOTES_DIR

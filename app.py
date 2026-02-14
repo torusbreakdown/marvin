@@ -2503,6 +2503,16 @@ async def main():
                     })
                     session.on(on_event)
                     print(f"[Session rebuilt for profile: {_active_profile}]\n")
+
+                    # Re-send the prompt so the LLM can finish processing
+                    # (e.g. updating preferences after a profile switch)
+                    done.clear()
+                    chunks.clear()
+                    _profile_switch_requested.clear()
+                    print("Assistant: ", end="", flush=True)
+                    await session.send({"prompt": prompt})
+                    await done.wait()
+                    print()
         finally:
             _save_history()
             _usage.save()

@@ -6006,10 +6006,11 @@ async def main():
         history = _compact_history()
         if history:
             print(f"Welcome back! Profile: {_active_profile}")
+            print(f"{emoji} Provider: {label}")
             print(f"Recent history:\n{history}")
         else:
             print("Marvin — interactive mode")
-            print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
+            print(f"Profile: {_active_profile} | {emoji} Provider: {label}")
         print("Tab to complete, Ctrl+R to search history, 'quit' to exit.")
         if _check_stt_deps() and GROQ_API_KEY:
             _stt_enabled = True
@@ -6164,7 +6165,7 @@ async def main():
                 _compact_session_requested.clear()
                 _append_chat("you", prompt)
                 print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
-                print("Marvin: ", end="", flush=True)
+                print(f"{emoji} Marvin: ", end="", flush=True)
                 await _send_prompt(prompt, force_sdk=force_sdk)
                 print()
 
@@ -6177,7 +6178,7 @@ async def main():
 
                     _append_chat("you", prompt)
                     print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
-                    print("Marvin: ", end="", flush=True)
+                    print(f"{emoji} Marvin: ", end="", flush=True)
                     await _send_prompt(prompt, force_sdk=force_sdk)
                     print()
 
@@ -6192,7 +6193,7 @@ async def main():
             _usage.save()
     else:
         _append_chat("you", prompt)
-        print("Marvin: ", end="", flush=True)
+        print(f"{emoji} Marvin: ", end="", flush=True)
         await _send_prompt(prompt)
         print()
         _usage.save()

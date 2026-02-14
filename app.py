@@ -2141,7 +2141,27 @@ CONFIG_DIR = os.path.expanduser("~/.config/local-finder")
 PROFILES_DIR = os.path.join(CONFIG_DIR, "profiles")
 
 # Active profile state
-_active_profile = "default"
+_LAST_PROFILE_FILE = os.path.join(CONFIG_DIR, "last_profile")
+
+
+def _load_last_profile() -> str:
+    try:
+        with open(_LAST_PROFILE_FILE) as f:
+            name = f.read().strip()
+            if name and os.path.isdir(os.path.join(PROFILES_DIR, name)):
+                return name
+    except Exception:
+        pass
+    return "default"
+
+
+def _save_last_profile():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(_LAST_PROFILE_FILE, "w") as f:
+        f.write(_active_profile)
+
+
+_active_profile = _load_last_profile()
 
 
 def _profile_dir(name: str | None = None) -> str:
@@ -2460,6 +2480,7 @@ async def switch_profile(params: SwitchProfileParams) -> str:
 
     # Switch
     _active_profile = name
+    _save_last_profile()
     _ensure_prefs_file(name)
 
     # Load new profile's history
@@ -2742,6 +2763,7 @@ async def main():
                     print()
         finally:
             _save_history()
+            _save_last_profile()
             _usage.save()
     else:
         await session.send({"prompt": prompt})

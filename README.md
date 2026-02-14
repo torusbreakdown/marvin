@@ -1,33 +1,161 @@
 # Local Finder
 
-A CLI app that uses the **GitHub Copilot SDK** and **Google Places API (New)** to suggest nearby businesses based on a natural-language prompt.
+A multi-tool CLI assistant powered by the **GitHub Copilot SDK**. Finds nearby places, checks weather & traffic, searches the web, scrapes pages, looks up academic papers, reviews games & movies, manages notifications, and more — all from one conversational interface.
 
-The Copilot LLM picks the right tool — `places_text_search` for natural language queries or `places_nearby_search` for structured type+coordinate lookups — and summarizes the results.
-
-## Setup
+## Quick Start
 
 ```bash
-# Install dependencies
+# Clone and install
+cd local-finder
 uv venv && uv pip install -r requirements.txt
+source .venv/bin/activate
 
-# Set your Google API key (enable Places API at https://console.cloud.google.com/apis)
-export GOOGLE_PLACES_API_KEY="your-key-here"
-
-# Make sure the Copilot CLI is installed and authenticated
-copilot --version
+# Run interactive mode
+python app.py
 ```
+
+## API Setup
+
+### Required
+
+#### 1. GitHub Copilot (powers the LLM)
+The Copilot SDK authenticates via your GitHub account. You need **GitHub Copilot access** (Individual, Business, or Enterprise).
+
+```bash
+# Install GitHub CLI and authenticate
+gh auth login
+
+# Verify Copilot access
+gh copilot --version
+```
+
+The SDK's bundled `copilot` binary handles token exchange automatically.
+
+#### 2. Google Places API (place search & recommendations)
+**Option A — API Key (recommended):**
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a project (or select existing)
+3. Enable **Places API (New)**: [Direct link](https://console.cloud.google.com/apis/library/places-backend.googleapis.com)
+4. Go to **APIs & Services → Credentials → Create Credentials → API Key**
+5. Set the key:
+```bash
+export GOOGLE_PLACES_API_KEY="your-key-here"
+```
+
+**Option B — gcloud auth (no API key needed):**
+```bash
+gcloud auth login
+gcloud auth application-default login
+gcloud services enable places-backend.googleapis.com
+
+# The app will auto-detect gcloud credentials and set the quota project.
+# If you get 401/403 errors, tell the assistant "fix auth" and it will
+# call setup_google_auth to enable the API and set the quota project.
+```
+
+### Optional (free, enhance features)
+
+#### 3. OMDB — Movie & TV Reviews
+Free tier: 1,000 requests/day.
+
+1. Go to [omdbapi.com/apikey.aspx](https://www.omdbapi.com/apikey.aspx)
+2. Select **FREE** tier, enter your email
+3. Check email for your API key (check spam if delayed)
+4. Set the key:
+```bash
+export OMDB_API_KEY="your-key-here"
+```
+
+#### 4. RAWG — Video Game Reviews
+Free tier: 20,000 requests/month (non-commercial, requires attribution).
+
+1. Go to [rawg.io/apidocs](https://rawg.io/apidocs)
+2. Click **Get API Key** and create an account
+3. Copy your API key from the dashboard
+4. Set the key:
+```bash
+export RAWG_API_KEY="your-key-here"
+```
+
+### No Key Needed (free, built-in)
+
+These services require **no API key** and work out of the box:
+
+| Service | What it does | Limit |
+|---------|-------------|-------|
+| **OSRM** | Route planning & travel time | 1 req/sec (public demo) |
+| **Open-Meteo** | Weather data & forecasts | Unlimited (non-commercial) |
+| **DuckDuckGo** | Web search (via `ddgs` library) | Reasonable use |
+| **Semantic Scholar** | Academic paper search | ~100 req/5min |
+| **arXiv** | Preprint search | 1 req/3sec |
+| **ntfy.sh** | Push notifications | Unlimited |
+| **ip-api.com** | IP geolocation fallback | 45 req/min |
+| **Lynx** | Text-mode web browsing | Local (no network limit) |
+| **Selenium + Firefox** | JS-rendered page scraping | Local (rate-limited 3s) |
+
+## Recommended .bashrc / .profile
+
+Add all your keys in one place so they persist:
+
+```bash
+# ~/.bashrc or ~/.profile
+export GOOGLE_PLACES_API_KEY="AIza..."
+export OMDB_API_KEY="abc123..."
+export RAWG_API_KEY="def456..."
+```
+
+Then `source ~/.bashrc` or restart your terminal.
 
 ## Usage
 
 ```bash
 source .venv/bin/activate
 
-python app.py "Find me good ramen near 37.78, -122.41"
-python app.py "Best coffee shops within 2km of downtown Austin"
-python app.py "Any 24-hour gyms near 40.7128, -74.0060?"
+# Interactive mode (recommended)
+python app.py
+
+# Single-shot mode
+python app.py "Find me good ramen near me"
+python app.py "Is Elden Ring worth playing?"
+python app.py "Find papers on multi-robot consensus from 2020-2024"
 ```
 
-The LLM will:
-1. Parse your prompt for search terms and location
-2. Call the appropriate Google Places tool
-3. Summarize the results in a friendly response
+### Interactive Commands
+
+| Command | Action |
+|---------|--------|
+| `preferences` | Open your preferences file in $EDITOR |
+| `profiles` | List available profiles |
+| `saved` | Show saved places |
+| `usage` | Show API usage & costs |
+| `quit` / `exit` / Ctrl+D | Exit the app |
+
+### Example Prompts
+
+```
+Find the best Thai food near me that delivers
+Is the new Dune movie good?
+Search arXiv for transformer architectures in robotics
+What's the weather like and how long to drive to LAX?
+Save my home address as 123 Main St, Anytown USA
+Set an alarm for 30 minutes — pizza is in the oven
+Create a notification channel for deal alerts
+I'm vegetarian and I don't like spicy food
+Browse the menu at joe's-crab-shack.com
+```
+
+## All Tools (30)
+
+| Category | Tools |
+|----------|-------|
+| **Location** | `get_my_location` |
+| **Places** | `places_text_search`, `places_nearby_search` |
+| **Travel** | `estimate_travel_time`, `estimate_traffic_adjusted_time` |
+| **Search** | `web_search`, `browse_web`, `scrape_page` |
+| **Academic** | `search_papers`, `search_arxiv` |
+| **Reviews** | `search_movies`, `get_movie_details`, `search_games`, `get_game_details` |
+| **Address Book** | `save_place`, `remove_place`, `list_places` |
+| **Notifications** | `generate_ntfy_topic`, `ntfy_subscribe`, `ntfy_unsubscribe`, `ntfy_publish`, `ntfy_list` |
+| **Alarms** | `set_alarm`, `list_alarms`, `cancel_alarm` |
+| **Profile** | `switch_profile`, `update_preferences` |
+| **System** | `setup_google_auth`, `get_usage`, `exit_app` |

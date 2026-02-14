@@ -284,6 +284,25 @@ class UsageTracker:
         except Exception:
             pass
 
+    def cost_json(self) -> str:
+        """Serialize session cost data as a JSON string for sub-agent → parent aggregation."""
+        return json.dumps({
+            "session_cost": self.session_cost,
+            "llm_turns": self.llm_turns,
+            "model_turns": self.model_turns,
+            "model_cost": self.model_cost,
+        })
+
+    def absorb_sub_cost(self, data: dict):
+        """Absorb cost data from a completed sub-agent into this tracker."""
+        self.session_cost += data.get("session_cost", 0)
+        self.llm_turns += data.get("llm_turns", 0)
+        for model, turns in data.get("model_turns", {}).items():
+            self.model_turns[model] = self.model_turns.get(model, 0) + turns
+        for model, cost in data.get("model_cost", {}).items():
+            self.model_cost[model] = self.model_cost.get(model, 0) + cost
+        self._check_milestone()
+
     def summary_oneline(self) -> str:
         premium_reqs = sum(
             turns * self.MODEL_MULTIPLIERS.get(m, 1)
@@ -2629,7 +2648,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-            return proc.returncode or 0, (sout or b"").decode(errors="replace").strip(), (serr or b"").decode(errors="replace").strip()
+            stderr_text = (serr or b"").decode(errors="replace").strip()
+            # Parse sub-agent cost data from stderr
+            for line in stderr_text.splitlines():
+                if line.startswith("MARVIN_COST:"):
+                    try:
+                        _usage.absorb_sub_cost(json.loads(line[len("MARVIN_COST:"):]))
+                    except Exception:
+                        pass
+            return proc.returncode or 0, (sout or b"").decode(errors="replace").strip(), stderr_text
         except asyncio.TimeoutError:
             if proc and proc.returncode is None:
                 proc.kill()
@@ -9298,7 +9325,10 @@ async def _run_non_interactive():
             print(result or "(no output)")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
         sys.exit(1)
+    # Emit cost data for parent to parse
+    print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
 
 
 async def main():

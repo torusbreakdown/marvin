@@ -115,8 +115,9 @@ class UsageTracker:
 _usage = UsageTracker()
 
 
-def _get_google_headers() -> dict:
-    """Build auth headers: use API key if set, otherwise gcloud access token."""
+def _get_google_headers() -> dict | None:
+    """Build auth headers: use API key if set, otherwise gcloud access token.
+    Returns None if neither is available (caller should fall back to OSM)."""
     if GOOGLE_API_KEY:
         return {
             "Content-Type": "application/json",
@@ -130,10 +131,7 @@ def _get_google_headers() -> dict:
             stderr=subprocess.DEVNULL,
         ).decode().strip()
     except Exception:
-        raise RuntimeError(
-            "No GOOGLE_PLACES_API_KEY set and gcloud auth failed. "
-            "Set the env var or run 'gcloud auth login'."
-        )
+        return None
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
@@ -2028,17 +2026,18 @@ async def places_text_search(params: TextSearchParams) -> str:
 
     headers = _get_google_headers()
 
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://places.googleapis.com/v1/places:searchText",
-                headers=headers,
-                content=json.dumps(body),
-            )
-            if resp.status_code == 200:
-                return _format_places(resp.json())
-    except Exception:
-        pass
+    if headers:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://places.googleapis.com/v1/places:searchText",
+                    headers=headers,
+                    content=json.dumps(body),
+                )
+                if resp.status_code == 200:
+                    return _format_places(resp.json())
+        except Exception:
+            pass
 
     # Fallback to OpenStreetMap Nominatim
     return await _nominatim_search(
@@ -2098,17 +2097,18 @@ async def places_nearby_search(params: NearbySearchParams) -> str:
 
     headers = _get_google_headers()
 
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                "https://places.googleapis.com/v1/places:searchNearby",
-                headers=headers,
-                content=json.dumps(body),
-            )
-            if resp.status_code == 200:
-                return _format_places(resp.json())
-    except Exception:
-        pass
+    if headers:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://places.googleapis.com/v1/places:searchNearby",
+                    headers=headers,
+                    content=json.dumps(body),
+                )
+                if resp.status_code == 200:
+                    return _format_places(resp.json())
+        except Exception:
+            pass
 
     # Fallback to OpenStreetMap Overpass
     return await _overpass_nearby(
@@ -3768,8 +3768,7 @@ async def main():
     args = [a for a in sys.argv[1:] if a not in ("--plain", "--curses")]
 
     if not GOOGLE_API_KEY and not shutil.which("gcloud"):
-        print("Error: Set GOOGLE_PLACES_API_KEY or authenticate with 'gcloud auth login'.")
-        sys.exit(1)
+        print("Note: No GOOGLE_PLACES_API_KEY set — places search will use OpenStreetMap.")
 
     _ensure_prefs_file()
     _profile_switch_requested = asyncio.Event()

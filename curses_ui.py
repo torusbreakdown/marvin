@@ -66,6 +66,7 @@ class CursesUI:
         self._saved_buf = ""   # saves current input when browsing history
         _init_colors()
         curses.curs_set(1)
+        curses.raw()  # disable flow control so Ctrl+Q works
         stdscr.keypad(True)
         stdscr.nodelay(True)  # non-blocking getch
 
@@ -243,7 +244,7 @@ class CursesUI:
             # Help text on last row
             self.stdscr.move(h - 1, 0)
             self.stdscr.clrtoeol()
-            help_text = " Enter: send | PgUp/PgDn: scroll | Ctrl+D: quit "
+            help_text = " Enter: send | PgUp/PgDn: scroll | Ctrl+Q: quit "
             self.stdscr.addstr(help_text[:w - 1], curses.color_pair(C_STATUS))
 
             # Position cursor
@@ -438,13 +439,13 @@ async def curses_main(stdscr, app_module):
         ui.add_message("system",
             f"Welcome back! Profile: {app_module._active_profile}\n"
             f"Recent history:\n{summary}\n\n"
-            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+D to quit."
+            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+Q to quit."
         )
     else:
         ui.add_message("system",
             f"Welcome to Local Finder!\n"
             f"Profile: {app_module._active_profile}\n"
-            f"Type your message below. PgUp/PgDn to scroll. Ctrl+D to quit."
+            f"Type your message below. PgUp/PgDn to scroll. Ctrl+Q to quit."
         )
     update_status()
     ui.render()
@@ -456,7 +457,7 @@ async def curses_main(stdscr, app_module):
 
             key = stdscr.getch()
 
-            if key == 4 or key == 27:  # Ctrl+D or ESC
+            if key == 4 or key == 17:  # Ctrl+D or Ctrl+Q
                 break
 
             if key != -1 and not busy:
@@ -526,7 +527,7 @@ async def curses_main(stdscr, app_module):
                 elif key == curses.KEY_NPAGE:
                     ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
                     ui.render()
-                elif key == 4 or key == 27:
+                elif key == 4 or key == 17:
                     break
 
             # Check if response just finished

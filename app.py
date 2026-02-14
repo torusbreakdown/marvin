@@ -3957,6 +3957,28 @@ if __name__ == "__main__":
     except _CursesRequested as req:
         import curses as _curses
         import curses_ui
+        import traceback as _tb
         def _run(stdscr):
-            asyncio.run(curses_ui.curses_main(stdscr, req.app_module))
-        _curses.wrapper(_run)
+            try:
+                asyncio.run(curses_ui.curses_main(stdscr, req.app_module))
+            except Exception:
+                # Curses swallows errors — save to file and re-raise
+                err = _tb.format_exc()
+                try:
+                    log = os.path.expanduser("~/.config/local-finder/crash.log")
+                    os.makedirs(os.path.dirname(log), exist_ok=True)
+                    with open(log, "w") as f:
+                        f.write(err)
+                except Exception:
+                    pass
+                raise
+        try:
+            _curses.wrapper(_run)
+        except Exception as e:
+            crash_log = os.path.expanduser("~/.config/local-finder/crash.log")
+            if os.path.exists(crash_log):
+                with open(crash_log) as f:
+                    print(f.read(), file=sys.stderr)
+            else:
+                print(f"Crashed: {e}", file=sys.stderr)
+                _tb.print_exc()

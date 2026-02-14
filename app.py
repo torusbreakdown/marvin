@@ -93,6 +93,9 @@ class UsageTracker:
         except Exception:
             pass
 
+    def summary_oneline(self) -> str:
+        return f"${self.session_cost:.3f} | {self.llm_turns} turns | {self.total_paid_calls} paid"
+
     def lifetime_summary(self) -> str:
         try:
             if not os.path.exists(self._log_path):
@@ -2615,6 +2618,10 @@ async def update_preferences(params: UpdatePreferencesParams) -> str:
 async def main():
     global _profile_switch_requested
 
+    # Check for --curses flag
+    use_curses = "--curses" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--curses"]
+
     if not GOOGLE_API_KEY and not shutil.which("gcloud"):
         print("Error: Set GOOGLE_PLACES_API_KEY or authenticate with 'gcloud auth login'.")
         sys.exit(1)
@@ -2622,8 +2629,17 @@ async def main():
     _ensure_prefs_file()
     _profile_switch_requested = asyncio.Event()
 
-    prompt = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    prompt = " ".join(args) if args else None
     interactive = prompt is None
+
+    if use_curses and interactive:
+        import curses as _curses
+        import curses_ui
+        import app as _self_module
+        def _run(stdscr):
+            asyncio.run(curses_ui.curses_main(stdscr, _self_module))
+        _curses.wrapper(_run)
+        return
 
     all_tools = [
         get_my_location, setup_google_auth,

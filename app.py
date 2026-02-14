@@ -3471,15 +3471,36 @@ rm -f '{script_path}'
 
 
 ###############################################################################
-# File tools — read lines & apply unified-diff patch
+# File tools — read lines & apply unified-diff patch (restricted to ~/Notes)
 ###############################################################################
+
+
+def _resolve_notes_path(raw: str) -> str | None:
+    """Resolve a path to be inside ~/Notes. Returns absolute path or None."""
+    p = raw.strip()
+    expanded = os.path.expanduser(p)
+    # If already absolute after expansion, check it's in Notes
+    if os.path.isabs(expanded):
+        real = os.path.realpath(expanded)
+        if real.startswith(os.path.realpath(_NOTES_DIR)):
+            return real
+        return None
+    # Relative — treat as relative to ~/Notes
+    rel = p
+    for prefix in ("~/Notes/", "Notes/"):
+        if rel.startswith(prefix):
+            rel = rel[len(prefix):]
+    rel = rel.lstrip("/")
+    if ".." in rel or not rel:
+        return None
+    return os.path.join(_NOTES_DIR, rel)
 
 
 class FileReadLinesParams(BaseModel):
     path: str = Field(
         description=(
-            "Absolute or ~-prefixed file path to read, e.g. '~/Notes/todo.md' "
-            "or '/home/user/project/main.py'."
+            "Path to a file inside ~/Notes to read, e.g. 'todo.md' or "
+            "'projects/readme.md'. Can also use ~/Notes/todo.md."
         )
     )
     start: int = Field(default=1, description="First line number to read (1-based, inclusive).")
@@ -3487,10 +3508,15 @@ class FileReadLinesParams(BaseModel):
 
 
 @define_tool(
-    description="Read lines from a file with line numbers. Use to inspect file contents before editing."
+    description=(
+        "Read lines from a file in ~/Notes with line numbers. "
+        "Use to inspect file contents before editing. Files are restricted to ~/Notes."
+    )
 )
 async def file_read_lines(params: FileReadLinesParams) -> str:
-    path = os.path.expanduser(params.path)
+    path = _resolve_notes_path(params.path)
+    if not path:
+        return f"Access denied: files must be inside ~/Notes. Got: {params.path}"
     if not os.path.isfile(path):
         return f"File not found: {params.path}"
     try:
@@ -3518,8 +3544,8 @@ async def file_read_lines(params: FileReadLinesParams) -> str:
 class FileApplyPatchParams(BaseModel):
     path: str = Field(
         description=(
-            "Absolute or ~-prefixed file path to patch, e.g. '~/Notes/todo.md'. "
-            "The file must already exist."
+            "Path to a file inside ~/Notes to patch, e.g. 'todo.md' or "
+            "'~/Notes/projects/readme.md'. The file must already exist."
         )
     )
     patch: str = Field(
@@ -3635,12 +3661,15 @@ def _apply_unified_diff(lines: list[str], patch_text: str) -> tuple[list[str], l
 
 @define_tool(
     description=(
-        "Apply a patch (unified diff or simple REPLACE/INSERT/DELETE commands) to a file. "
-        "Always use file_read_lines first to see the current content and line numbers."
+        "Apply a patch (unified diff or simple REPLACE/INSERT/DELETE commands) to a file in ~/Notes. "
+        "Always use file_read_lines first to see the current content and line numbers. "
+        "Files are restricted to ~/Notes."
     )
 )
 async def file_apply_patch(params: FileApplyPatchParams) -> str:
-    path = os.path.expanduser(params.path)
+    path = _resolve_notes_path(params.path)
+    if not path:
+        return f"Access denied: files must be inside ~/Notes. Got: {params.path}"
     if not os.path.isfile(path):
         return f"File not found: {params.path}"
     try:

@@ -2692,10 +2692,39 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                   f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
+    # ── Pipeline state for resume ────────────────────────────────────────
+    state_file = os.path.join(wd, ".marvin", "pipeline_state")
+    os.makedirs(os.path.join(wd, ".marvin"), exist_ok=True)
+
+    def _save_state(phase: str):
+        with open(state_file, "w") as f:
+            f.write(phase)
+
+    def _load_state() -> str:
+        try:
+            if os.path.isfile(state_file):
+                return open(state_file).read().strip()
+        except Exception:
+            pass
+        return ""
+
+    completed_phase = _load_state()
+    _phase_order = ["1a", "1b", "2", "3", "4"]
+    def _phase_done(phase: str) -> bool:
+        if not completed_phase:
+            return False
+        try:
+            return _phase_order.index(completed_phase) >= _phase_order.index(phase)
+        except ValueError:
+            return False
+
+    if completed_phase:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Resuming pipeline from after phase {completed_phase}"], timeout=5)
+        await _notify_pipeline(f"🔄 Resuming pipeline from after phase {completed_phase}")
+
     # ── Phase 1a: Spec & UX Design ──────────────────────────────────────
     if params.design_first:
         design_dir = os.path.join(wd, ".marvin")
-        os.makedirs(design_dir, exist_ok=True)
 
         instructions_ctx = ""
         safe_name = wd.strip("/").replace("/", "_")
@@ -2712,264 +2741,291 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     pass
                 break
 
-        # Phase 1a: Spec & UX
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1a: Spec & UX design (claude-opus-4.6)"], timeout=5)
-        await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
-        spec_prompt = (
-            "You are a senior product designer. Your job is to produce a detailed "
-            "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
-            "and do NOT describe architecture or file structure. Focus ONLY on:\n\n"
-            "1. **Product Spec** — what the product does, who it's for, core user stories, "
-            "acceptance criteria for each feature, constraints and non-functional requirements.\n"
-            "2. **UX Design Schema** — describe every screen/view, its components, layout, "
-            "interactions, states, transitions, and responsive breakpoints. Use a structured "
-            "format. Cover every user flow end-to-end: happy path, error states, empty states, "
-            "loading states.\n"
-            "3. **Style Guide** — colors, typography, spacing, component naming conventions, "
-            "accessibility requirements (ARIA, keyboard nav, contrast ratios).\n"
-            "4. **Information Architecture** — navigation structure, URL scheme, data "
-            "relationships from the user's perspective.\n\n"
-            f"TASK:\n{params.prompt}\n\n"
-        )
-        if instructions_ctx:
-            spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
-        spec_prompt += (
-            "Save the spec as .marvin/spec.md using create_file. "
-            "Be exhaustive — every screen, every interaction, every edge case. "
-            "The architecture pass will read this spec to design the technical solution."
-        )
-
-        rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
+        # Phase 1a: Spec & UX — skip if spec.md already exists and is substantial
         spec_path = os.path.join(design_dir, "spec.md")
-        if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
-            spec_size = os.path.getsize(spec_path)
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
-            await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
-        elif rc == 0 and sout:
-            with open(spec_path, "w") as f:
-                f.write(sout)
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
-            await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
+        if _phase_done("1a") or (os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000):
+            spec_size = os.path.getsize(spec_path) if os.path.isfile(spec_path) else 0
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md exists ({spec_size} bytes)"], timeout=5)
+            await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md exists ({spec_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5)
-            await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
-            return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1a: Spec & UX design (claude-opus-4.6)"], timeout=5)
+            await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
+            spec_prompt = (
+                "You are a senior product designer. Your job is to produce a detailed "
+                "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
+                "and do NOT describe architecture or file structure. Focus ONLY on:\n\n"
+                "1. **Product Spec** — what the product does, who it's for, core user stories, "
+                "acceptance criteria for each feature, constraints and non-functional requirements.\n"
+                "2. **UX Design Schema** — describe every screen/view, its components, layout, "
+                "interactions, states, transitions, and responsive breakpoints. Use a structured "
+                "format. Cover every user flow end-to-end: happy path, error states, empty states, "
+                "loading states.\n"
+                "3. **Style Guide** — colors, typography, spacing, component naming conventions, "
+                "accessibility requirements (ARIA, keyboard nav, contrast ratios).\n"
+                "4. **Information Architecture** — navigation structure, URL scheme, data "
+                "relationships from the user's perspective.\n\n"
+                f"TASK:\n{params.prompt}\n\n"
+            )
+            if instructions_ctx:
+                spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
+            spec_prompt += (
+                "Save the spec as .marvin/spec.md using create_file. "
+                "Be exhaustive — every screen, every interaction, every edge case. "
+                "The architecture pass will read this spec to design the technical solution."
+            )
 
-        # Phase 1b: Architecture & Test Plan (reads the spec)
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1b: Architecture & test plan (claude-opus-4.6)"], timeout=5)
-        await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
+            rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
+            if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
+                spec_size = os.path.getsize(spec_path)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
+            elif rc == 0 and sout:
+                with open(spec_path, "w") as f:
+                    f.write(sout)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
+                return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
+        _save_state("1a")
 
-        try:
-            spec_text = open(spec_path).read()
-        except Exception as e:
-            return f"Failed to read spec: {e}"
-
-        arch_prompt = (
-            "You are a senior software architect. A product spec and UX design has already "
-            "been created at .marvin/spec.md. Read it first with read_file, then produce "
-            "a detailed ARCHITECTURE and TEST PLAN. Do NOT write any code. Produce:\n\n"
-            "1. **Architecture** — file structure, modules, data flow, API endpoints "
-            "(with request/response shapes and status codes), database schema, error handling "
-            "strategy, technology choices with rationale. Every decision must trace back to "
-            "a requirement in the spec.\n"
-            "2. **Implementation Plan** — ordered list of every file to create, with a "
-            "1-2 sentence description of each file's responsibility, key functions/classes, "
-            "and which spec requirements it fulfills.\n"
-            "3. **Test Plan** — this is the MOST IMPORTANT section. For EVERY module, "
-            "endpoint, component, and user flow, list:\n"
-            "   - The test file path (e.g. tests/test_database.py)\n"
-            "   - Every individual test function name and exactly what it verifies\n"
-            "   - Cover ALL of: happy path, error cases, edge cases, boundary conditions, "
-            "invalid input, missing data, concurrent access, empty states\n"
-            "   - Include unit tests, integration tests, and API endpoint tests\n"
-            "   - Every public function MUST have at least one test\n"
-            "   - Every API route MUST have tests for success, validation error, and not-found\n"
-            "   - Every error handler MUST be tested\n"
-            "   - Aim for 100%% functional coverage\n"
-            "   - Group tests by module with clear descriptions\n\n"
-        )
-        if instructions_ctx:
-            arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
-        arch_prompt += (
-            "Save the architecture document as .marvin/design.md using create_file. "
-            "Be thorough and specific — this document and the spec together will be "
-            "the sole reference for the test-writing and implementation agents. "
-            "The test plan section is CRITICAL — it must be exhaustive enough that "
-            "agents can write a complete test suite with full coverage from it alone."
-        )
-
-        rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
+        # Phase 1b: Architecture & Test Plan — skip if design.md already exists
         design_path = os.path.join(design_dir, "design.md")
-        if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
-            design_size = os.path.getsize(design_path)
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
-            await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
-        elif rc == 0 and dout:
-            with open(design_path, "w") as f:
-                f.write(dout)
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
-            await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
+        if _phase_done("1b") or (os.path.isfile(design_path) and os.path.getsize(design_path) > 1000):
+            design_size = os.path.getsize(design_path) if os.path.isfile(design_path) else 0
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: SKIPPED — design.md exists ({design_size} bytes)"], timeout=5)
+            await _notify_pipeline(f"⏭️ Phase 1b skipped — design.md exists ({design_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5)
-            await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
-            return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1b: Architecture & test plan (claude-opus-4.6)"], timeout=5)
+            await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
+
+            try:
+                spec_text = open(spec_path).read()
+            except Exception as e:
+                return f"Failed to read spec: {e}"
+
+            arch_prompt = (
+                "You are a senior software architect. A product spec and UX design has already "
+                "been created at .marvin/spec.md. Read it first with read_file, then produce "
+                "a detailed ARCHITECTURE and TEST PLAN. Do NOT write any code. Produce:\n\n"
+                "1. **Architecture** — file structure, modules, data flow, API endpoints "
+                "(with request/response shapes and status codes), database schema, error handling "
+                "strategy, technology choices with rationale. Every decision must trace back to "
+                "a requirement in the spec.\n"
+                "2. **Implementation Plan** — ordered list of every file to create, with a "
+                "1-2 sentence description of each file's responsibility, key functions/classes, "
+                "and which spec requirements it fulfills.\n"
+                "3. **Test Plan** — this is the MOST IMPORTANT section. For EVERY module, "
+                "endpoint, component, and user flow, list:\n"
+                "   - The test file path (e.g. tests/test_database.py)\n"
+                "   - Every individual test function name and exactly what it verifies\n"
+                "   - Cover ALL of: happy path, error cases, edge cases, boundary conditions, "
+                "invalid input, missing data, concurrent access, empty states\n"
+                "   - Include unit tests, integration tests, and API endpoint tests\n"
+                "   - Every public function MUST have at least one test\n"
+                "   - Every API route MUST have tests for success, validation error, and not-found\n"
+                "   - Every error handler MUST be tested\n"
+                "   - Aim for 100%% functional coverage\n"
+                "   - Group tests by module with clear descriptions\n\n"
+            )
+            if instructions_ctx:
+                arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
+            arch_prompt += (
+                "Save the architecture document as .marvin/design.md using create_file. "
+                "Be thorough and specific — this document and the spec together will be "
+                "the sole reference for the test-writing and implementation agents. "
+                "The test plan section is CRITICAL — it must be exhaustive enough that "
+                "agents can write a complete test suite with full coverage from it alone."
+            )
+
+            rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
+            if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
+                design_size = os.path.getsize(design_path)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
+            elif rc == 0 and dout:
+                with open(design_path, "w") as f:
+                    f.write(dout)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
+                return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+        _save_state("1b")
 
     # ── Phase 2: Test-first pass (TDD, optional) ─────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")
     if params.tdd:
-        if not os.path.isfile(design_path):
+        if _phase_done("2"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 2 skipped — tests already written")
+        elif not os.path.isfile(design_path):
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: Writing failing tests (parallel agents)"], timeout=5)
+            await _notify_pipeline("🧪 Phase 2: Writing failing tests (parallel agents)")
 
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: Writing failing tests (parallel agents)"], timeout=5)
-        await _notify_pipeline("🧪 Phase 2: Writing failing tests (parallel agents)")
+            try:
+                design_doc = open(design_path).read()
+            except Exception as e:
+                return f"Failed to read design doc: {e}"
 
-        try:
-            design_doc = open(design_path).read()
-        except Exception as e:
-            return f"Failed to read design doc: {e}"
+            # Parse test plan from design doc — find "Test Plan" section
+            test_sections: list[str] = []
+            in_test_plan = False
+            current_section: list[str] = []
+            for line in design_doc.split("\n"):
+                if "test plan" in line.lower() and line.strip().startswith("#"):
+                    in_test_plan = True
+                    continue
+                if in_test_plan:
+                    if line.strip().startswith("#") and "test" not in line.lower():
+                        break
+                    current_section.append(line)
+                    if line.strip().startswith("##") or line.strip().startswith("###"):
+                        if len(current_section) > 3:
+                            test_sections.append("\n".join(current_section[:-1]))
+                            current_section = [line]
+            if current_section:
+                test_sections.append("\n".join(current_section))
+            if not test_sections:
+                test_sections = ["See Test Plan section in .marvin/design.md"]
 
-        # Parse test plan from design doc — find "Test Plan" section
-        test_sections: list[str] = []
-        in_test_plan = False
-        current_section: list[str] = []
-        for line in design_doc.split("\n"):
-            if "test plan" in line.lower() and line.strip().startswith("#"):
-                in_test_plan = True
-                continue
-            if in_test_plan:
-                if line.strip().startswith("#") and "test" not in line.lower():
-                    break
-                current_section.append(line)
-                if line.strip().startswith("##") or line.strip().startswith("###"):
-                    if len(current_section) > 3:
-                        test_sections.append("\n".join(current_section[:-1]))
-                        current_section = [line]
-        if current_section:
-            test_sections.append("\n".join(current_section))
-        if not test_sections:
-            test_sections = ["See Test Plan section in .marvin/design.md"]
+            # Batch into groups of ~3 sections per agent
+            batches: list[list[str]] = []
+            for i in range(0, len(test_sections), 3):
+                batches.append(test_sections[i:i+3])
 
-        # Batch into groups of ~3 sections per agent
-        batches: list[list[str]] = []
-        for i in range(0, len(test_sections), 3):
-            batches.append(test_sections[i:i+3])
+            # Launch test-writing agents in parallel — each with its own retry loop
+            test_tasks = []
+            for i, batch in enumerate(batches):
+                batch_text = "\n\n---\n\n".join(batch)
+                test_prompt = (
+                    "You are writing tests for a TDD workflow. Read BOTH the spec at "
+                    ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
+                    "write ONLY the test files described below.\n\n"
+                    "REQUIREMENTS:\n"
+                    "- Tests MUST fail (the implementation doesn't exist yet)\n"
+                    "- Write EVERY test listed in the Test Plan section — do not skip any\n"
+                    "- Each test function must have a clear docstring explaining what it verifies\n"
+                    "- Test EVERY public function, EVERY API route (success + error + edge cases), "
+                    "EVERY error handler, EVERY user flow described in the spec\n"
+                    "- Cover: happy path, validation errors, missing data, not-found, "
+                    "empty inputs, boundary values, concurrent access where relevant\n"
+                    "- Use pytest fixtures for shared setup (database, test client, etc)\n"
+                    "- Use pytest.mark.parametrize for testing multiple inputs\n"
+                    "- Mock external dependencies (subprocess calls, file I/O) appropriately\n"
+                    "- Do NOT write any implementation code — only tests\n"
+                    "- Do NOT try to run the tests — they are expected to fail\n\n"
+                    f"TEST SECTIONS TO WRITE:\n{batch_text}\n\n"
+                    "Commit the test files with a descriptive message like "
+                    "'Add failing tests for <module> (TDD red phase)'."
+                )
+                test_tasks.append(_run_sub_with_retry(
+                    test_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Test agent {i+1}"))
 
-        # Launch test-writing agents in parallel — each with its own retry loop
-        test_tasks = []
-        for i, batch in enumerate(batches):
-            batch_text = "\n\n---\n\n".join(batch)
-            test_prompt = (
-                "You are writing tests for a TDD workflow. Read BOTH the spec at "
-                ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
-                "write ONLY the test files described below.\n\n"
-                "REQUIREMENTS:\n"
-                "- Tests MUST fail (the implementation doesn't exist yet)\n"
-                "- Write EVERY test listed in the Test Plan section — do not skip any\n"
-                "- Each test function must have a clear docstring explaining what it verifies\n"
-                "- Test EVERY public function, EVERY API route (success + error + edge cases), "
-                "EVERY error handler, EVERY user flow described in the spec\n"
-                "- Cover: happy path, validation errors, missing data, not-found, "
-                "empty inputs, boundary values, concurrent access where relevant\n"
-                "- Use pytest fixtures for shared setup (database, test client, etc)\n"
-                "- Use pytest.mark.parametrize for testing multiple inputs\n"
-                "- Mock external dependencies (subprocess calls, file I/O) appropriately\n"
-                "- Do NOT write any implementation code — only tests\n"
-                "- Do NOT try to run the tests — they are expected to fail\n\n"
-                f"TEST SECTIONS TO WRITE:\n{batch_text}\n\n"
-                "Commit the test files with a descriptive message like "
-                "'Add failing tests for <module> (TDD red phase)'."
-            )
-            test_tasks.append(_run_sub_with_retry(
-                test_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Test agent {i+1}"))
+            test_results = await asyncio.gather(*test_tasks)
+            failures = []
+            for i, (rc, out, err) in enumerate(test_results):
+                if rc != 0:
+                    failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
+            if len(failures) == len(test_results):
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
+                return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
+            if failures:
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Test-first pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
 
-        test_results = await asyncio.gather(*test_tasks)
-        failures = []
-        for i, (rc, out, err) in enumerate(test_results):
-            if rc != 0:
-                failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
-        if len(failures) == len(test_results):
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
-            await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
-            return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
-        if failures:
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Test-first pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
-
-        _run_cmd(["tk", "add-note", params.ticket_id,
-                  f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
-        await _notify_pipeline(f"✅ Phase 2 complete — {len(test_results)} test agents, {len(failures)} failures")
+                      f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 2 complete — {len(test_results)} test agents, {len(failures)} failures")
+        _save_state("2")
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
-    _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
-    await _notify_pipeline(f"🔨 Phase 3: Implementation started ({tier}/{model_name})")
+    if _phase_done("3"):
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 3: SKIPPED — already completed"], timeout=5)
+        await _notify_pipeline("⏭️ Phase 3 skipped — implementation already done")
+        impl_out = "(resumed — implementation was already complete)"
+    else:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
+        await _notify_pipeline(f"🔨 Phase 3: Implementation started ({tier}/{model_name})")
 
-    impl_prompt = params.prompt
-    spec_path = os.path.join(wd, ".marvin", "spec.md")
-    if os.path.isfile(design_path):
-        impl_prompt = (
-            f"{params.prompt}\n\n"
-            "IMPORTANT: Read these documents with read_file BEFORE writing any code:\n"
-        )
-        if os.path.isfile(spec_path):
-            impl_prompt += "  - .marvin/spec.md (product spec & UX design)\n"
-        impl_prompt += (
-            "  - .marvin/design.md (architecture & implementation plan)\n\n"
-            "Follow the architecture, file structure, and UX design specified in those "
-            "documents exactly. Do not deviate unless you encounter a technical impossibility."
-        )
-    if params.tdd:
-        impl_prompt += (
-            "\n\nTDD MODE: Failing tests have already been written. "
-            "Read the test files to understand what's expected, then implement "
-            "the code to make them pass. After implementing, run the tests with "
-            "run_command to verify they pass."
-        )
+        impl_prompt = params.prompt
+        spec_path = os.path.join(wd, ".marvin", "spec.md")
+        if os.path.isfile(design_path):
+            impl_prompt = (
+                f"{params.prompt}\n\n"
+                "IMPORTANT: Read these documents with read_file BEFORE writing any code:\n"
+            )
+            if os.path.isfile(spec_path):
+                impl_prompt += "  - .marvin/spec.md (product spec & UX design)\n"
+            impl_prompt += (
+                "  - .marvin/design.md (architecture & implementation plan)\n\n"
+                "Follow the architecture, file structure, and UX design specified in those "
+                "documents exactly. Do not deviate unless you encounter a technical impossibility."
+            )
+        if params.tdd:
+            impl_prompt += (
+                "\n\nTDD MODE: Failing tests have already been written. "
+                "Read the test files to understand what's expected, then implement "
+                "the code to make them pass. After implementing, run the tests with "
+                "run_command to verify they pass."
+            )
 
-    rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
-    if rc != 0:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5)
-        await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
-        return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
+        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
+        if rc != 0:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5)
+            await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
+            return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
-    _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
-    await _notify_pipeline("✅ Phase 3 complete — implementation finished")
+        _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
+        await _notify_pipeline("✅ Phase 3 complete — implementation finished")
+    _save_state("3")
 
     # ── Phase 4: Debug loop (TDD green phase) ────────────────────────────
     if params.tdd:
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: Debug loop — running tests until green"], timeout=5)
-        await _notify_pipeline("🐛 Phase 4: Debug loop — running tests until green")
-
-        max_debug_rounds = 5
-        for debug_round in range(1, max_debug_rounds + 1):
-            debug_prompt = (
-                "You are in the TDD debug loop (round {round}/{max}). Your ONLY job:\n"
-                "1. Run ALL tests with run_command (e.g. 'pytest -v' or the project's test runner)\n"
-                "2. If all tests pass → respond with exactly 'ALL_TESTS_PASS' and commit\n"
-                "3. If tests fail → read the failure output carefully, fix the code "
-                "(NOT the tests unless a test has a genuine bug), and run tests again\n"
-                "4. Repeat until all tests pass or you've made 3 fix attempts this round\n\n"
-                "Read .marvin/design.md if you need to understand the intended behavior. "
-                "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
-                "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
-            ).format(round=debug_round, max=max_debug_rounds)
-
-            rc, dbg_out, dbg_err = await _run_sub_with_retry(
-                debug_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Debug round {debug_round}")
-
-            if "ALL_TESTS_PASS" in (dbg_out or ""):
-                _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5)
-                await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
-                break
-            if rc != 0:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5)
+        if _phase_done("4"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 4 skipped — debug loop already done")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
-            await _notify_pipeline(f"⚠️ Phase 4: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: Debug loop — running tests until green"], timeout=5)
+            await _notify_pipeline("🐛 Phase 4: Debug loop — running tests until green")
+
+            max_debug_rounds = 5
+            for debug_round in range(1, max_debug_rounds + 1):
+                debug_prompt = (
+                    "You are in the TDD debug loop (round {round}/{max}). Your ONLY job:\n"
+                    "1. Run ALL tests with run_command (e.g. 'pytest -v' or the project's test runner)\n"
+                    "2. If all tests pass → respond with exactly 'ALL_TESTS_PASS' and commit\n"
+                    "3. If tests fail → read the failure output carefully, fix the code "
+                    "(NOT the tests unless a test has a genuine bug), and run tests again\n"
+                    "4. Repeat until all tests pass or you've made 3 fix attempts this round\n\n"
+                    "Read .marvin/design.md if you need to understand the intended behavior. "
+                    "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
+                    "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
+                ).format(round=debug_round, max=max_debug_rounds)
+
+                rc, dbg_out, dbg_err = await _run_sub_with_retry(
+                    debug_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Debug round {debug_round}")
+
+                if "ALL_TESTS_PASS" in (dbg_out or ""):
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5)
+                    await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
+                    break
+                if rc != 0:
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5)
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
+                await _notify_pipeline(f"⚠️ Phase 4: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
+        _save_state("4")
 
     # ── Done ─────────────────────────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5)
@@ -9347,7 +9403,6 @@ async def _run_non_interactive():
             if "codex" not in sdk_model:
                 session_opts["reasoning_effort"] = "high" if _coding_mode else "low"
             session = await client.create_session(session_opts)
-            })
             session.on(_on_event)
             await session.send({"prompt": prompt_text})
             await done.wait()

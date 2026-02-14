@@ -1072,6 +1072,55 @@ async def web_search(params: WebSearchParams) -> str:
     return "\n\n".join(lines)
 
 
+# ── Tool: News search (DuckDuckGo News) ────────────────────────────────────
+
+class SearchNewsParams(BaseModel):
+    query: str = Field(description="News search query, e.g. 'AI regulation' or 'SpaceX launch'")
+    max_results: int = Field(default=5, description="Max results (1-10)")
+    time_filter: str = Field(
+        default="",
+        description="Time filter: 'd' = past day, 'w' = past week, 'm' = past month. Empty = any time.",
+    )
+
+
+@define_tool(
+    description=(
+        "Search for recent news articles using DuckDuckGo News. Free, no API key. "
+        "Use this when the user asks about current events, headlines, breaking news, "
+        "or 'what's happening with X'. Returns headlines, source, date, and summary."
+    )
+)
+async def search_news(params: SearchNewsParams) -> str:
+    from ddgs import DDGS
+
+    try:
+        results = DDGS().news(
+            params.query,
+            max_results=min(params.max_results, 10),
+            timelimit=params.time_filter or None,
+        )
+    except Exception as e:
+        return f"News search failed: {e}"
+
+    if not results:
+        return f"No news found for '{params.query}'."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "No title")
+        url = r.get("url", "")
+        source = r.get("source", "")
+        date = r.get("date", "")
+        body = r.get("body", "")
+        lines.append(
+            f"{i}. {title}\n"
+            f"   📰 {source} — {date}\n"
+            f"   {url}\n"
+            f"   {body}"
+        )
+    return "\n\n".join(lines)
+
+
 # ── Tool: Academic paper search ─────────────────────────────────────────────
 
 class SearchPapersParams(BaseModel):
@@ -3739,7 +3788,7 @@ async def main():
         get_my_location, setup_google_auth,
         places_text_search, places_nearby_search,
         estimate_travel_time, estimate_traffic_adjusted_time,
-        web_search, get_usage,
+        web_search, search_news, get_usage,
         search_papers, search_arxiv,
         search_movies, get_movie_details,
         search_games, get_game_details,

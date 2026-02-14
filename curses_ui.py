@@ -404,7 +404,7 @@ async def curses_main(stdscr, app_module):
         app_module.get_my_location, app_module.setup_google_auth,
         app_module.places_text_search, app_module.places_nearby_search,
         app_module.estimate_travel_time, app_module.estimate_traffic_adjusted_time,
-        app_module.web_search, app_module.get_usage,
+        app_module.web_search, app_module.search_news, app_module.get_usage,
         app_module.search_papers, app_module.search_arxiv,
         app_module.search_movies, app_module.get_movie_details,
         app_module.search_games, app_module.get_game_details,

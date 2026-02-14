@@ -1815,48 +1815,85 @@ def _lock_path(directory: str) -> str:
 
 
 def _acquire_lock(directory: str, tool_name: str) -> str | None:
-    """Acquire a directory lock. Returns None on success, error string on failure."""
+    """Acquire a directory lock atomically. Returns None on success, error string on failure."""
     lp = _lock_path(directory)
+    my_pid = os.getpid()
+
+    # Check for existing lock
     if os.path.exists(lp):
         try:
             with open(lp) as f:
                 lock_info = json.loads(f.read())
             lock_time = lock_info.get("time", 0)
-            if _time.time() - lock_time < _LOCK_EXPIRE_SECONDS:
-                pid = lock_info.get("pid", "?")
+            lock_pid = lock_info.get("pid", -1)
+
+            # Same process re-entrancy: allow nested locks from same PID
+            if lock_pid == my_pid:
+                return None
+
+            # Check if lock holder process is still alive
+            stale = False
+            if isinstance(lock_pid, int) and lock_pid > 0:
+                try:
+                    os.kill(lock_pid, 0)  # signal 0 = check existence
+                except ProcessLookupError:
+                    stale = True  # process is dead
+                except PermissionError:
+                    pass  # process exists but we can't signal it
+
+            if not stale and _time.time() - lock_time < _LOCK_EXPIRE_SECONDS:
                 owner = lock_info.get("tool", "?")
+                user = lock_info.get("user", "?")
                 age = int(_time.time() - lock_time)
                 return (
-                    f"🔒 Directory locked by '{owner}' (PID {pid}, {age}s ago). "
+                    f"🔒 Directory locked by '{owner}' (PID {lock_pid}, user {user}, {age}s ago). "
                     f"Cannot proceed — another operation is in progress."
                 )
-            # Stale lock, remove it
+            # Stale lock (expired or dead process), safe to overwrite
         except (json.JSONDecodeError, OSError):
             pass  # corrupted lock, overwrite
 
+    # Atomic lock creation using O_CREAT|O_EXCL via tempfile + rename
     lock_data = {
-        "pid": os.getpid(),
+        "pid": my_pid,
         "user": os.environ.get("USER", "unknown"),
         "time": _time.time(),
         "tool": tool_name,
+        "dir": directory,
     }
+    tmp_path = lp + f".{my_pid}.tmp"
     try:
-        with open(lp, "w") as f:
-            f.write(json.dumps(lock_data))
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        try:
+            os.write(fd, json.dumps(lock_data).encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, lp)  # atomic on POSIX
+    except FileExistsError:
+        # Another process beat us to it
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return "🔒 Lock contention — another process is acquiring the lock. Retry shortly."
     except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return f"Failed to acquire lock: {e}"
     return None
 
 
 def _release_lock(directory: str):
-    """Release a directory lock."""
+    """Release a directory lock (only if we own it)."""
     lp = _lock_path(directory)
     try:
         if os.path.exists(lp):
             with open(lp) as f:
                 lock_info = json.loads(f.read())
             if lock_info.get("pid") == os.getpid():
-                os.remove(lp)
+                os.unlink(lp)
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -1944,6 +1981,7 @@ class RunCommandParams(BaseModel):
 
 
 class LaunchAgentParams(BaseModel):
+    ticket_id: str = Field(description="Ticket ID (from tk) for the task being dispatched. Required — create a ticket first with create_ticket.")
     prompt: str = Field(description="The task/prompt for the sub-agent to execute")
     model: str = Field(
         default="auto",
@@ -2372,6 +2410,8 @@ def _auto_select_model(prompt: str) -> str:
 @define_tool(
     description=(
         "Launch a sub-agent to execute a specific task in non-interactive mode. "
+        "REQUIRES a valid ticket ID from the tk ticket system — create one with "
+        "create_ticket first, with dependencies on any prerequisite tickets. "
         "The sub-agent runs as a separate process with its own context. "
         "Recursion depth is limited to 1 (sub-agents cannot launch further sub-agents). "
         "Model is auto-selected based on task complexity, or specify manually: "
@@ -2379,6 +2419,25 @@ def _auto_select_model(prompt: str) -> str:
     )
 )
 async def launch_agent(params: LaunchAgentParams) -> str:
+    # Validate ticket exists and is not blocked
+    if not shutil.which("tk"):
+        return "Error: 'tk' CLI is not installed. Cannot validate ticket."
+
+    ok, ticket_info = _run_cmd(["tk", "show", params.ticket_id], timeout=5)
+    if not ok:
+        return f"🚫 Invalid ticket ID '{params.ticket_id}'. Create a ticket with create_ticket first."
+
+    # Check if ticket is blocked by unresolved dependencies
+    ok_blocked, blocked_out = _run_cmd(["tk", "blocked"], timeout=5)
+    if ok_blocked and params.ticket_id in blocked_out:
+        return (
+            f"🚫 Ticket {params.ticket_id} is blocked by unresolved dependencies. "
+            f"Resolve dependencies first.\n{blocked_out}"
+        )
+
+    # Mark ticket as in_progress
+    _run_cmd(["tk", "start", params.ticket_id], timeout=5)
+
     # Check recursion depth
     depth = int(os.environ.get("MARVIN_DEPTH", "0"))
     if depth >= 1:
@@ -2401,6 +2460,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     agent_env = os.environ.copy()
     agent_env["MARVIN_DEPTH"] = str(depth + 1)
     agent_env["MARVIN_MODEL"] = model_name
+    agent_env["MARVIN_TICKET"] = params.ticket_id
 
     import sys
     app_path = os.path.abspath(sys.argv[0])
@@ -2415,16 +2475,26 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
         except asyncio.TimeoutError:
             proc.kill()
-            return f"Sub-agent timed out after 300s"
+            # Add failure note to ticket
+            _run_cmd(["tk", "add-note", params.ticket_id, "Sub-agent timed out after 300s"], timeout=5)
+            return f"Sub-agent timed out after 300s (ticket {params.ticket_id})"
     except Exception as e:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Sub-agent launch failed: {e}"], timeout=5)
         return f"Failed to launch sub-agent: {e}"
 
     out = stdout.decode(errors="replace").strip()
     err = stderr.decode(errors="replace").strip()
-    if proc.returncode != 0:
-        return f"Sub-agent failed (exit {proc.returncode}):\n{err or out}"
 
-    return f"[{tier} / {model_name}] Sub-agent result:\n\n{out}"
+    if proc.returncode != 0:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Sub-agent failed (exit {proc.returncode})"], timeout=5)
+        return f"Sub-agent failed (exit {proc.returncode}, ticket {params.ticket_id}):\n{err or out}"
+
+    # Success — close ticket and add result note
+    result_summary = out[:500] if len(out) > 500 else out
+    _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5)
+    _run_cmd(["tk", "close", params.ticket_id], timeout=5)
+
+    return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅\n\n{out}"
 
 
 # ── Tool: Steam store & API ──────────────────────────────────────────────────
@@ -5136,8 +5206,11 @@ def _build_system_message() -> str:
             "6. Use read_file and code_grep to understand code BEFORE editing it.\n"
             "7. Use tree to understand project structure before making changes.\n"
             "8. Use git_status and git_diff to review changes before committing.\n"
-            "9. You can dispatch sub-tasks to launch_agent for parallel work or "
-            "simpler tasks that don't need your full context.\n"
+            "9. BEFORE using launch_agent, you MUST create a ticket with create_ticket "
+            "for the sub-task. If the sub-task depends on other work, add dependencies "
+            "with the ticket system. launch_agent requires a valid ticket_id — it will "
+            "refuse to run without one. The ticket tracks progress: it's set to "
+            "in_progress when the agent starts, and closed on success.\n"
             "10. NEVER delete files or directories unless explicitly asked.\n"
         )
         if _coding_working_dir:

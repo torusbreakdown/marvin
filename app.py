@@ -2500,6 +2500,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
         cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=wd, env=sub_env,
@@ -2508,11 +2509,39 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
             return proc.returncode or 0, (sout or b"").decode(errors="replace").strip(), (serr or b"").decode(errors="replace").strip()
         except asyncio.TimeoutError:
-            if proc.returncode is None:
+            if proc and proc.returncode is None:
                 proc.kill()
             return -1, "", f"{label or 'Sub-agent'} timed out after {timeout_s}s"
         except Exception as e:
             return -1, "", f"{label or 'Sub-agent'} failed: {e}"
+
+    # Hard errors are non-retryable; timeouts and crashes retry with escalating timeouts.
+    _HARD_ERRORS = ("ModuleNotFoundError", "ImportError", "model capability",
+                    "not installed", "No such file", "Permission denied")
+    _MAX_RETRIES = 3
+
+    async def _run_sub_with_retry(
+        prompt: str, model: str, base_timeout: int = 600, label: str = "",
+    ) -> tuple[int, str, str]:
+        """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time."""
+        rc, out, err = -1, "", ""
+        for attempt in range(1, _MAX_RETRIES + 1):
+            timeout_s = base_timeout * attempt
+            rc, out, err = await _run_sub(prompt, model, timeout_s=timeout_s, label=label)
+            if rc == 0 and out:
+                return rc, out, err
+            combined = f"{out} {err}"
+            if any(m in combined for m in _HARD_ERRORS):
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"{label}: hard error (attempt {attempt}) — {(err or out)[:200]}"], timeout=5)
+                return rc, out, err  # non-retryable
+            if attempt < _MAX_RETRIES:
+                next_timeout = base_timeout * (attempt + 1)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"{label}: attempt {attempt}/{_MAX_RETRIES} failed (exit {rc}) — retrying ({next_timeout}s timeout)"], timeout=5)
+        _run_cmd(["tk", "add-note", params.ticket_id,
+                  f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
+        return rc, out, err
 
     # ── Phase 1: Design pass (optional) ──────────────────────────────────
     if params.design_first:
@@ -2521,7 +2550,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         os.makedirs(design_dir, exist_ok=True)
 
         instructions_ctx = ""
-        # Check external instructions first, then in-workspace
         safe_name = wd.strip("/").replace("/", "_")
         instructions_paths = [
             os.path.join(os.path.expanduser("~"), ".marvin", "instructions", f"{safe_name}.md"),
@@ -2559,10 +2587,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "this document will be the sole reference for the test and implementation agents."
         )
 
-        rc, dout, derr = await _run_sub(design_prompt, "claude-opus-4.6", timeout_s=600, label="Design pass")
+        rc, dout, derr = await _run_sub_with_retry(design_prompt, "claude-opus-4.6", base_timeout=600, label="Design pass")
         if rc != 0 or not dout:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Design pass failed (exit {rc})"], timeout=5)
-            return f"Design pass failed (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: design pass failed (exit {rc})"], timeout=5)
+            return f"🚫 Design pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
 
         design_path = os.path.join(design_dir, "design.md")
         with open(design_path, "w") as f:
@@ -2583,7 +2611,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             return f"Failed to read design doc: {e}"
 
         # Parse test plan from design doc — find "Test Plan" section
-        # Split into chunks of ~3 test files each for parallel agents
         test_sections: list[str] = []
         in_test_plan = False
         current_section: list[str] = []
@@ -2595,24 +2622,21 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 if line.strip().startswith("#") and "test" not in line.lower():
                     break
                 current_section.append(line)
-                # Split on sub-headers (each test file/module)
                 if line.strip().startswith("##") or line.strip().startswith("###"):
                     if len(current_section) > 3:
                         test_sections.append("\n".join(current_section[:-1]))
                         current_section = [line]
         if current_section:
             test_sections.append("\n".join(current_section))
-
-        # If we couldn't parse sections, send the whole test plan as one chunk
         if not test_sections:
-            test_sections = [f"See Test Plan section in .marvin/design.md"]
+            test_sections = ["See Test Plan section in .marvin/design.md"]
 
         # Batch into groups of ~3 sections per agent
         batches: list[list[str]] = []
         for i in range(0, len(test_sections), 3):
             batches.append(test_sections[i:i+3])
 
-        # Launch test-writing agents in parallel
+        # Launch test-writing agents in parallel — each with its own retry loop
         test_tasks = []
         for i, batch in enumerate(batches):
             batch_text = "\n\n---\n\n".join(batch)
@@ -2632,18 +2656,24 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "Commit the test files with a descriptive message like "
                 "'Add failing tests for <module> (TDD red phase)'."
             )
-            test_tasks.append(_run_sub(test_prompt, "gpt-5.3-codex", timeout_s=300, label=f"Test agent {i+1}"))
+            test_tasks.append(_run_sub_with_retry(
+                test_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Test agent {i+1}"))
 
         test_results = await asyncio.gather(*test_tasks)
         failures = []
         for i, (rc, out, err) in enumerate(test_results):
             if rc != 0:
                 failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
+        if len(failures) == len(test_results):
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
+            return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
         if failures:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Test-first pass: {len(failures)}/{len(test_results)} agents failed"], timeout=5)
-            # Continue anyway — partial tests are better than none
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Test-first pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
 
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+        _run_cmd(["tk", "add-note", params.ticket_id,
+                  f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
@@ -2665,10 +2695,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "run_command to verify they pass."
         )
 
-    rc, impl_out, impl_err = await _run_sub(impl_prompt, model_name, timeout_s=600, label="Implementation")
+    rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
     if rc != 0:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Implementation failed (exit {rc})"], timeout=5)
-        return f"Implementation failed (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5)
+        return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
     _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
 
@@ -2690,13 +2720,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
             ).format(round=debug_round, max=max_debug_rounds)
 
-            rc, dbg_out, dbg_err = await _run_sub(debug_prompt, "gpt-5.3-codex", timeout_s=300, label=f"Debug round {debug_round}")
+            rc, dbg_out, dbg_err = await _run_sub_with_retry(
+                debug_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Debug round {debug_round}")
 
             if "ALL_TESTS_PASS" in (dbg_out or ""):
                 _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5)
                 break
             if rc != 0:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} agent failed (exit {rc})"], timeout=5)
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5)
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
 

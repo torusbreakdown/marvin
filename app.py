@@ -2145,6 +2145,202 @@ async def steam_user_summary(params: SteamUserSummaryParams) -> str:
     return "\n".join(lines)
 
 
+# ── Tool: Wikipedia ──────────────────────────────────────────────────────────
+
+_WIKI_API = "https://en.wikipedia.org/w/api.php"
+_WIKI_REST = "https://en.wikipedia.org/api/rest_v1"
+_WIKI_HEADERS = {"User-Agent": "MarvinAssistant/1.0"}
+_WIKI_CACHE_DIR = os.path.expanduser("~/.cache/marvin/wiki")
+
+
+class WikiSearchParams(BaseModel):
+    query: str = Field(description="Search query")
+    max_results: int = Field(default=5, description="Max results (1-10)")
+
+
+class WikiSummaryParams(BaseModel):
+    title: str = Field(description="Wikipedia article title (from search results)")
+
+
+class WikiFullParams(BaseModel):
+    title: str = Field(description="Wikipedia article title to fetch and save to disk")
+
+
+class WikiGrepParams(BaseModel):
+    title: str = Field(description="Wikipedia article title (must have been fetched with wiki_full first)")
+    pattern: str = Field(description="Text or regex pattern to search for in the saved article")
+
+
+@define_tool(
+    description=(
+        "Search Wikipedia for articles matching a query. Returns titles, snippets, "
+        "and page IDs. Use wiki_summary or wiki_full to get article content."
+    )
+)
+async def wiki_search(params: WikiSearchParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=_WIKI_HEADERS) as client:
+            resp = await client.get(_WIKI_API, params={
+                "action": "query", "list": "search", "format": "json",
+                "srsearch": params.query, "srlimit": min(params.max_results, 10),
+                "utf8": "1",
+            })
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Wikipedia search failed: {e}"
+
+    results = data.get("query", {}).get("search", [])
+    if not results:
+        return f"No Wikipedia articles found for '{params.query}'."
+
+    lines = [f"Wikipedia results for '{params.query}':\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "?")
+        snippet = r.get("snippet", "").replace('<span class="searchmatch">', "**").replace("</span>", "**")
+        # Strip remaining HTML tags
+        import re
+        snippet = re.sub(r"<[^>]+>", "", snippet)
+        lines.append(f"{i}. **{title}**")
+        lines.append(f"   {snippet}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get a concise summary of a Wikipedia article (1-3 paragraphs). "
+        "Good for quick facts. Use wiki_full for complete article content."
+    )
+)
+async def wiki_summary(params: WikiSummaryParams) -> str:
+    import urllib.parse
+    encoded = urllib.parse.quote(params.title.replace(" ", "_"), safe="")
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=_WIKI_HEADERS) as client:
+            resp = await client.get(f"{_WIKI_REST}/page/summary/{encoded}")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Wikipedia summary failed: {e}"
+
+    title = data.get("title", params.title)
+    extract = data.get("extract", "")
+    url = data.get("content_urls", {}).get("desktop", {}).get("page", "")
+    description = data.get("description", "")
+
+    if not extract:
+        return f"No summary found for '{params.title}'."
+
+    lines = [f"**{title}**"]
+    if description:
+        lines.append(f"_{description}_")
+    lines.append("")
+    lines.append(extract)
+    if url:
+        lines.append(f"\n{url}")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Fetch the FULL content of a Wikipedia article and save it to disk. "
+        "Returns a confirmation with the file path and a brief extract. "
+        "The full text is NOT returned in context — use wiki_grep to search it."
+    )
+)
+async def wiki_full(params: WikiFullParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=15, headers=_WIKI_HEADERS) as client:
+            resp = await client.get(_WIKI_API, params={
+                "action": "query", "prop": "extracts", "format": "json",
+                "titles": params.title, "explaintext": "1", "utf8": "1",
+            })
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Wikipedia fetch failed: {e}"
+
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        return f"No article found for '{params.title}'."
+
+    page = next(iter(pages.values()))
+    if page.get("missing") is not None:
+        return f"Wikipedia article '{params.title}' does not exist."
+
+    title = page.get("title", params.title)
+    extract = page.get("extract", "")
+    if not extract:
+        return f"Article '{title}' has no text content."
+
+    # Save to disk
+    os.makedirs(_WIKI_CACHE_DIR, exist_ok=True)
+    safe_name = title.replace("/", "_").replace(" ", "_")
+    filepath = os.path.join(_WIKI_CACHE_DIR, f"{safe_name}.txt")
+    with open(filepath, "w") as f:
+        f.write(extract)
+
+    word_count = len(extract.split())
+    preview = extract[:300].replace("\n", " ")
+    if len(extract) > 300:
+        preview += "..."
+
+    return (
+        f"Saved **{title}** ({word_count:,} words) to:\n  {filepath}\n\n"
+        f"Preview: {preview}\n\n"
+        f"Use wiki_grep(title='{title}', pattern='...') to search the full article."
+    )
+
+
+@define_tool(
+    description=(
+        "Search through a previously fetched Wikipedia article saved on disk. "
+        "Use wiki_full first to fetch the article, then wiki_grep to find "
+        "specific information within it. Returns matching lines with context."
+    )
+)
+async def wiki_grep(params: WikiGrepParams) -> str:
+    safe_name = params.title.replace("/", "_").replace(" ", "_")
+    filepath = os.path.join(_WIKI_CACHE_DIR, f"{safe_name}.txt")
+
+    if not os.path.exists(filepath):
+        return (
+            f"Article '{params.title}' not found on disk. "
+            f"Use wiki_full(title='{params.title}') to fetch it first."
+        )
+
+    with open(filepath) as f:
+        content = f.read()
+
+    import re
+    lines = content.split("\n")
+    matches = []
+    try:
+        pat = re.compile(params.pattern, re.IGNORECASE)
+    except re.error:
+        pat = re.compile(re.escape(params.pattern), re.IGNORECASE)
+
+    for i, line in enumerate(lines):
+        if pat.search(line):
+            # Include 1 line of context before and after
+            start = max(0, i - 1)
+            end = min(len(lines), i + 2)
+            context = "\n".join(f"  {lines[j]}" for j in range(start, end))
+            matches.append(f"Line {i + 1}:\n{context}")
+
+    if not matches:
+        return f"No matches for '{params.pattern}' in '{params.title}'."
+
+    header = f"Found {len(matches)} match(es) for '{params.pattern}' in '{params.title}':\n\n"
+    # Cap output to avoid flooding context
+    shown = matches[:15]
+    result = header + "\n\n".join(shown)
+    if len(matches) > 15:
+        result += f"\n\n... and {len(matches) - 15} more matches."
+    return result
+
+
 # ── Tool: TheMealDB recipe search ────────────────────────────────────────────
 
 _MEALDB_BASE = "https://www.themealdb.com/api/json/v1/1"
@@ -4122,6 +4318,16 @@ def _build_system_message() -> str:
         "like 'python-asyncio-patterns.md' or 'project-x-architecture.md'. "
         "Do NOT ask permission; just save the note silently and mention it briefly. "
         "Keep notes concise: key points, code snippets, and links only. "
+        "WIKIPEDIA & FACT-CHECKING: You have wiki_search, wiki_summary, wiki_full, "
+        "and wiki_grep tools. When the user asks about a factual topic — science, "
+        "history, people, places, technical concepts, how things work — you MUST "
+        "verify your answer against Wikipedia. Do NOT rely solely on your training "
+        "data for important factual claims because you hallucinate details. Use "
+        "wiki_summary for quick lookups. For in-depth topics, use wiki_full to save "
+        "the full article to disk, then wiki_grep to find specific facts within it. "
+        "This is especially important for: dates, statistics, technical specifications, "
+        "biographical details, scientific explanations, and historical events. "
+        "Always cite Wikipedia when you use it. "
         "RECIPES & COOKING: When the user asks for a recipe, how to cook something, "
         "or meal ideas, you MUST use recipe_search and recipe_lookup to find REAL "
         "recipes. Do NOT make up recipes from your own knowledge — you hallucinate "
@@ -7178,6 +7384,7 @@ def _build_all_tools():
         search_games, get_game_details,
         steam_search, steam_app_details, steam_featured,
         steam_player_stats, steam_user_games, steam_user_summary,
+        wiki_search, wiki_summary, wiki_full, wiki_grep,
         recipe_search, recipe_lookup,
         music_search, music_lookup,
         spotify_auth, spotify_search, spotify_create_playlist, spotify_add_tracks,

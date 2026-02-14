@@ -8191,7 +8191,7 @@ def _check_stt_deps() -> bool:
     try:
         import sounddevice  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, OSError):
         return False
 
 
@@ -8411,10 +8411,11 @@ class SessionManager:
         self._done.clear()
         self._chunks.clear()
         await session.send({"prompt": user_prompt})
+        timeout = 900 if _coding_mode else self._SESSION_TIMEOUT
         try:
-            await asyncio.wait_for(self._done.wait(), timeout=self._SESSION_TIMEOUT)
+            await asyncio.wait_for(self._done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            msg = f"\n⚠️  Response timed out after {self._SESSION_TIMEOUT}s. Try again."
+            msg = f"\n⚠️  Response timed out after {timeout}s. Try again."
             if self._on_message:
                 self._on_message(msg)
             else:

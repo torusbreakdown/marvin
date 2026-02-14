@@ -2360,6 +2360,8 @@ async def git_checkout(params: GitCheckoutParams) -> str:
 
 # Global reference for the user-prompt callback (set by curses UI or CLI)
 _command_prompt_callback = None
+# Auto-approve all commands (set in non-interactive/sub-agent mode)
+_auto_approve_commands = False
 
 
 @define_tool(
@@ -2373,8 +2375,10 @@ async def run_command(params: RunCommandParams) -> str:
     if not _coding_working_dir:
         return "No working directory set. Use set_working_dir first."
 
-    # Always show command and prompt for confirmation
-    if _command_prompt_callback:
+    # Sub-agents auto-approve; interactive mode prompts user
+    if _auto_approve_commands:
+        pass  # skip confirmation
+    elif _command_prompt_callback:
         confirmed = await _command_prompt_callback(params.command)
         if not confirmed:
             return "Command cancelled by user."
@@ -2492,6 +2496,24 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     import sys as _sys
     app_path = os.path.abspath(_sys.argv[0])
 
+    async def _notify_pipeline(msg: str, title: str = "Marvin Pipeline"):
+        """Send a ntfy notification for pipeline status updates."""
+        subs = _load_ntfy_subs()
+        if not subs:
+            return
+        topic = next(iter(subs))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "curl", "-s", "-d", msg,
+                "-H", f"Title: {title}",
+                "-H", "Tags: robot",
+                f"{_NTFY_BASE}/{topic}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except Exception:
+            pass
+
     async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "") -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
@@ -2565,6 +2587,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # Phase 1a: Spec & UX
         _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1a: Spec & UX design (claude-opus-4.6)"], timeout=5)
+        await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
         spec_prompt = (
             "You are a senior product designer. Your job is to produce a detailed "
             "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
@@ -2601,10 +2624,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                       f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5)
+            await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
             return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
 
         # Phase 1b: Architecture & Test Plan (reads the spec)
         _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1b: Architecture & test plan (claude-opus-4.6)"], timeout=5)
+        await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
 
         try:
             spec_text = open(spec_path).read()
@@ -2657,6 +2682,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                       f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5)
+            await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
             return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
 
     # ── Phase 2: Test-first pass (TDD, optional) ─────────────────────────
@@ -2666,6 +2692,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
 
         _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: Writing failing tests (parallel agents)"], timeout=5)
+        await _notify_pipeline("🧪 Phase 2: Writing failing tests (parallel agents)")
 
         try:
             design_doc = open(design_path).read()
@@ -2734,6 +2761,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         if len(failures) == len(test_results):
             _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
+            await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
             return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
         if failures:
             _run_cmd(["tk", "add-note", params.ticket_id,
@@ -2744,6 +2772,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
+    await _notify_pipeline(f"🔨 Phase 3: Implementation started ({tier}/{model_name})")
 
     impl_prompt = params.prompt
     spec_path = os.path.join(wd, ".marvin", "spec.md")
@@ -2770,6 +2799,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
     if rc != 0:
         _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5)
+        await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
         return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
     _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
@@ -2777,6 +2807,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 4: Debug loop (TDD green phase) ────────────────────────────
     if params.tdd:
         _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: Debug loop — running tests until green"], timeout=5)
+        await _notify_pipeline("🐛 Phase 4: Debug loop — running tests until green")
 
         max_debug_rounds = 5
         for debug_round in range(1, max_debug_rounds + 1):
@@ -2814,6 +2845,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         phases.insert(-1, "Test-first")
         phases.append("Debug loop")
 
+    await _notify_pipeline(f"✅ Pipeline complete ({' → '.join(phases)})\nTicket: {params.ticket_id}")
     return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
 
 
@@ -9073,7 +9105,9 @@ class _CursesRequested(Exception):
 
 async def _run_non_interactive():
     """Run a single prompt non-interactively (for sub-agent dispatch)."""
-    global _coding_mode, _coding_working_dir
+    global _coding_mode, _coding_working_dir, _auto_approve_commands
+
+    _auto_approve_commands = True  # sub-agents don't prompt for shell commands
 
     # Parse args
     prompt_text = None

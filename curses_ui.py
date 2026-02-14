@@ -397,6 +397,9 @@ async def curses_main(stdscr, app_module):
     if app_module._profile_switch_requested is None:
         app_module._profile_switch_requested = asyncio.Event()
     _profile_switch_requested = app_module._profile_switch_requested
+    if app_module._compact_session_requested is None:
+        app_module._compact_session_requested = asyncio.Event()
+    _compact_session_requested = app_module._compact_session_requested
 
     from copilot import CopilotClient
 
@@ -404,6 +407,7 @@ async def curses_main(stdscr, app_module):
         app_module.get_my_location, app_module.setup_google_auth,
         app_module.places_text_search, app_module.places_nearby_search,
         app_module.estimate_travel_time, app_module.estimate_traffic_adjusted_time,
+        app_module.get_directions,
         app_module.web_search, app_module.search_news, app_module.get_usage,
         app_module.search_papers, app_module.search_arxiv,
         app_module.search_movies, app_module.get_movie_details,
@@ -420,6 +424,21 @@ async def curses_main(stdscr, app_module):
         app_module.calendar_add_event, app_module.calendar_delete_event,
         app_module.calendar_view, app_module.calendar_list_upcoming,
         app_module.file_read_lines, app_module.file_apply_patch,
+        app_module.github_search, app_module.github_clone,
+        app_module.github_read_file, app_module.github_grep,
+        app_module.create_ticket,
+        app_module.weather_forecast,
+        app_module.convert_units,
+        app_module.dictionary_lookup,
+        app_module.translate_text,
+        app_module.timer_start, app_module.timer_check, app_module.timer_stop,
+        app_module.system_info,
+        app_module.read_rss,
+        app_module.download_file,
+        app_module.bookmark_save, app_module.bookmark_list,
+        app_module.bookmark_search,
+        app_module.compact_history,
+        app_module.search_history_backups,
     ]
 
     def update_status():
@@ -610,6 +629,18 @@ async def curses_main(stdscr, app_module):
                     busy = True
                     ui.begin_stream()
                     await session.send({"prompt": submitted})
+
+                # Handle history compaction
+                if _compact_session_requested.is_set():
+                    _compact_session_requested.clear()
+                    await session.destroy()
+                    session = await client.create_session({
+                        "model": "gpt-5.2",
+                        "tools": all_tools,
+                        "system_message": {"content": _build_system_message()},
+                    })
+                    session.on(on_event)
+                    ui.add_message("system", "Session rebuilt with compacted history")
 
                 update_status()
                 ui.render()

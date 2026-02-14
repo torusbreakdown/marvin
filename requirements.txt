@@ -5,3 +5,4 @@ ddgs
 beautifulsoup4
 pyyaml
 selenium
+feedparser

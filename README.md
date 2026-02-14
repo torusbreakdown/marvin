@@ -115,7 +115,7 @@ These services require **no API key** and work out of the box:
 | **Open-Meteo** | Weather data & forecasts | Unlimited (non-commercial) |
 | **OpenStreetMap / Nominatim** | Places fallback (text search) | 1 req/sec |
 | **OpenStreetMap / Overpass** | Places fallback (nearby search) | Reasonable use |
-| **DuckDuckGo** | Web search & news (via `ddgs` library) | Reasonable use |
+| **DuckDuckGo** | Web search (via `ddgs` library) | Reasonable use |
 | **Semantic Scholar** | Academic paper search | ~100 req/5min |
 | **arXiv** | Preprint search | 1 req/3sec |
 | **ntfy.sh** | Push notifications | Unlimited |
@@ -224,14 +224,14 @@ When you add a calendar event, cron jobs are automatically scheduled to send not
 - Desktop notifications (`notify-send`)
 - Push notifications via **ntfy.sh** (auto-creates a `reminders` topic if none exists)
 
-## All Tools (42)
+## All Tools (41)
 
 | Category | Tools |
 |----------|-------|
 | **Location** | `get_my_location` |
 | **Places** | `places_text_search`, `places_nearby_search` (Google → OSM fallback) |
 | **Travel** | `estimate_travel_time`, `estimate_traffic_adjusted_time` |
-| **Search** | `web_search`, `search_news`, `browse_web`, `scrape_page` |
+| **Search** | `web_search`, `browse_web`, `scrape_page` |
 | **Academic** | `search_papers`, `search_arxiv` |
 | **Reviews** | `search_movies`, `get_movie_details`, `search_games`, `get_game_details` |
 | **Address Book** | `save_place`, `remove_place`, `list_places` |

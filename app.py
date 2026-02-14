@@ -28,10 +28,11 @@ class UsageTracker:
     """Tracks estimated API costs. Prints a summary every N paid calls."""
 
     COST_PER_CALL = {
-        "places_text_search": 0.032,
-        "places_nearby_search": 0.032,
+        "places_text_search": 0.032,       # Google Places API (Pro fields)
+        "places_nearby_search": 0.032,     # Google Places API (Pro fields)
         "estimate_travel_time": 0.0,       # OSRM is free
         "estimate_traffic_adjusted_time": 0.0,  # OSRM + Open-Meteo, both free
+        "get_directions": 0.0,             # OSRM, free
         "web_search": 0.0,                 # DuckDuckGo, free
         "get_my_location": 0.0,
         "setup_google_auth": 0.0,
@@ -41,7 +42,29 @@ class UsageTracker:
         "switch_profile": 0.0,
         "exit_app": 0.0,
         "get_usage": 0.0,
-        "_llm_turn": 0.003,               # rough per-turn LLM cost
+        "github_search": 0.0,
+        "github_clone": 0.0,
+        "github_read_file": 0.0,
+        "create_ticket": 0.0,
+        "github_grep": 0.0,
+        "weather_forecast": 0.0,           # Open-Meteo, free
+        "convert_units": 0.0,              # Frankfurter, free
+        "dictionary_lookup": 0.0,          # dictionaryapi.dev, free
+        "translate_text": 0.0,             # MyMemory, free
+        "timer_start": 0.0,
+        "timer_check": 0.0,
+        "timer_stop": 0.0,
+        "system_info": 0.0,
+        "read_rss": 0.0,
+        "download_file": 0.0,
+        "bookmark_save": 0.0,
+        "bookmark_list": 0.0,
+        "bookmark_search": 0.0,
+        "compact_history": 0.0,
+        "search_history_backups": 0.0,
+        # Copilot SDK: GPT-5.2 = 20x multiplier, $0.04/premium request
+        # Each LLM turn = 20 premium requests = $0.80 overage
+        "_llm_turn": 0.80,
     }
     REPORT_INTERVAL = 10
 
@@ -66,9 +89,22 @@ class UsageTracker:
     def should_report(self) -> bool:
         return self.total_paid_calls > 0 and self.total_paid_calls % self.REPORT_INTERVAL == 0
 
+    _LLM_MODEL = "gpt-5.2"
+    _LLM_MULTIPLIER = 20  # premium requests per LLM turn
+    _OVERAGE_RATE = 0.04  # $ per premium request (overage)
+
     def summary(self) -> str:
-        lines = [f"📊 Usage — {self.total_paid_calls} paid API calls, ~${self.session_cost:.3f} this session"]
-        lines.append(f"   LLM turns: {self.llm_turns} (~${self.llm_turns * self.COST_PER_CALL['_llm_turn']:.3f})")
+        premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
+        llm_cost = self.llm_turns * self.COST_PER_CALL["_llm_turn"]
+        lines = [f"📊 Usage — ~${self.session_cost:.2f} this session"]
+        lines.append(
+            f"   LLM ({self._LLM_MODEL}): {self.llm_turns} turns × "
+            f"{self._LLM_MULTIPLIER}x = {premium_reqs} premium reqs "
+            f"(~${llm_cost:.2f})"
+        )
+        if self.total_paid_calls:
+            api_cost = self.session_cost - llm_cost
+            lines.append(f"   Paid API calls: {self.total_paid_calls} (~${api_cost:.3f})")
         for name, count in sorted(self.calls.items()):
             unit = self.COST_PER_CALL.get(name, 0)
             cost_str = f"${unit * count:.3f}" if unit > 0 else "free"
@@ -95,7 +131,8 @@ class UsageTracker:
             pass
 
     def summary_oneline(self) -> str:
-        return f"${self.session_cost:.3f} | {self.llm_turns} turns | {self.total_paid_calls} paid"
+        premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
+        return f"${self.session_cost:.2f} | {self.llm_turns} turns ({premium_reqs} reqs) | {self.total_paid_calls} API"
 
     def lifetime_summary(self) -> str:
         try:
@@ -103,8 +140,10 @@ class UsageTracker:
                 return "No lifetime usage data yet."
             with open(self._log_path) as f:
                 data = json.load(f)
-            lines = [f"📊 Lifetime usage — ~${data.get('total_cost', 0):.3f} total"]
-            lines.append(f"   LLM turns: {data.get('total_llm_turns', 0)}")
+            total_turns = data.get("total_llm_turns", 0)
+            total_reqs = total_turns * self._LLM_MULTIPLIER
+            lines = [f"📊 Lifetime usage — ~${data.get('total_cost', 0):.2f} total"]
+            lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
             for name, count in sorted(data.get("total_calls", {}).items()):
                 lines.append(f"   {name}: {count}x")
             return "\n".join(lines)
@@ -2177,6 +2216,125 @@ def _fmt_mins(m: float) -> str:
     return f"{int(m // 60)}h {int(m % 60)}m"
 
 
+# ── Tool: Turn-by-turn directions via OSRM ──────────────────────────────────
+
+class DirectionsParams(BaseModel):
+    origin_lat: float = Field(description="Origin latitude")
+    origin_lng: float = Field(description="Origin longitude")
+    dest_lat: float = Field(description="Destination latitude")
+    dest_lng: float = Field(description="Destination longitude")
+    mode: str = Field(
+        default="driving",
+        description="Travel mode: driving, cycling, or foot",
+    )
+    waypoints: str = Field(
+        default="",
+        description=(
+            "Optional intermediate waypoints as 'lat,lng;lat,lng'. "
+            "The route will pass through these points in order."
+        ),
+    )
+
+
+# OSRM maneuver type → human-readable instruction
+_MANEUVER_LABELS = {
+    "turn": "Turn", "new name": "Continue onto", "depart": "Depart",
+    "arrive": "Arrive", "merge": "Merge", "on ramp": "Take ramp",
+    "off ramp": "Take exit", "fork": "Fork", "end of road": "End of road",
+    "continue": "Continue", "roundabout": "Roundabout", "rotary": "Rotary",
+    "roundabout turn": "Roundabout turn", "notification": "",
+    "exit roundabout": "Exit roundabout", "exit rotary": "Exit rotary",
+}
+
+
+@define_tool(
+    description=(
+        "Get turn-by-turn directions between two points using OpenStreetMap (OSRM). "
+        "Returns step-by-step navigation instructions with distances and durations. "
+        "Supports driving, cycling, and walking. Free, no API key needed. "
+        "Optionally include waypoints for multi-stop routes."
+    )
+)
+async def get_directions(params: DirectionsParams) -> str:
+    profile = params.mode if params.mode in ("driving", "cycling", "foot") else "driving"
+
+    # Build coordinate string: origin[;waypoints];destination
+    coord_parts = [f"{params.origin_lng},{params.origin_lat}"]
+    if params.waypoints.strip():
+        for wp in params.waypoints.split(";"):
+            wp = wp.strip()
+            if "," in wp:
+                lat, lng = wp.split(",", 1)
+                coord_parts.append(f"{lng.strip()},{lat.strip()}")
+    coord_parts.append(f"{params.dest_lng},{params.dest_lat}")
+    coords = ";".join(coord_parts)
+
+    url = f"{OSRM_BASE}/{profile}/{coords}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params={
+                "overview": "full",
+                "geometries": "geojson",
+                "steps": "true",
+            })
+            if resp.status_code != 200:
+                return f"Routing error {resp.status_code}: {resp.text}"
+            data = resp.json()
+    except Exception as e:
+        return f"Routing request failed: {e}"
+
+    if data.get("code") != "Ok" or not data.get("routes"):
+        return f"Could not find a route: {data.get('code', 'unknown error')}"
+
+    route = data["routes"][0]
+    total_km = route["distance"] / 1000
+    total_mins = route["duration"] / 60
+
+    mode_emoji = {"driving": "🚗", "cycling": "🚲", "foot": "🚶"}.get(profile, "📍")
+    lines = [
+        f"{mode_emoji} Directions ({profile})",
+        f"   Total: {total_km:.1f} km ({total_km * 0.621371:.1f} mi), {_fmt_mins(total_mins)}",
+        "",
+    ]
+
+    step_num = 0
+    for leg in route.get("legs", []):
+        for step in leg.get("steps", []):
+            maneuver = step.get("maneuver", {})
+            m_type = maneuver.get("type", "")
+            modifier = maneuver.get("modifier", "")
+
+            # Skip zero-distance waypoint artifacts
+            if step.get("distance", 0) == 0 and m_type not in ("depart", "arrive"):
+                continue
+
+            step_num += 1
+            label = _MANEUVER_LABELS.get(m_type, m_type.replace("_", " ").title())
+            if modifier:
+                label = f"{label} {modifier}"
+
+            name = step.get("name", "")
+            dist_m = step.get("distance", 0)
+            dur_s = step.get("duration", 0)
+
+            if dist_m >= 1000:
+                dist_str = f"{dist_m / 1000:.1f} km"
+            else:
+                dist_str = f"{dist_m:.0f} m"
+
+            dur_str = _fmt_mins(dur_s / 60) if dur_s >= 60 else f"{dur_s:.0f}s"
+
+            if m_type == "arrive":
+                lines.append(f"  {step_num}. 🏁 Arrive{' at ' + name if name else ''}")
+            elif name:
+                lines.append(f"  {step_num}. {label} — {name} ({dist_str}, {dur_str})")
+            else:
+                lines.append(f"  {step_num}. {label} ({dist_str}, {dur_str})")
+
+    return "\n".join(lines)
+
+
 # ── Tool: Traffic- and weather-adjusted travel time ─────────────────────────
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -2451,6 +2609,16 @@ def _save_chat_log(log: list[dict], name: str | None = None):
 def _append_chat(role: str, text: str):
     log = _load_chat_log()
     log.append({"role": role, "text": text, "time": _time.strftime("%H:%M")})
+
+    # Auto-compact if history exceeds threshold
+    total_chars = sum(len(e.get("text", "")) for e in log)
+    if total_chars > _AUTO_COMPACT_TOKENS * _CHARS_PER_TOKEN:
+        log, msg = _do_compact(log, _TARGET_TOKENS)
+        if msg:
+            print(f"\n[{msg}]\n")
+            if _compact_session_requested is not None:
+                _compact_session_requested.set()
+
     _save_chat_log(log)
 
 _DEFAULT_PREFS = """\
@@ -2489,6 +2657,7 @@ COMMANDS = [
     "find", "search", "nearby", "open now", "best", "cheapest",
     "directions to", "tell me about", "compare",
     "preferences", "profiles", "usage", "saved", "quit", "exit", "help",
+    "!shell", "!sh",
 ]
 
 
@@ -2605,7 +2774,19 @@ def _build_system_message() -> str:
         "If the user expresses a food preference, dislike, allergy, dietary "
         "restriction, or lifestyle constraint (e.g. 'I hate sushi', 'I'm vegan', "
         "'I can't eat gluten', 'I don't have a car'), call update_preferences "
-        "to save it to their profile so future recommendations respect it."
+        "to save it to their profile so future recommendations respect it. "
+        "GITHUB REPOS: When the user asks you to look at, read, or explore a "
+        "GitHub repository, you MUST use github_clone to clone it first, then "
+        "github_read_file or github_grep to read/search it. NEVER use browse_web, "
+        "scrape_page, web_search, or raw HTTP to read files from a GitHub repo. "
+        "AUTO-NOTES: Whenever the conversation involves deep or technical content — "
+        "code architecture, algorithms, research findings, detailed explanations, "
+        "debugging sessions, config walkthroughs, design decisions, learned facts, "
+        "or anything the user might want to reference later — automatically call "
+        "write_note to save a concise summary to ~/Notes. Use descriptive filenames "
+        "like 'python-asyncio-patterns.md' or 'project-x-architecture.md'. "
+        "Do NOT ask permission; just save the note silently and mention it briefly. "
+        "Keep notes concise: key points, code snippets, and links only."
     )
     base += f"\n\nActive profile: {_active_profile}"
     if prefs.strip():
@@ -3755,13 +3936,1167 @@ async def file_apply_patch(params: FileApplyPatchParams) -> str:
     return f"Patched {params.path}:\n{summary}"
 
 
+# ── Tool: Create ticket (tk) ─────────────────────────────────────────────────
+
+class CreateTicketParams(BaseModel):
+    title: str = Field(description="Short title for the ticket, e.g. 'Fix login timeout bug'")
+    description: str = Field(default="", description="Longer description of the task or issue.")
+    ticket_type: str = Field(
+        default="task",
+        description="Type: 'bug', 'feature', 'task', 'epic', or 'chore'.",
+    )
+    priority: int = Field(
+        default=2,
+        description="Priority 0-4 where 0 is highest. Default is 2 (medium).",
+    )
+    tags: str = Field(default="", description="Comma-separated tags, e.g. 'ui,backend,urgent'.")
+    parent: str = Field(default="", description="Parent ticket ID if this is a sub-task.")
+
+
+@define_tool(
+    description=(
+        "Create a TODO / ticket using the local 'tk' ticket system. "
+        "Use this whenever the user wants to note a task, track a bug, plan a feature, "
+        "or create any kind of to-do item. Returns the new ticket ID."
+    )
+)
+async def create_ticket(params: CreateTicketParams) -> str:
+    if not shutil.which("tk"):
+        return "Error: 'tk' CLI is not installed."
+
+    cmd = ["tk", "create", params.title]
+    if params.description:
+        cmd += ["-d", params.description]
+    if params.ticket_type:
+        cmd += ["-t", params.ticket_type]
+    cmd += ["-p", str(max(0, min(4, params.priority)))]
+    if params.tags:
+        cmd += ["--tags", params.tags]
+    if params.parent:
+        cmd += ["--parent", params.parent]
+
+    ok, output = _run_cmd(cmd, timeout=10)
+    if not ok:
+        return f"Failed to create ticket: {output}"
+
+    ticket_id = output.strip()
+
+    # Fetch the created ticket for confirmation
+    ok2, details = _run_cmd(["tk", "show", ticket_id], timeout=5)
+    if ok2:
+        return f"Created ticket {ticket_id}\n{details}"
+    return f"Created ticket: {ticket_id}"
+
+
+# ── Tool: GitHub search ─────────────────────────────────────────────────────
+
+class GitHubSearchParams(BaseModel):
+    query: str = Field(description="Search query for GitHub, e.g. 'fastapi language:python stars:>100'")
+    search_type: str = Field(
+        default="repositories",
+        description="What to search: 'repositories', 'code', 'issues', 'commits', or 'users'.",
+    )
+    max_results: int = Field(default=10, description="Max results to return (1-30)")
+
+
+@define_tool(
+    description=(
+        "Search GitHub using the gh CLI. Supports searching repositories, code, issues, "
+        "commits, and users. Use this to find projects, code examples, issues, etc. on GitHub. "
+        "Requires the 'gh' CLI to be installed and authenticated."
+    )
+)
+async def github_search(params: GitHubSearchParams) -> str:
+    if not shutil.which("gh"):
+        return "Error: 'gh' CLI is not installed. Install it from https://cli.github.com/"
+
+    search_type = params.search_type.lower()
+    limit = max(1, min(params.max_results, 30))
+
+    type_map = {
+        "repositories": "repos",
+        "repos": "repos",
+        "code": "code",
+        "issues": "issues",
+        "commits": "commits",
+        "users": "users",
+    }
+    gh_type = type_map.get(search_type)
+    if not gh_type:
+        return f"Unknown search type '{search_type}'. Use: repositories, code, issues, commits, or users."
+
+    if gh_type == "users":
+        # gh search doesn't support users directly — use the API
+        ok, output = _run_cmd(
+            ["gh", "api", f"search/users?q={params.query}&per_page={limit}"],
+            timeout=30,
+        )
+        if not ok:
+            return f"GitHub user search failed: {output}"
+        try:
+            data = json.loads(output)
+            items = data.get("items", [])
+            if not items:
+                return "No users found."
+            lines = []
+            for u in items:
+                lines.append(f"• {u.get('login', '?')}  —  {u.get('html_url', '')}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Failed to parse results: {e}"
+
+    cmd = ["gh", "search", gh_type, params.query, "--limit", str(limit)]
+    ok, output = _run_cmd(cmd, timeout=30)
+    if not ok:
+        return f"GitHub search failed: {output}"
+    if not output:
+        return f"No {search_type} found for '{params.query}'."
+    return output
+
+
+# ── Tool: GitHub clone ──────────────────────────────────────────────────────
+
+_GITHUB_CLONES_DIR = os.path.expanduser("~/github-clones")
+
+
+class GitHubCloneParams(BaseModel):
+    repo: str = Field(
+        description=(
+            "Repository to clone, e.g. 'owner/repo' or a full GitHub URL. "
+            "Examples: 'pallets/flask', 'https://github.com/psf/requests'."
+        )
+    )
+    shallow: bool = Field(
+        default=True,
+        description="If true (default), do a shallow clone (--depth 1) to save time and space.",
+    )
+
+
+@define_tool(
+    description=(
+        "Clone a GitHub repository into ~/github-clones/<owner>/<repo> using the gh CLI. "
+        "If the repo is already cloned, returns the existing path. "
+        "IMPORTANT: You MUST use this tool to clone a repo BEFORE reading any files from it. "
+        "Do NOT try to fetch repo files via raw HTTP, web scraping, or any other method — "
+        "always clone first with this tool, then use github_read_file or github_grep."
+    )
+)
+async def github_clone(params: GitHubCloneParams) -> str:
+    # Normalize repo identifier
+    repo = params.repo.strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if repo.lower().startswith(prefix):
+            repo = repo[len(prefix):]
+            break
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    parts = repo.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return f"Invalid repo format: '{params.repo}'. Use 'owner/repo'."
+
+    owner, name = parts
+    dest = os.path.join(_GITHUB_CLONES_DIR, owner, name)
+
+    # Already cloned?
+    if os.path.isdir(os.path.join(dest, ".git")):
+        return f"Repository already cloned at {dest}"
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+    # Try gh first (handles private repos + auth), fall back to git clone
+    # for public repos that don't need auth
+    cmd = ["git", "clone"]
+    if params.shallow:
+        cmd += ["--depth", "1"]
+    cmd += [f"https://github.com/{owner}/{name}.git", dest]
+
+    if shutil.which("gh"):
+        gh_cmd = ["gh", "repo", "clone", f"{owner}/{name}", dest]
+        if params.shallow:
+            gh_cmd += ["--", "--depth", "1"]
+        ok, output = _run_cmd(gh_cmd, timeout=120)
+        if ok:
+            return f"Cloned {owner}/{name} to {dest}"
+        # gh failed (likely auth) — fall back to plain git for public repos
+
+    ok, output = _run_cmd(cmd, timeout=120)
+    if not ok:
+        return f"Clone failed: {output}"
+
+    return f"Cloned {owner}/{name} to {dest}"
+
+
+# ── Tool: GitHub read file ──────────────────────────────────────────────────
+
+class GitHubReadFileParams(BaseModel):
+    repo: str = Field(
+        description=(
+            "Repository identifier, e.g. 'owner/repo'. Must already be cloned "
+            "via github_clone into ~/github-clones/."
+        )
+    )
+    path: str = Field(
+        description="Path to the file within the repo, e.g. 'README.md' or 'src/main.py'."
+    )
+    start: int = Field(
+        default=0,
+        description="Starting line number (1-based). 0 or omitted = start from beginning.",
+    )
+    end: int = Field(
+        default=0,
+        description="Ending line number (1-based, inclusive). 0 or omitted = read to end of file.",
+    )
+
+
+@define_tool(
+    description=(
+        "Read a file (or a line range) from a previously cloned GitHub repo in ~/github-clones/. "
+        "You MUST call github_clone first to clone the repo before using this tool. "
+        "Do NOT use web scraping, browse_web, or raw HTTP to read GitHub repo files — "
+        "always use github_clone then this tool. Read-only, never modifies files."
+    )
+)
+async def github_read_file(params: GitHubReadFileParams) -> str:
+    repo = params.repo.strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if repo.lower().startswith(prefix):
+            repo = repo[len(prefix):]
+            break
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    parts = repo.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return f"Invalid repo format: '{params.repo}'. Use 'owner/repo'."
+
+    owner, name = parts
+    repo_dir = os.path.join(_GITHUB_CLONES_DIR, owner, name)
+
+    if not os.path.isdir(repo_dir):
+        return f"Repository not cloned yet. Run github_clone for '{owner}/{name}' first."
+
+    # Resolve and validate the file path (prevent directory traversal)
+    file_path = os.path.normpath(os.path.join(repo_dir, params.path))
+    if not file_path.startswith(repo_dir):
+        return "Access denied: path escapes the repository directory."
+
+    if not os.path.exists(file_path):
+        # If it's a directory, list its contents instead
+        return f"File not found: {params.path}"
+
+    if os.path.isdir(file_path):
+        try:
+            entries = sorted(os.listdir(file_path))
+        except Exception as e:
+            return f"Failed to list directory: {e}"
+        dirs = [e + "/" for e in entries if os.path.isdir(os.path.join(file_path, e))]
+        files = [e for e in entries if not os.path.isdir(os.path.join(file_path, e))]
+        listing = "\n".join(dirs + files)
+        return f"── {params.path}/ ({len(dirs)} dirs, {len(files)} files) ──\n{listing}"
+
+    # Check file size (skip huge binaries)
+    size = os.path.getsize(file_path)
+    if size > 512_000:
+        return f"File is too large ({size:,} bytes). Try specifying a line range with start/end."
+
+    try:
+        with open(file_path) as f:
+            all_lines = f.readlines()
+    except UnicodeDecodeError:
+        return f"Cannot read binary file: {params.path}"
+    except Exception as e:
+        return f"Failed to read file: {e}"
+
+    total = len(all_lines)
+    start = max(1, params.start) if params.start > 0 else 1
+    end = params.end if params.end > 0 else total
+    end = min(end, total)
+
+    if start > total:
+        return f"File has {total} lines; start={start} is past the end."
+
+    selected = all_lines[start - 1 : end]
+    numbered = []
+    for i, line in enumerate(selected, start=start):
+        numbered.append(f"{i:>5} | {line.rstrip()}")
+
+    header = f"── {owner}/{name}/{params.path} ({total} lines) ──  showing {start}–{end}"
+    return header + "\n" + "\n".join(numbered)
+
+
+# ── Tool: GitHub grep ───────────────────────────────────────────────────────
+
+class GitHubGrepParams(BaseModel):
+    repo: str = Field(
+        description="Repository identifier, e.g. 'owner/repo'. Must already be cloned via github_clone."
+    )
+    pattern: str = Field(description="Search pattern (regex supported).")
+    glob_filter: str = Field(
+        default="",
+        description="Optional glob to restrict search, e.g. '*.py' or 'src/**/*.ts'.",
+    )
+    max_results: int = Field(default=30, description="Max matching lines to return (1-100).")
+
+
+@define_tool(
+    description=(
+        "Search file contents within a previously cloned GitHub repo using grep. "
+        "You MUST call github_clone first. Do NOT use web scraping or raw HTTP "
+        "to search repo contents. Returns matching lines with file paths and line numbers."
+    )
+)
+async def github_grep(params: GitHubGrepParams) -> str:
+    repo = params.repo.strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if repo.lower().startswith(prefix):
+            repo = repo[len(prefix):]
+            break
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+
+    parts = repo.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return f"Invalid repo format: '{params.repo}'. Use 'owner/repo'."
+
+    repo_dir = os.path.join(_GITHUB_CLONES_DIR, parts[0], parts[1])
+    if not os.path.isdir(repo_dir):
+        return f"Repository not cloned yet. Run github_clone for '{parts[0]}/{parts[1]}' first."
+
+    limit = max(1, min(params.max_results, 100))
+
+    # Prefer ripgrep, fall back to grep
+    if shutil.which("rg"):
+        cmd = ["rg", "-n", "--no-heading", "-m", str(limit), params.pattern]
+        if params.glob_filter:
+            cmd += ["-g", params.glob_filter]
+        cmd.append(repo_dir)
+    else:
+        cmd = ["grep", "-rn", "--include", params.glob_filter or "*", params.pattern, repo_dir]
+
+    ok, output = _run_cmd(cmd, timeout=30)
+    # grep returns exit 1 for no matches
+    if not output:
+        return f"No matches for '{params.pattern}' in {parts[0]}/{parts[1]}."
+
+    # Strip the repo_dir prefix for cleaner output
+    lines = output.split("\n")
+    cleaned = []
+    for line in lines[:limit]:
+        if line.startswith(repo_dir):
+            line = line[len(repo_dir):].lstrip("/")
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
+# ── Tool: Weather forecast (Open-Meteo) ────────────────────────────────────
+
+class WeatherForecastParams(BaseModel):
+    latitude: float = Field(description="Latitude of the location.")
+    longitude: float = Field(description="Longitude of the location.")
+    days: int = Field(default=3, description="Number of forecast days (1-7).")
+
+
+@define_tool(
+    description=(
+        "Get current weather and a multi-day forecast using the free Open-Meteo API. "
+        "Provide latitude and longitude (use get_my_location if needed). "
+        "Returns temperature, conditions, precipitation, wind, and sunrise/sunset."
+    )
+)
+async def weather_forecast(params: WeatherForecastParams) -> str:
+    days = max(1, min(params.days, 7))
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={params.latitude}&longitude={params.longitude}"
+        f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+        f"weather_code,wind_speed_10m,wind_direction_10m"
+        f"&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,"
+        f"weather_code,sunrise,sunset,wind_speed_10m_max"
+        f"&forecast_days={days}&timezone=auto"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Weather request failed: {e}"
+
+    wmo_codes = {
+        0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
+        45: "Fog", 48: "Rime fog", 51: "Light drizzle", 53: "Drizzle",
+        55: "Heavy drizzle", 61: "Light rain", 63: "Rain", 65: "Heavy rain",
+        71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains",
+        80: "Light showers", 81: "Showers", 82: "Heavy showers",
+        85: "Light snow showers", 86: "Snow showers",
+        95: "Thunderstorm", 96: "Thunderstorm + hail", 99: "Thunderstorm + heavy hail",
+    }
+
+    lines = []
+    cur = data.get("current", {})
+    if cur:
+        code = cur.get("weather_code", -1)
+        desc = wmo_codes.get(code, f"Code {code}")
+        lines.append(f"🌡 Now: {cur.get('temperature_2m')}°C (feels {cur.get('apparent_temperature')}°C)")
+        lines.append(f"   {desc}, humidity {cur.get('relative_humidity_2m')}%")
+        lines.append(f"   Wind: {cur.get('wind_speed_10m')} km/h")
+
+    daily = data.get("daily", {})
+    dates = daily.get("time", [])
+    for i, date in enumerate(dates):
+        code = daily.get("weather_code", [None])[i]
+        desc = wmo_codes.get(code, f"Code {code}") if code is not None else "?"
+        hi = daily.get("temperature_2m_max", [None])[i]
+        lo = daily.get("temperature_2m_min", [None])[i]
+        precip = daily.get("precipitation_sum", [None])[i]
+        wind = daily.get("wind_speed_10m_max", [None])[i]
+        sunrise = daily.get("sunrise", [None])[i]
+        sunset = daily.get("sunset", [None])[i]
+        lines.append(f"\n📅 {date}: {desc}")
+        lines.append(f"   High {hi}°C / Low {lo}°C, precip {precip}mm, wind {wind} km/h")
+        if sunrise and sunset:
+            lines.append(f"   ☀ {sunrise.split('T')[1]} → 🌙 {sunset.split('T')[1]}")
+
+    return "\n".join(lines) if lines else "No forecast data returned."
+
+
+# ── Tool: Unit/currency converter ───────────────────────────────────────────
+
+class ConvertUnitsParams(BaseModel):
+    value: float = Field(description="The numeric value to convert.")
+    from_unit: str = Field(description="Source unit, e.g. 'km', 'lbs', 'USD', '°F'.")
+    to_unit: str = Field(description="Target unit, e.g. 'mi', 'kg', 'EUR', '°C'.")
+
+
+_UNIT_CONVERSIONS: dict[tuple[str, str], float] = {
+    ("km", "mi"): 0.621371, ("mi", "km"): 1.60934,
+    ("m", "ft"): 3.28084, ("ft", "m"): 0.3048,
+    ("cm", "in"): 0.393701, ("in", "cm"): 2.54,
+    ("kg", "lbs"): 2.20462, ("lbs", "kg"): 0.453592,
+    ("lb", "kg"): 0.453592, ("kg", "lb"): 2.20462,
+    ("g", "oz"): 0.035274, ("oz", "g"): 28.3495,
+    ("l", "gal"): 0.264172, ("gal", "l"): 3.78541,
+    ("ml", "floz"): 0.033814, ("floz", "ml"): 29.5735,
+    ("km/h", "mph"): 0.621371, ("mph", "km/h"): 1.60934,
+    ("m/s", "km/h"): 3.6, ("km/h", "m/s"): 0.277778,
+}
+
+
+@define_tool(
+    description=(
+        "Convert between units (length, weight, volume, speed, temperature) or currencies. "
+        "Supports km↔mi, kg↔lbs, °C↔°F, L↔gal, and many more. "
+        "For currencies, uses the free Frankfurter API for live exchange rates."
+    )
+)
+async def convert_units(params: ConvertUnitsParams) -> str:
+    fr = params.from_unit.strip().lower().replace("°", "")
+    to = params.to_unit.strip().lower().replace("°", "")
+
+    # Temperature
+    if fr in ("c", "celsius") and to in ("f", "fahrenheit"):
+        result = params.value * 9 / 5 + 32
+        return f"{params.value}°C = {result:.2f}°F"
+    if fr in ("f", "fahrenheit") and to in ("c", "celsius"):
+        result = (params.value - 32) * 5 / 9
+        return f"{params.value}°F = {result:.2f}°C"
+    if fr in ("c", "celsius") and to in ("k", "kelvin"):
+        result = params.value + 273.15
+        return f"{params.value}°C = {result:.2f}K"
+    if fr in ("k", "kelvin") and to in ("c", "celsius"):
+        result = params.value - 273.15
+        return f"{params.value}K = {result:.2f}°C"
+
+    # Standard unit conversions
+    key = (fr, to)
+    if key in _UNIT_CONVERSIONS:
+        result = params.value * _UNIT_CONVERSIONS[key]
+        return f"{params.value} {params.from_unit} = {result:.4g} {params.to_unit}"
+
+    # Try currency conversion via Frankfurter API
+    fr_cur = params.from_unit.strip().upper()
+    to_cur = params.to_unit.strip().upper()
+    if len(fr_cur) == 3 and len(to_cur) == 3 and fr_cur.isalpha() and to_cur.isalpha():
+        try:
+            url = f"https://api.frankfurter.app/latest?from={fr_cur}&to={to_cur}&amount={params.value}"
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+            rates = data.get("rates", {})
+            if to_cur in rates:
+                return f"{params.value} {fr_cur} = {rates[to_cur]:.2f} {to_cur} (rate as of {data.get('date', 'today')})"
+            return f"Currency '{to_cur}' not found. Check the currency code."
+        except Exception as e:
+            return f"Currency conversion failed: {e}"
+
+    return f"Unknown conversion: {params.from_unit} → {params.to_unit}. Supported: km/mi, kg/lbs, °C/°F, L/gal, and 3-letter currency codes."
+
+
+# ── Tool: Dictionary/thesaurus ──────────────────────────────────────────────
+
+class DictionaryLookupParams(BaseModel):
+    word: str = Field(description="The word to look up.")
+    include_synonyms: bool = Field(default=True, description="Include synonyms if available.")
+
+
+@define_tool(
+    description=(
+        "Look up a word definition, pronunciation, part of speech, and synonyms "
+        "using the free Dictionary API (dictionaryapi.dev). No API key needed."
+    )
+)
+async def dictionary_lookup(params: DictionaryLookupParams) -> str:
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{params.word.strip()}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            if resp.status_code == 404:
+                return f"No definition found for '{params.word}'."
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Dictionary lookup failed: {e}"
+
+    if not isinstance(data, list) or not data:
+        return f"No definition found for '{params.word}'."
+
+    entry = data[0]
+    lines = [f"📖 {entry.get('word', params.word)}"]
+
+    phonetics = entry.get("phonetics", [])
+    for p in phonetics:
+        if p.get("text"):
+            lines.append(f"   Pronunciation: {p['text']}")
+            break
+
+    all_synonyms = set()
+    for meaning in entry.get("meanings", []):
+        pos = meaning.get("partOfSpeech", "")
+        lines.append(f"\n  [{pos}]")
+        for defn in meaning.get("definitions", [])[:3]:
+            lines.append(f"    • {defn.get('definition', '')}")
+            if defn.get("example"):
+                lines.append(f"      Example: \"{defn['example']}\"")
+        if params.include_synonyms:
+            for s in meaning.get("synonyms", [])[:5]:
+                all_synonyms.add(s)
+
+    if all_synonyms:
+        lines.append(f"\n  Synonyms: {', '.join(sorted(all_synonyms))}")
+
+    return "\n".join(lines)
+
+
+# ── Tool: Translation ───────────────────────────────────────────────────────
+
+class TranslateTextParams(BaseModel):
+    text: str = Field(description="Text to translate.")
+    target_language: str = Field(
+        description="Target language code, e.g. 'es' (Spanish), 'fr' (French), 'de' (German), 'ja' (Japanese)."
+    )
+    source_language: str = Field(
+        default="auto",
+        description="Source language code, or 'auto' to auto-detect.",
+    )
+
+
+@define_tool(
+    description=(
+        "Translate text between languages using the MyMemory free translation API. "
+        "No API key needed. Supports most language pairs. "
+        "Use ISO 639-1 codes: en, es, fr, de, it, pt, ja, ko, zh, ar, ru, etc."
+    )
+)
+async def translate_text(params: TranslateTextParams) -> str:
+    src = params.source_language.strip().lower()
+    tgt = params.target_language.strip().lower()
+    if src == "auto":
+        langpair = f"autodetect|{tgt}"
+    else:
+        langpair = f"{src}|{tgt}"
+
+    url = "https://api.mymemory.translated.net/get"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params={"q": params.text, "langpair": langpair})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Translation failed: {e}"
+
+    rd = data.get("responseData", {})
+    translated = rd.get("translatedText", "")
+    if not translated:
+        return f"Translation returned no result. Check language codes."
+
+    detected = data.get("responseDetails", "")
+    match_pct = rd.get("match", 0)
+
+    lines = [f"🌐 Translation ({src} → {tgt}):"]
+    lines.append(translated)
+    if match_pct and isinstance(match_pct, (int, float)):
+        lines.append(f"   (confidence: {match_pct:.0%})")
+
+    return "\n".join(lines)
+
+
+# ── Tool: Timer/stopwatch ──────────────────────────────────────────────────
+
+_active_timers: dict[str, dict] = {}
+
+
+class TimerStartParams(BaseModel):
+    name: str = Field(description="Name for this timer, e.g. 'eggs', 'workout', 'focus'.")
+    duration_seconds: int = Field(
+        default=0,
+        description="Countdown duration in seconds. 0 = stopwatch (counts up).",
+    )
+
+
+class TimerCheckParams(BaseModel):
+    name: str = Field(default="", description="Timer name. Empty = show all active timers.")
+
+
+class TimerStopParams(BaseModel):
+    name: str = Field(description="Name of the timer to stop.")
+
+
+@define_tool(
+    description=(
+        "Start a named timer. Set duration_seconds for a countdown, or 0 for a stopwatch. "
+        "Use timer_check to see elapsed/remaining time, and timer_stop to end it."
+    )
+)
+async def timer_start(params: TimerStartParams) -> str:
+    name = params.name.strip().lower()
+    if not name:
+        return "Timer name is required."
+    if name in _active_timers:
+        return f"Timer '{name}' is already running. Stop it first."
+
+    _active_timers[name] = {
+        "start": _time.time(),
+        "duration": params.duration_seconds,
+    }
+    if params.duration_seconds > 0:
+        mins, secs = divmod(params.duration_seconds, 60)
+        return f"⏱ Timer '{name}' started: {mins}m {secs}s countdown."
+    return f"⏱ Stopwatch '{name}' started."
+
+
+@define_tool(
+    description="Check the status of a running timer. Leave name empty to see all active timers."
+)
+async def timer_check(params: TimerCheckParams) -> str:
+    if not _active_timers:
+        return "No active timers."
+
+    name = params.name.strip().lower()
+    if name:
+        if name not in _active_timers:
+            return f"No timer named '{name}'. Active: {', '.join(_active_timers.keys())}"
+        return _format_timer(name, _active_timers[name])
+
+    lines = []
+    for n, t in _active_timers.items():
+        lines.append(_format_timer(n, t))
+    return "\n".join(lines)
+
+
+def _format_timer(name: str, t: dict) -> str:
+    elapsed = _time.time() - t["start"]
+    if t["duration"] > 0:
+        remaining = max(0, t["duration"] - elapsed)
+        if remaining == 0:
+            return f"⏱ '{name}': ⏰ TIME'S UP! (elapsed {elapsed:.0f}s)"
+        mins, secs = divmod(int(remaining), 60)
+        return f"⏱ '{name}': {mins}m {secs}s remaining"
+    mins, secs = divmod(int(elapsed), 60)
+    return f"⏱ '{name}': {mins}m {secs}s elapsed"
+
+
+@define_tool(description="Stop a running timer and report the final time.")
+async def timer_stop(params: TimerStopParams) -> str:
+    name = params.name.strip().lower()
+    if name not in _active_timers:
+        if _active_timers:
+            return f"No timer named '{name}'. Active: {', '.join(_active_timers.keys())}"
+        return "No active timers."
+
+    t = _active_timers.pop(name)
+    elapsed = _time.time() - t["start"]
+    mins, secs = divmod(int(elapsed), 60)
+    if t["duration"] > 0:
+        over = elapsed - t["duration"]
+        if over > 0:
+            return f"⏱ Timer '{name}' stopped. Ran {mins}m {secs}s ({over:.0f}s over)."
+        return f"⏱ Timer '{name}' stopped at {mins}m {secs}s."
+    return f"⏱ Stopwatch '{name}' stopped at {mins}m {secs}s."
+
+
+# ── Tool: System info ──────────────────────────────────────────────────────
+
+class SystemInfoParams(BaseModel):
+    pass
+
+
+@define_tool(
+    description=(
+        "Report system information: OS, CPU, memory usage, disk usage, uptime, "
+        "and battery status (if available)."
+    )
+)
+async def system_info(params: SystemInfoParams) -> str:
+    import psutil
+
+    lines = []
+    lines.append(f"🖥 OS: {platform.system()} {platform.release()} ({platform.machine()})")
+    lines.append(f"   Python: {platform.python_version()}")
+
+    cpu_count = psutil.cpu_count(logical=True)
+    cpu_pct = psutil.cpu_percent(interval=0.5)
+    lines.append(f"   CPU: {cpu_count} cores, {cpu_pct}% utilization")
+
+    mem = psutil.virtual_memory()
+    lines.append(f"   Memory: {mem.used / (1024**3):.1f} / {mem.total / (1024**3):.1f} GB ({mem.percent}%)")
+
+    disk = psutil.disk_usage("/")
+    lines.append(f"   Disk (/): {disk.used / (1024**3):.1f} / {disk.total / (1024**3):.1f} GB ({disk.percent}%)")
+
+    # Uptime
+    boot = psutil.boot_time()
+    uptime_secs = _time.time() - boot
+    days, rem = divmod(int(uptime_secs), 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, _ = divmod(rem, 60)
+    lines.append(f"   Uptime: {days}d {hours}h {mins}m")
+
+    # Battery
+    try:
+        batt = psutil.sensors_battery()
+        if batt:
+            status = "charging" if batt.power_plugged else "on battery"
+            lines.append(f"   Battery: {batt.percent:.0f}% ({status})")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+# ── Tool: RSS feed reader ──────────────────────────────────────────────────
+
+class ReadRSSParams(BaseModel):
+    url: str = Field(description="URL of the RSS or Atom feed.")
+    max_items: int = Field(default=5, description="Max number of feed items to return (1-20).")
+
+
+@define_tool(
+    description=(
+        "Fetch and display entries from an RSS or Atom feed. "
+        "Returns titles, dates, summaries, and links for recent entries."
+    )
+)
+async def read_rss(params: ReadRSSParams) -> str:
+    import feedparser
+
+    try:
+        feed = feedparser.parse(params.url)
+    except Exception as e:
+        return f"Failed to parse feed: {e}"
+
+    if feed.bozo and not feed.entries:
+        return f"Could not parse feed at {params.url}: {feed.bozo_exception}"
+
+    title = feed.feed.get("title", params.url)
+    entries = feed.entries[: max(1, min(params.max_items, 20))]
+
+    if not entries:
+        return f"Feed '{title}' has no entries."
+
+    lines = [f"📡 {title} ({len(entries)} items)"]
+    for i, e in enumerate(entries, 1):
+        entry_title = e.get("title", "No title")
+        link = e.get("link", "")
+        published = e.get("published", e.get("updated", ""))
+        summary = e.get("summary", "")
+        # Strip HTML tags from summary
+        if "<" in summary:
+            import re
+            summary = re.sub(r"<[^>]+>", "", summary)
+        if len(summary) > 200:
+            summary = summary[:200] + "…"
+        lines.append(f"\n{i}. {entry_title}")
+        if published:
+            lines.append(f"   📅 {published}")
+        if summary:
+            lines.append(f"   {summary}")
+        if link:
+            lines.append(f"   🔗 {link}")
+
+    return "\n".join(lines)
+
+
+# ── Tool: File download ────────────────────────────────────────────────────
+
+class DownloadFileParams(BaseModel):
+    url: str = Field(description="URL of the file to download.")
+    filename: str = Field(
+        default="",
+        description="Filename to save as. If empty, auto-detects from URL.",
+    )
+
+
+@define_tool(
+    description=(
+        "Download a file from a URL to ~/Downloads/. "
+        "Auto-detects filename from URL if not specified. "
+        "Will not overwrite existing files."
+    )
+)
+async def download_file(params: DownloadFileParams) -> str:
+    downloads_dir = os.path.expanduser("~/Downloads")
+    os.makedirs(downloads_dir, exist_ok=True)
+
+    # Determine filename
+    fname = params.filename.strip()
+    if not fname:
+        from urllib.parse import urlparse, unquote
+        path = urlparse(params.url).path
+        fname = unquote(os.path.basename(path)) or "download"
+
+    dest = os.path.join(downloads_dir, fname)
+    if os.path.exists(dest):
+        return f"File already exists: {dest}. Choose a different filename."
+
+    try:
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+            async with client.stream("GET", params.url) as resp:
+                resp.raise_for_status()
+                total = 0
+                with open(dest, "wb") as f:
+                    async for chunk in resp.aiter_bytes(8192):
+                        f.write(chunk)
+                        total += len(chunk)
+    except Exception as e:
+        # Clean up partial download
+        if os.path.exists(dest):
+            os.remove(dest)
+        return f"Download failed: {e}"
+
+    size_str = f"{total:,} bytes"
+    if total > 1_000_000:
+        size_str = f"{total / 1_000_000:.1f} MB"
+    elif total > 1_000:
+        size_str = f"{total / 1_000:.1f} KB"
+
+    return f"⬇ Downloaded {fname} ({size_str}) to {dest}"
+
+
+# ── Tool: Bookmarks manager ────────────────────────────────────────────────
+
+_BOOKMARKS_PATH = os.path.expanduser("~/.config/local-finder/bookmarks.json")
+
+
+def _load_bookmarks() -> list[dict]:
+    if os.path.exists(_BOOKMARKS_PATH):
+        try:
+            with open(_BOOKMARKS_PATH) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_bookmarks(bookmarks: list[dict]):
+    os.makedirs(os.path.dirname(_BOOKMARKS_PATH), exist_ok=True)
+    with open(_BOOKMARKS_PATH, "w") as f:
+        json.dump(bookmarks, f, indent=2)
+
+
+class BookmarkSaveParams(BaseModel):
+    url: str = Field(description="URL to bookmark.")
+    title: str = Field(default="", description="Title for the bookmark.")
+    tags: str = Field(default="", description="Comma-separated tags, e.g. 'python,tutorial'.")
+    notes: str = Field(default="", description="Optional notes about this bookmark.")
+
+
+class BookmarkListParams(BaseModel):
+    tag: str = Field(default="", description="Filter by tag. Empty = show all.")
+    limit: int = Field(default=20, description="Max bookmarks to show.")
+
+
+class BookmarkSearchParams(BaseModel):
+    query: str = Field(description="Search text to match against titles, URLs, notes, and tags.")
+    limit: int = Field(default=10, description="Max results to return.")
+
+
+@define_tool(
+    description="Save a URL as a bookmark with optional title, tags, and notes."
+)
+async def bookmark_save(params: BookmarkSaveParams) -> str:
+    bookmarks = _load_bookmarks()
+
+    # Check for duplicate URL
+    for bm in bookmarks:
+        if bm.get("url") == params.url:
+            return f"Already bookmarked: {params.url}"
+
+    entry = {
+        "url": params.url,
+        "title": params.title or params.url,
+        "tags": [t.strip() for t in params.tags.split(",") if t.strip()] if params.tags else [],
+        "notes": params.notes,
+        "saved_at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    bookmarks.append(entry)
+    _save_bookmarks(bookmarks)
+    return f"🔖 Bookmarked: {entry['title']}"
+
+
+@define_tool(
+    description="List saved bookmarks, optionally filtered by tag."
+)
+async def bookmark_list(params: BookmarkListParams) -> str:
+    bookmarks = _load_bookmarks()
+    if not bookmarks:
+        return "No bookmarks saved yet."
+
+    tag = params.tag.strip().lower()
+    if tag:
+        bookmarks = [b for b in bookmarks if tag in [t.lower() for t in b.get("tags", [])]]
+        if not bookmarks:
+            return f"No bookmarks with tag '{tag}'."
+
+    lines = [f"🔖 Bookmarks ({len(bookmarks)} total)"]
+    for bm in bookmarks[: params.limit]:
+        tags_str = f" [{', '.join(bm.get('tags', []))}]" if bm.get("tags") else ""
+        lines.append(f"  • {bm.get('title', '?')}{tags_str}")
+        lines.append(f"    {bm.get('url', '')}")
+        if bm.get("notes"):
+            lines.append(f"    📝 {bm['notes']}")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description="Search bookmarks by matching against titles, URLs, notes, and tags."
+)
+async def bookmark_search(params: BookmarkSearchParams) -> str:
+    bookmarks = _load_bookmarks()
+    if not bookmarks:
+        return "No bookmarks saved yet."
+
+    q = params.query.strip().lower()
+    matches = []
+    for bm in bookmarks:
+        haystack = " ".join([
+            bm.get("title", ""), bm.get("url", ""),
+            bm.get("notes", ""), " ".join(bm.get("tags", [])),
+        ]).lower()
+        if q in haystack:
+            matches.append(bm)
+
+    if not matches:
+        return f"No bookmarks matching '{params.query}'."
+
+    lines = [f"🔍 {len(matches)} bookmark(s) matching '{params.query}'"]
+    for bm in matches[: params.limit]:
+        tags_str = f" [{', '.join(bm.get('tags', []))}]" if bm.get("tags") else ""
+        lines.append(f"  • {bm.get('title', '?')}{tags_str}")
+        lines.append(f"    {bm.get('url', '')}")
+    return "\n".join(lines)
+
+
+# ── Tool: Compact history ───────────────────────────────────────────────────
+
+_compact_session_requested: asyncio.Event | None = None
+
+_TARGET_TOKENS = 50_000
+_AUTO_COMPACT_TOKENS = 80_000  # auto-compact when history exceeds this
+_CHARS_PER_TOKEN = 4
+_PRESERVE_RECENT = 20  # keep this many recent messages verbatim
+
+
+def _do_compact(log: list[dict], target_tokens: int = _TARGET_TOKENS) -> tuple[list[dict], str]:
+    """Compact a chat log to fit within a token budget.
+
+    Returns (new_log, summary_message).  Backs up the original file first.
+    Recent messages are preserved exactly; older ones are truncated/dropped.
+    """
+    target_chars = target_tokens * _CHARS_PER_TOKEN
+    current_chars = sum(len(e.get("text", "")) for e in log)
+
+    if current_chars <= target_chars:
+        return log, ""
+
+    # Back up the original
+    backup_path = _chat_log_path() + f".backup.{_time.strftime('%Y%m%d_%H%M%S')}"
+    try:
+        import shutil as _sh
+        _sh.copy2(_chat_log_path(), backup_path)
+    except Exception:
+        backup_path = "(backup failed)"
+
+    # Split: preserve recent messages exactly, compact the older ones
+    preserve_count = min(_PRESERVE_RECENT, len(log))
+    recent = log[-preserve_count:]
+    older = log[:-preserve_count] if preserve_count < len(log) else []
+
+    recent_chars = sum(len(e.get("text", "")) for e in recent)
+    budget_for_older = max(0, target_chars - recent_chars)
+
+    if not older:
+        return log, ""
+
+    older_chars = sum(len(e.get("text", "")) for e in older)
+    if older_chars <= budget_for_older:
+        compacted_older = older
+    else:
+        max_per_msg = max(40, budget_for_older // len(older))
+        compacted_older = []
+        for entry in older:
+            e = dict(entry)
+            text = e.get("text", "")
+            if len(text) > max_per_msg:
+                e["text"] = text[:max_per_msg] + "…"
+            compacted_older.append(e)
+
+        while compacted_older:
+            total = sum(len(e.get("text", "")) for e in compacted_older)
+            if total <= budget_for_older:
+                break
+            compacted_older.pop(0)
+
+    new_log = compacted_older + recent
+    new_chars = sum(len(e.get("text", "")) for e in new_log)
+    dropped = len(log) - len(new_log)
+
+    parts = [
+        f"✂ Auto-compacted history: {len(log)} → {len(new_log)} messages",
+        f"({current_chars // _CHARS_PER_TOKEN:,} → ~{new_chars // _CHARS_PER_TOKEN:,} tokens)",
+    ]
+    if dropped:
+        parts.append(f"{dropped} oldest dropped")
+    parts.append(f"backup: {backup_path}")
+    return new_log, " | ".join(parts)
+
+
+class CompactHistoryParams(BaseModel):
+    target_tokens: int = Field(
+        default=_TARGET_TOKENS,
+        description="Target token budget for the compacted history (default 50000).",
+    )
+
+
+@define_tool(
+    description=(
+        "Compact the conversation history to fit within a token budget. "
+        "Backs up the original chat log, then compresses older messages while "
+        "preserving the most recent ones exactly. Triggers a session rebuild. "
+        "Call this when the conversation is getting long or the context is full."
+    )
+)
+async def compact_history(params: CompactHistoryParams) -> str:
+    log = _load_chat_log()
+    if not log:
+        return "Chat log is empty — nothing to compact."
+
+    target_chars = params.target_tokens * _CHARS_PER_TOKEN
+    current_chars = sum(len(e.get("text", "")) for e in log)
+
+    if current_chars <= target_chars:
+        return (
+            f"History is already within budget "
+            f"(~{current_chars // _CHARS_PER_TOKEN:,} tokens, "
+            f"target {params.target_tokens:,}). No compaction needed."
+        )
+
+    new_log, summary = _do_compact(log, params.target_tokens)
+    _save_chat_log(new_log)
+
+    # Signal session rebuild
+    if _compact_session_requested is not None:
+        _compact_session_requested.set()
+
+    return summary or "No compaction needed."
+
+
+# ── Tool: Search history backups ────────────────────────────────────────────
+
+class SearchHistoryBackupsParams(BaseModel):
+    query: str = Field(description="Text to search for in old conversation history backups.")
+    max_results: int = Field(default=20, description="Max matching messages to return.")
+
+
+@define_tool(
+    description=(
+        "Search through backed-up conversation history for old messages that were "
+        "compacted or dropped. Use this when the user asks about something from a "
+        "previous conversation that is no longer in the current history."
+    )
+)
+async def search_history_backups(params: SearchHistoryBackupsParams) -> str:
+    profile_dir = _profile_dir()
+    if not os.path.isdir(profile_dir):
+        return "No profile directory found."
+
+    # Find all backup files, newest first
+    backups = sorted(
+        [f for f in os.listdir(profile_dir) if f.startswith("chat_log.json.backup.")],
+        reverse=True,
+    )
+    if not backups:
+        return "No history backups found."
+
+    q = params.query.lower()
+    limit = max(1, min(params.max_results, 50))
+    matches = []
+
+    for backup_name in backups:
+        backup_path = os.path.join(profile_dir, backup_name)
+        try:
+            with open(backup_path) as f:
+                log = json.load(f)
+        except Exception:
+            continue
+
+        # Extract timestamp from filename (chat_log.json.backup.YYYYMMDD_HHMMSS)
+        ts = backup_name.rsplit(".", 1)[-1]
+
+        for entry in log:
+            text = entry.get("text", "")
+            if q in text.lower():
+                role = entry.get("role", "?")
+                time_str = entry.get("time", "")
+                # Trim for display
+                snippet = text
+                if len(snippet) > 300:
+                    # Show context around the match
+                    idx = snippet.lower().find(q)
+                    start = max(0, idx - 100)
+                    end = min(len(snippet), idx + len(q) + 100)
+                    snippet = ("…" if start > 0 else "") + snippet[start:end] + ("…" if end < len(snippet) else "")
+                matches.append(f"[{ts} {time_str}] {role}: {snippet}")
+                if len(matches) >= limit:
+                    break
+        if len(matches) >= limit:
+            break
+
+    if not matches:
+        return f"No matches for '{params.query}' in {len(backups)} backup(s)."
+
+    header = f"🔍 Found {len(matches)} match(es) across {len(backups)} backup(s):"
+    return header + "\n" + "\n".join(matches)
+
+
 class _CursesRequested(Exception):
     def __init__(self, app_module):
         self.app_module = app_module
 
 
 async def main():
-    global _profile_switch_requested
+    global _profile_switch_requested, _compact_session_requested
 
     # Curses is default; --plain disables it
     use_plain = "--plain" in sys.argv
@@ -3772,6 +5107,7 @@ async def main():
 
     _ensure_prefs_file()
     _profile_switch_requested = asyncio.Event()
+    _compact_session_requested = asyncio.Event()
 
     prompt = " ".join(args) if args else None
     interactive = prompt is None
@@ -3786,7 +5122,7 @@ async def main():
     all_tools = [
         get_my_location, setup_google_auth,
         places_text_search, places_nearby_search,
-        estimate_travel_time, estimate_traffic_adjusted_time,
+        estimate_travel_time, estimate_traffic_adjusted_time, get_directions,
         web_search, search_news, get_usage,
         search_papers, search_arxiv,
         search_movies, get_movie_details,
@@ -3802,6 +5138,20 @@ async def main():
         calendar_add_event, calendar_delete_event,
         calendar_view, calendar_list_upcoming,
         file_read_lines, file_apply_patch,
+        github_search, github_clone, github_read_file,
+        github_grep,
+        create_ticket,
+        weather_forecast,
+        convert_units,
+        dictionary_lookup,
+        translate_text,
+        timer_start, timer_check, timer_stop,
+        system_info,
+        read_rss,
+        download_file,
+        bookmark_save, bookmark_list, bookmark_search,
+        compact_history,
+        search_history_backups,
     ]
 
     # Ensure the bundled copilot binary is executable
@@ -3861,16 +5211,52 @@ async def main():
             print("Local Finder — interactive mode")
             print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
         print("Tab to complete, Ctrl+R to search history, 'quit' to exit.\n")
+        shell_mode = False
         try:
             while True:
                 if _exit_requested.is_set():
                     break
                 try:
-                    prompt = input(f"[{_active_profile}] You: ").strip()
+                    mode_tag = "shell" if shell_mode else _active_profile
+                    prompt = input(f"[{mode_tag}] {'$' if shell_mode else 'You'}: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
                 if not prompt:
+                    continue
+
+                # Toggle shell mode
+                if prompt.lower() in ("!shell", "!sh"):
+                    shell_mode = not shell_mode
+                    state = "ON" if shell_mode else "OFF"
+                    print(f"Shell mode {state}. "
+                          f"{'Type commands directly. !shell to exit.' if shell_mode else 'Back to assistant mode.'}\n")
+                    continue
+
+                # Shell mode: run command directly
+                if shell_mode or prompt.startswith("!"):
+                    cmd_str = prompt if shell_mode else prompt[1:].strip()
+                    if not cmd_str:
+                        continue
+                    print(f"$ {cmd_str}")
+                    try:
+                        result = subprocess.run(
+                            cmd_str, shell=True,
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        output = (result.stdout + result.stderr).rstrip()
+                    except subprocess.TimeoutExpired:
+                        output = "(command timed out after 120s)"
+                    except Exception as e:
+                        output = f"(error: {e})"
+                    if output:
+                        print(output)
+                    else:
+                        print("(no output)")
+                    # Log to chat history
+                    _append_chat("you", f"$ {cmd_str}")
+                    _append_chat("assistant", output or "(no output)")
+                    print()
                     continue
                 if prompt.lower() == "preferences":
                     print(f"Opening {_prefs_path()}")
@@ -3918,6 +5304,7 @@ async def main():
                 chunks.clear()
                 _exit_requested.clear()
                 _profile_switch_requested.clear()
+                _compact_session_requested.clear()
                 _append_chat("you", prompt)
                 print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                 print("Assistant: ", end="", flush=True)
@@ -3947,6 +5334,18 @@ async def main():
                     await session.send({"prompt": prompt})
                     await done.wait()
                     print()
+
+                # If history was compacted, rebuild session with fresh context
+                if _compact_session_requested.is_set():
+                    _compact_session_requested.clear()
+                    await session.destroy()
+                    session = await client.create_session({
+                        "model": "gpt-5.2",
+                        "tools": all_tools,
+                        "system_message": {"content": _build_system_message()},
+                    })
+                    session.on(on_event)
+                    print("[Session rebuilt with compacted history]\n")
         finally:
             _save_history()
             _save_last_profile()

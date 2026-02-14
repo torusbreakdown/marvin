@@ -2742,13 +2742,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
         spec_path = os.path.join(design_dir, "spec.md")
         if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
+            spec_size = os.path.getsize(spec_path)
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Spec/UX complete — agent saved .marvin/spec.md ({os.path.getsize(spec_path)} bytes)"], timeout=5)
+                      f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
         elif rc == 0 and sout:
             with open(spec_path, "w") as f:
                 f.write(sout)
             _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
@@ -2800,13 +2803,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
         design_path = os.path.join(design_dir, "design.md")
         if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
+            design_size = os.path.getsize(design_path)
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Architecture complete — agent saved .marvin/design.md ({os.path.getsize(design_path)} bytes)"], timeout=5)
+                      f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
         elif rc == 0 and dout:
             with open(design_path, "w") as f:
                 f.write(dout)
             _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
@@ -2896,6 +2902,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         _run_cmd(["tk", "add-note", params.ticket_id,
                   f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+        await _notify_pipeline(f"✅ Phase 2 complete — {len(test_results)} test agents, {len(failures)} failures")
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
@@ -2930,6 +2937,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
     _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
+    await _notify_pipeline("✅ Phase 3 complete — implementation finished")
 
     # ── Phase 4: Debug loop (TDD green phase) ────────────────────────────
     if params.tdd:
@@ -2955,11 +2963,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             if "ALL_TESTS_PASS" in (dbg_out or ""):
                 _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5)
+                await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
                 break
             if rc != 0:
                 _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5)
         else:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
+            await _notify_pipeline(f"⚠️ Phase 4: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
 
     # ── Done ─────────────────────────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5)

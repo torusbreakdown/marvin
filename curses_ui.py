@@ -450,6 +450,8 @@ async def curses_main(stdscr, app_module):
     update_status()
     ui.render()
 
+    queued_prompt = None
+
     try:
         while True:
             if _exit_requested.is_set():
@@ -518,17 +520,13 @@ async def curses_main(stdscr, app_module):
                         await session.send({"prompt": submitted})
 
             elif key != -1 and busy:
-                # Allow scrolling while waiting for response
-                if key == curses.KEY_PPAGE:
-                    ui.scroll_offset = min(
-                        ui.scroll_offset + (ui.height // 2),
-                        max(0, len(ui.messages) * 4))
-                    ui.render()
-                elif key == curses.KEY_NPAGE:
-                    ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
-                    ui.render()
-                elif key == 4 or key == 17:
+                # Allow typing and scrolling while waiting for response
+                if key == 4 or key == 17:
                     break
+                result = ui.handle_key(key)
+                if result is not None:
+                    queued_prompt = result  # queue for after response
+                ui.render()
 
             # Check if response just finished
             if done.is_set() and busy:
@@ -555,7 +553,17 @@ async def curses_main(stdscr, app_module):
                 update_status()
                 ui.render()
 
-            # Yield to event loop — this is critical for SDK callbacks
+                # Process queued prompt if any
+                if queued_prompt and not busy:
+                    submitted = queued_prompt
+                    queued_prompt = None
+                    ui.add_message("you", submitted)
+                    ui.begin_stream()
+                    update_status()
+                    ui.render()
+                    done.clear()
+                    busy = True
+                    await session.send({"prompt": submitted})
             await asyncio.sleep(0.03)
 
             update_status()

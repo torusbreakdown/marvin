@@ -227,7 +227,7 @@ class CursesUI:
             # Help text on last row
             self.stdscr.move(h - 1, 0)
             self.stdscr.clrtoeol()
-            help_text = " Enter: send | PgUp/PgDn: scroll | Ctrl+C: quit "
+            help_text = " Enter: send | PgUp/PgDn: scroll | Ctrl+D: quit "
             self.stdscr.addstr(help_text[:w - 1], curses.color_pair(C_STATUS))
 
             # Position cursor
@@ -396,7 +396,7 @@ async def curses_main(stdscr, app_module):
     ui.add_message("system",
         f"Welcome to Local Finder (curses mode).\n"
         f"Profile: {app_module._active_profile}\n"
-        f"Type your message below. PgUp/PgDn to scroll. Ctrl+C to quit."
+        f"Type your message below. PgUp/PgDn to scroll. Ctrl+D to quit."
     )
     update_status()
     ui.render()
@@ -414,7 +414,7 @@ async def curses_main(stdscr, app_module):
                 await asyncio.sleep(0.02)
                 continue
 
-            if key == 3:  # Ctrl+C
+            if key == 4:  # Ctrl+D
                 break
 
             submitted = ui.handle_key(key)
@@ -492,7 +492,7 @@ async def curses_main(stdscr, app_module):
                     ui.scroll_offset = min(ui.scroll_offset + 1, max(0, len(ui.messages) * 4))
                 elif k == curses.KEY_DOWN:
                     ui.scroll_offset = max(0, ui.scroll_offset - 1)
-                elif k == 3:  # Ctrl+C during response
+                elif k == 4:  # Ctrl+D during response
                     break
                 ui.render()
                 await asyncio.sleep(0.02)

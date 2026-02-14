@@ -325,6 +325,9 @@ async def curses_main(stdscr, app_module):
     _load_saved_places = app_module._load_saved_places
     _list_profiles = app_module._list_profiles
     _exit_requested = app_module._exit_requested
+    # Ensure the event exists (main() may not have initialized it)
+    if app_module._profile_switch_requested is None:
+        app_module._profile_switch_requested = asyncio.Event()
     _profile_switch_requested = app_module._profile_switch_requested
 
     from copilot import CopilotClient

@@ -2887,6 +2887,7 @@ async def update_preferences(params: UpdatePreferencesParams) -> str:
 # ── Tool: Markdown notes ────────────────────────────────────────────────────
 
 _NOTES_DIR = os.path.expanduser("~/Notes")
+os.makedirs(_NOTES_DIR, exist_ok=True)
 
 
 class WriteNoteParams(BaseModel):

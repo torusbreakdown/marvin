@@ -1899,11 +1899,27 @@ def _release_lock(directory: str):
 
 
 def _read_instructions_file() -> str:
-    """Read .marvin-instructions from working directory if it exists."""
+    """Read coding instructions for the current working directory.
+
+    Looks for instructions at (in order):
+      1. ~/.marvin/instructions/<base64-safe-path>.md  (preferred — survives workspace wipes)
+      2. .marvin-instructions in the working directory (legacy)
+      3. .marvin/instructions.md in the working directory (legacy)
+    """
     if not _coding_working_dir:
         return ""
-    for name in (".marvin-instructions", ".marvin/instructions.md"):
-        p = os.path.join(_coding_working_dir, name)
+    # Primary location: outside workspace
+    import hashlib
+    safe_name = _coding_working_dir.strip("/").replace("/", "_")
+    home_instructions = os.path.join(
+        os.path.expanduser("~"), ".marvin", "instructions", f"{safe_name}.md"
+    )
+    search_paths = [
+        home_instructions,
+        os.path.join(_coding_working_dir, ".marvin-instructions"),
+        os.path.join(_coding_working_dir, ".marvin", "instructions.md"),
+    ]
+    for p in search_paths:
         if os.path.isfile(p):
             try:
                 with open(p) as f:
@@ -2505,11 +2521,17 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         os.makedirs(design_dir, exist_ok=True)
 
         instructions_ctx = ""
-        for ipath in (".marvin-instructions", ".marvin/instructions.md"):
-            full = os.path.join(wd, ipath)
-            if os.path.isfile(full):
+        # Check external instructions first, then in-workspace
+        safe_name = wd.strip("/").replace("/", "_")
+        instructions_paths = [
+            os.path.join(os.path.expanduser("~"), ".marvin", "instructions", f"{safe_name}.md"),
+            os.path.join(wd, ".marvin-instructions"),
+            os.path.join(wd, ".marvin", "instructions.md"),
+        ]
+        for ipath in instructions_paths:
+            if os.path.isfile(ipath):
                 try:
-                    instructions_ctx = open(full).read()
+                    instructions_ctx = open(ipath).read()
                 except Exception:
                     pass
                 break
@@ -5426,7 +5448,7 @@ def _build_system_message() -> str:
     if _coding_working_dir:
         instructions = _read_instructions_file()
         if instructions:
-            base += f"\n\nPROJECT INSTRUCTIONS (from .marvin-instructions):\n{instructions}\n"
+            base += f"\n\nPROJECT INSTRUCTIONS:\n{instructions}\n"
         # Include design doc if present
         design_path = os.path.join(_coding_working_dir, ".marvin", "design.md")
         if os.path.isfile(design_path):

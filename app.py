@@ -1386,7 +1386,7 @@ notes: ""
 COMMANDS = [
     "find", "search", "nearby", "open now", "best", "cheapest",
     "directions to", "tell me about", "compare",
-    "preferences", "profiles", "usage", "quit", "exit", "help",
+    "preferences", "profiles", "usage", "saved", "quit", "exit", "help",
 ]
 
 
@@ -1474,7 +1474,147 @@ def _build_system_message() -> str:
             "\n\nThe user has the following preferences. Use these to filter, "
             "rank, and tailor your recommendations:\n\n" + prefs
         )
+    saved = _load_saved_places()
+    if saved:
+        place_lines = []
+        for p in saved:
+            parts = [p.get("label", "?")]
+            if p.get("name"):
+                parts.append(p["name"])
+            if p.get("address"):
+                parts.append(p["address"])
+            if p.get("lat") and p.get("lng"):
+                parts.append(f"({p['lat']}, {p['lng']})")
+            place_lines.append(": ".join(parts))
+        base += (
+            "\n\nThe user has saved these places. Use them when the user "
+            "refers to them by label (e.g. 'near home', 'directions to work'):\n"
+            + "\n".join(f"  • {l}" for l in place_lines)
+        )
     return base
+
+
+# ── Tool: Saved places / address book ───────────────────────────────────────
+
+def _saved_places_path(name: str | None = None) -> str:
+    return os.path.join(_profile_dir(name), "saved_places.json")
+
+
+def _load_saved_places(name: str | None = None) -> list[dict]:
+    pp = _saved_places_path(name)
+    try:
+        with open(pp) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _write_saved_places(places: list[dict], name: str | None = None):
+    pp = _saved_places_path(name)
+    os.makedirs(os.path.dirname(pp), exist_ok=True)
+    with open(pp, "w") as f:
+        json.dump(places, f, indent=2)
+
+
+class SavePlaceParams(BaseModel):
+    label: str = Field(
+        description="Short label/nickname for this place (e.g. 'home', 'work', 'mom', 'favorite ramen')"
+    )
+    name: str = Field(default="", description="Business or place name")
+    address: str = Field(default="", description="Street address")
+    phone: str = Field(default="", description="Phone number")
+    website: str = Field(default="", description="Website URL")
+    lat: float = Field(default=0.0, description="Latitude")
+    lng: float = Field(default=0.0, description="Longitude")
+    notes: str = Field(default="", description="Any extra notes (hours, menu favorites, etc.)")
+
+
+class RemovePlaceParams(BaseModel):
+    label: str = Field(description="Label of the saved place to remove")
+
+
+class ListPlacesParams(BaseModel):
+    pass
+
+
+@define_tool(
+    description=(
+        "Save a place to the user's address book. Use this when the user says "
+        "'save this place', 'remember this address', 'bookmark this restaurant', "
+        "'that's my home address', or when they share a name, address, phone number, "
+        "or website they want to keep. Also save places the user explicitly liked "
+        "or wants to revisit."
+    )
+)
+async def save_place(params: SavePlaceParams) -> str:
+    places = _load_saved_places()
+
+    entry = {k: v for k, v in {
+        "label": params.label.strip().lower(),
+        "name": params.name,
+        "address": params.address,
+        "phone": params.phone,
+        "website": params.website,
+        "lat": params.lat,
+        "lng": params.lng,
+        "notes": params.notes,
+    }.items() if v}
+
+    # Update if label exists, otherwise append
+    existing = next((i for i, p in enumerate(places) if p.get("label") == entry["label"]), None)
+    if existing is not None:
+        places[existing].update(entry)
+        action = "Updated"
+    else:
+        places.append(entry)
+        action = "Saved"
+
+    _write_saved_places(places)
+    return f"{action} '{entry['label']}' — {len(places)} places total."
+
+
+@define_tool(
+    description=(
+        "Remove a saved place from the user's address book by label."
+    )
+)
+async def remove_place(params: RemovePlaceParams) -> str:
+    places = _load_saved_places()
+    label = params.label.strip().lower()
+    new_places = [p for p in places if p.get("label") != label]
+    if len(new_places) == len(places):
+        return f"No saved place found with label '{label}'."
+    _write_saved_places(new_places)
+    return f"Removed '{label}'. {len(new_places)} places remaining."
+
+
+@define_tool(
+    description=(
+        "List all saved places in the user's address book. Call this when the "
+        "user asks 'what places have I saved', 'show my addresses', or 'where is home'."
+    )
+)
+async def list_places(params: ListPlacesParams) -> str:
+    places = _load_saved_places()
+    if not places:
+        return "No saved places yet. Save one with 'remember this place' or 'save my home address'."
+    lines = [f"Saved places ({len(places)}):"]
+    for p in places:
+        line = f"\n• {p.get('label', '?').upper()}"
+        if p.get("name"):
+            line += f" — {p['name']}"
+        if p.get("address"):
+            line += f"\n  📍 {p['address']}"
+        if p.get("phone"):
+            line += f"\n  📞 {p['phone']}"
+        if p.get("website"):
+            line += f"\n  🌐 {p['website']}"
+        if p.get("notes"):
+            line += f"\n  📝 {p['notes']}"
+        if p.get("lat") and p.get("lng"):
+            line += f"\n  🗺️  {p['lat']}, {p['lng']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ── Tool: Switch profile ────────────────────────────────────────────────────
@@ -1666,6 +1806,7 @@ async def main():
         estimate_travel_time, estimate_traffic_adjusted_time,
         web_search, get_usage,
         scrape_page,
+        save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,
         switch_profile, update_preferences, exit_app,
     ]
@@ -1734,6 +1875,25 @@ async def main():
                     print()
                     print(_usage.lifetime_summary())
                     print()
+                    continue
+                if prompt.lower() == "saved":
+                    places = _load_saved_places()
+                    if not places:
+                        print("No saved places yet.\n")
+                    else:
+                        print(f"Saved places ({len(places)}):")
+                        for p in places:
+                            parts = [p.get("label", "?").upper()]
+                            if p.get("name"):
+                                parts[0] += f" — {p['name']}"
+                            if p.get("address"):
+                                parts.append(f"  📍 {p['address']}")
+                            if p.get("phone"):
+                                parts.append(f"  📞 {p['phone']}")
+                            if p.get("website"):
+                                parts.append(f"  🌐 {p['website']}")
+                            print("\n".join(parts))
+                        print()
                     continue
 
                 done.clear()

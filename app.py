@@ -2011,10 +2011,10 @@ class LaunchAgentParams(BaseModel):
     design_first: bool = Field(
         default=False,
         description=(
-            "Run a design pass before implementation. Uses claude-opus-4.6 to generate "
-            "a UX design schema and architecture doc saved to .marvin/design.md. "
-            "The implementation agent then reads this as context. "
-            "Recommended for large greenfield tasks (new projects, full features)."
+            "Run spec & architecture passes before implementation. Phase 1a uses "
+            "claude-opus-4.6 to generate a product spec and UX design (.marvin/spec.md). "
+            "Phase 1b uses claude-opus-4.6 to generate architecture and exhaustive test plan "
+            "(.marvin/design.md) based on the spec. Recommended for greenfield tasks."
         )
     )
     tdd: bool = Field(
@@ -2543,9 +2543,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                   f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
-    # ── Phase 1: Design pass (optional) ──────────────────────────────────
+    # ── Phase 1a: Spec & UX Design ──────────────────────────────────────
     if params.design_first:
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1: Design pass (claude-opus-4.6)"], timeout=5)
         design_dir = os.path.join(wd, ".marvin")
         os.makedirs(design_dir, exist_ok=True)
 
@@ -2564,38 +2563,101 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     pass
                 break
 
-        design_prompt = (
-            "You are a senior software architect. Your job is to produce a detailed "
-            "design document for the following task. Do NOT write any code. Instead produce:\n\n"
-            "1. **UX Design Schema** — describe every screen/view, its components, layout, "
-            "interactions, states, and responsive breakpoints. Use a structured format.\n"
-            "2. **Architecture** — describe the file structure, modules, data flow, API "
-            "endpoints (with request/response shapes), error handling strategy, and "
-            "technology choices with rationale.\n"
-            "3. **Implementation Plan** — ordered list of files to create, with a 1-2 sentence "
-            "description of each file's responsibility and key functions/classes.\n"
-            "4. **Style Guide** — colors, typography, spacing, component naming conventions.\n"
-            "5. **Test Plan** — for each module/component, list the test file path and the "
-            "specific test cases (function names + what they verify). Group by module. "
-            "Include both unit tests and integration tests.\n\n"
+        # Phase 1a: Spec & UX
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1a: Spec & UX design (claude-opus-4.6)"], timeout=5)
+        spec_prompt = (
+            "You are a senior product designer. Your job is to produce a detailed "
+            "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
+            "and do NOT describe architecture or file structure. Focus ONLY on:\n\n"
+            "1. **Product Spec** — what the product does, who it's for, core user stories, "
+            "acceptance criteria for each feature, constraints and non-functional requirements.\n"
+            "2. **UX Design Schema** — describe every screen/view, its components, layout, "
+            "interactions, states, transitions, and responsive breakpoints. Use a structured "
+            "format. Cover every user flow end-to-end: happy path, error states, empty states, "
+            "loading states.\n"
+            "3. **Style Guide** — colors, typography, spacing, component naming conventions, "
+            "accessibility requirements (ARIA, keyboard nav, contrast ratios).\n"
+            "4. **Information Architecture** — navigation structure, URL scheme, data "
+            "relationships from the user's perspective.\n\n"
             f"TASK:\n{params.prompt}\n\n"
         )
         if instructions_ctx:
-            design_prompt += f"PROJECT INSTRUCTIONS (from .marvin-instructions):\n{instructions_ctx}\n\n"
-        design_prompt += (
-            "Output the full design document in Markdown. Be thorough and specific — "
-            "this document will be the sole reference for the test and implementation agents."
+            spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
+        spec_prompt += (
+            "Save the spec as .marvin/spec.md using create_file. "
+            "Be exhaustive — every screen, every interaction, every edge case. "
+            "The architecture pass will read this spec to design the technical solution."
         )
 
-        rc, dout, derr = await _run_sub_with_retry(design_prompt, "claude-opus-4.6", base_timeout=600, label="Design pass")
-        if rc != 0 or not dout:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: design pass failed (exit {rc})"], timeout=5)
-            return f"🚫 Design pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+        rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
+        spec_path = os.path.join(design_dir, "spec.md")
+        if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Spec/UX complete — agent saved .marvin/spec.md ({os.path.getsize(spec_path)} bytes)"], timeout=5)
+        elif rc == 0 and sout:
+            with open(spec_path, "w") as f:
+                f.write(sout)
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5)
+            return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
 
+        # Phase 1b: Architecture & Test Plan (reads the spec)
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1b: Architecture & test plan (claude-opus-4.6)"], timeout=5)
+
+        try:
+            spec_text = open(spec_path).read()
+        except Exception as e:
+            return f"Failed to read spec: {e}"
+
+        arch_prompt = (
+            "You are a senior software architect. A product spec and UX design has already "
+            "been created at .marvin/spec.md. Read it first with read_file, then produce "
+            "a detailed ARCHITECTURE and TEST PLAN. Do NOT write any code. Produce:\n\n"
+            "1. **Architecture** — file structure, modules, data flow, API endpoints "
+            "(with request/response shapes and status codes), database schema, error handling "
+            "strategy, technology choices with rationale. Every decision must trace back to "
+            "a requirement in the spec.\n"
+            "2. **Implementation Plan** — ordered list of every file to create, with a "
+            "1-2 sentence description of each file's responsibility, key functions/classes, "
+            "and which spec requirements it fulfills.\n"
+            "3. **Test Plan** — this is the MOST IMPORTANT section. For EVERY module, "
+            "endpoint, component, and user flow, list:\n"
+            "   - The test file path (e.g. tests/test_database.py)\n"
+            "   - Every individual test function name and exactly what it verifies\n"
+            "   - Cover ALL of: happy path, error cases, edge cases, boundary conditions, "
+            "invalid input, missing data, concurrent access, empty states\n"
+            "   - Include unit tests, integration tests, and API endpoint tests\n"
+            "   - Every public function MUST have at least one test\n"
+            "   - Every API route MUST have tests for success, validation error, and not-found\n"
+            "   - Every error handler MUST be tested\n"
+            "   - Aim for 100%% functional coverage\n"
+            "   - Group tests by module with clear descriptions\n\n"
+        )
+        if instructions_ctx:
+            arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
+        arch_prompt += (
+            "Save the architecture document as .marvin/design.md using create_file. "
+            "Be thorough and specific — this document and the spec together will be "
+            "the sole reference for the test-writing and implementation agents. "
+            "The test plan section is CRITICAL — it must be exhaustive enough that "
+            "agents can write a complete test suite with full coverage from it alone."
+        )
+
+        rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
         design_path = os.path.join(design_dir, "design.md")
-        with open(design_path, "w") as f:
-            f.write(dout)
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Design pass complete — {len(dout)} chars → .marvin/design.md"], timeout=5)
+        if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Architecture complete — agent saved .marvin/design.md ({os.path.getsize(design_path)} bytes)"], timeout=5)
+        elif rc == 0 and dout:
+            with open(design_path, "w") as f:
+                f.write(dout)
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5)
+            return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
 
     # ── Phase 2: Test-first pass (TDD, optional) ─────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")
@@ -2641,17 +2703,22 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for i, batch in enumerate(batches):
             batch_text = "\n\n---\n\n".join(batch)
             test_prompt = (
-                "You are writing tests for a TDD workflow. Read the design document at "
-                ".marvin/design.md, then write ONLY the test files described below. "
-                "The tests MUST fail (the implementation doesn't exist yet). "
-                "Write comprehensive tests that cover:\n"
-                "- Happy path for each endpoint/function\n"
-                "- Error cases (bad input, missing data, auth failures)\n"
-                "- Edge cases (empty strings, large inputs, concurrent access)\n\n"
-                "Use pytest. Create the test files in the appropriate directories. "
-                "Import from the module paths specified in the design doc. "
-                "Do NOT write any implementation code — only tests.\n"
-                "Do NOT try to run the tests — they are expected to fail.\n\n"
+                "You are writing tests for a TDD workflow. Read BOTH the spec at "
+                ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
+                "write ONLY the test files described below.\n\n"
+                "REQUIREMENTS:\n"
+                "- Tests MUST fail (the implementation doesn't exist yet)\n"
+                "- Write EVERY test listed in the Test Plan section — do not skip any\n"
+                "- Each test function must have a clear docstring explaining what it verifies\n"
+                "- Test EVERY public function, EVERY API route (success + error + edge cases), "
+                "EVERY error handler, EVERY user flow described in the spec\n"
+                "- Cover: happy path, validation errors, missing data, not-found, "
+                "empty inputs, boundary values, concurrent access where relevant\n"
+                "- Use pytest fixtures for shared setup (database, test client, etc)\n"
+                "- Use pytest.mark.parametrize for testing multiple inputs\n"
+                "- Mock external dependencies (subprocess calls, file I/O) appropriately\n"
+                "- Do NOT write any implementation code — only tests\n"
+                "- Do NOT try to run the tests — they are expected to fail\n\n"
                 f"TEST SECTIONS TO WRITE:\n{batch_text}\n\n"
                 "Commit the test files with a descriptive message like "
                 "'Add failing tests for <module> (TDD red phase)'."
@@ -2679,13 +2746,18 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
 
     impl_prompt = params.prompt
+    spec_path = os.path.join(wd, ".marvin", "spec.md")
     if os.path.isfile(design_path):
         impl_prompt = (
             f"{params.prompt}\n\n"
-            "IMPORTANT: A design document exists at .marvin/design.md. "
-            "Read it with read_file BEFORE writing any code. Follow the architecture, "
-            "file structure, and UX design specified in that document exactly. "
-            "Do not deviate from the design unless you encounter a technical impossibility."
+            "IMPORTANT: Read these documents with read_file BEFORE writing any code:\n"
+        )
+        if os.path.isfile(spec_path):
+            impl_prompt += "  - .marvin/spec.md (product spec & UX design)\n"
+        impl_prompt += (
+            "  - .marvin/design.md (architecture & implementation plan)\n\n"
+            "Follow the architecture, file structure, and UX design specified in those "
+            "documents exactly. Do not deviate unless you encounter a technical impossibility."
         )
     if params.tdd:
         impl_prompt += (
@@ -5468,9 +5540,10 @@ def _build_system_message() -> str:
             "and WHY. NEVER use generic messages like 'Initial commit' or 'Update files'. "
             "Good example: 'Bind server to 0.0.0.0 for LAN access, add CORS env config'.\n"
             "12. For large greenfield tasks (new projects, full features, building UIs from scratch), "
-            "use launch_agent with design_first=true. This runs a design pass in claude-opus-4.6 "
-            "that produces a UX design schema and architecture doc BEFORE any code is written. "
-            "The implementation agent then follows that design exactly.\n"
+            "use launch_agent with design_first=true and tdd=true. This runs a 5-phase pipeline: "
+            "(1a) Spec & UX design pass, (1b) Architecture & test plan pass, (2) parallel test-writing "
+            "agents, (3) implementation, (4) debug loop until tests pass. All in claude-opus-4.6 for "
+            "design, gpt-5.3-codex for tests and debug.\n"
         )
         if _coding_working_dir:
             base += f"Working directory: {_coding_working_dir}\n"
@@ -5480,7 +5553,18 @@ def _build_system_message() -> str:
         instructions = _read_instructions_file()
         if instructions:
             base += f"\n\nPROJECT INSTRUCTIONS:\n{instructions}\n"
-        # Include design doc if present
+        # Include spec and design docs if present
+        spec_path = os.path.join(_coding_working_dir, ".marvin", "spec.md")
+        if os.path.isfile(spec_path):
+            try:
+                spec_doc = open(spec_path).read()
+                if spec_doc.strip():
+                    base += (
+                        f"\n\nPRODUCT SPEC (from .marvin/spec.md):\n"
+                        f"{spec_doc}\n"
+                    )
+            except Exception:
+                pass
         design_path = os.path.join(_coding_working_dir, ".marvin", "design.md")
         if os.path.isfile(design_path):
             try:

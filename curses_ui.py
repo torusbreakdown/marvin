@@ -10,6 +10,7 @@ Provides a richer terminal experience with:
 
 import asyncio
 import curses
+import os
 import textwrap
 import time
 
@@ -60,10 +61,22 @@ class CursesUI:
         self.status_text = ""
         self.streaming_chunks: list[str] = []
         self.is_streaming = False
+        self.input_history: list[str] = []
+        self.history_idx = -1  # -1 = not browsing history
+        self._saved_buf = ""   # saves current input when browsing history
         _init_colors()
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.nodelay(True)  # non-blocking getch
+
+    def load_history(self, path: str):
+        """Load readline-format history file into input history."""
+        try:
+            if os.path.exists(path):
+                with open(path) as f:
+                    self.input_history = [l.strip() for l in f if l.strip()]
+        except Exception:
+            pass
 
     @property
     def height(self):
@@ -253,6 +266,9 @@ class CursesUI:
             text = self.input_buf.strip()
             self.input_buf = ""
             self.cursor_pos = 0
+            self.history_idx = -1
+            if text:
+                self.input_history.append(text)
             return text if text else None
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             if self.cursor_pos > 0:
@@ -290,9 +306,24 @@ class CursesUI:
         elif key == curses.KEY_NPAGE:  # Page Down
             self.scroll_offset = max(0, self.scroll_offset - (self.height // 2))
         elif key == curses.KEY_UP:
-            self.scroll_offset = min(self.scroll_offset + 1, max(0, len(self.messages) * 4))
+            # Browse input history
+            if self.input_history:
+                if self.history_idx == -1:
+                    self._saved_buf = self.input_buf
+                    self.history_idx = len(self.input_history) - 1
+                elif self.history_idx > 0:
+                    self.history_idx -= 1
+                self.input_buf = self.input_history[self.history_idx]
+                self.cursor_pos = len(self.input_buf)
         elif key == curses.KEY_DOWN:
-            self.scroll_offset = max(0, self.scroll_offset - 1)
+            if self.history_idx != -1:
+                if self.history_idx < len(self.input_history) - 1:
+                    self.history_idx += 1
+                    self.input_buf = self.input_history[self.history_idx]
+                else:
+                    self.history_idx = -1
+                    self.input_buf = self._saved_buf
+                self.cursor_pos = len(self.input_buf)
         elif 32 <= key <= 126 or key > 127:  # printable or unicode
             ch = chr(key) if key <= 0x10FFFF else ""
             self.input_buf = (
@@ -310,6 +341,10 @@ class CursesUI:
 async def curses_main(stdscr, app_module):
     """Run the interactive loop inside curses."""
     ui = CursesUI(stdscr)
+
+    # Load input history from profile
+    hp = app_module._history_path()
+    ui.load_history(hp)
 
     # Import what we need from the app module
     _active_profile = app_module._active_profile
@@ -512,7 +547,14 @@ async def curses_main(stdscr, app_module):
             update_status()
             ui.render()
     finally:
-        _save_history()
+        # Save curses input history to readline history file
+        try:
+            os.makedirs(os.path.dirname(hp), exist_ok=True)
+            with open(hp, "w") as f:
+                for line in ui.input_history[-1000:]:
+                    f.write(line + "\n")
+        except Exception:
+            pass
         _save_last_profile()
         _usage.save()
         await session.destroy()

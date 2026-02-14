@@ -441,16 +441,18 @@ async def curses_main(stdscr, app_module):
             ui.render()
         elif etype == "assistant.message":
             _usage.record_llm_turn()
-            # If no deltas were streamed, the full content is in the event
             if not ui.streaming_chunks and hasattr(event.data, 'content') and event.data.content:
-                ui.add_message("assistant", event.data.content)
+                text = event.data.content
+                ui.add_message("assistant", text)
+                app_module._append_chat("assistant", text)
             else:
+                text = "".join(ui.streaming_chunks).strip()
                 ui.end_stream()
+                if text:
+                    app_module._append_chat("assistant", text)
             update_status()
             ui.render()
         elif etype == "session.idle":
-            # Clear streaming state in case no assistant.message was sent
-            # (e.g. tool-only responses)
             if ui.is_streaming:
                 ui.end_stream()
             busy = False
@@ -460,12 +462,21 @@ async def curses_main(stdscr, app_module):
     session.on(on_event)
 
     # Show history summary or welcome message
-    if ui.input_history:
-        recent = ui.input_history[-10:]
-        summary = "\n".join(f"  • {l}" for l in recent)
+    chat_log = app_module._load_chat_log()
+    if chat_log:
+        recent = chat_log[-20:]
+        lines = []
+        for entry in recent:
+            role = entry.get("role", "?")
+            text = entry.get("text", "")
+            if len(text) > 200:
+                text = text[:200] + "…"
+            prefix = "You" if role == "you" else "Assistant"
+            lines.append(f"  {prefix}: {text}")
+        summary = "\n".join(lines)
         ui.add_message("system",
             f"Welcome back! Profile: {app_module._active_profile}\n"
-            f"Recent history:\n{summary}\n\n"
+            f"Recent conversation:\n{summary}\n\n"
             f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+Q to quit."
         )
     else:
@@ -538,6 +549,7 @@ async def curses_main(stdscr, app_module):
 
                         # Send to LLM
                         ui.add_message("you", submitted)
+                        app_module._append_chat("you", submitted)
                         ui.begin_stream()
                         update_status()
                         ui.render()
@@ -585,6 +597,7 @@ async def curses_main(stdscr, app_module):
                     submitted = queued_prompt
                     queued_prompt = None
                     ui.add_message("you", submitted)
+                    app_module._append_chat("you", submitted)
                     ui.begin_stream()
                     update_status()
                     ui.render()

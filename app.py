@@ -2175,6 +2175,32 @@ def _prefs_path(name: str | None = None) -> str:
 def _history_path(name: str | None = None) -> str:
     return os.path.join(_profile_dir(name), "history")
 
+
+def _chat_log_path(name: str | None = None) -> str:
+    return os.path.join(_profile_dir(name), "chat_log.json")
+
+
+def _load_chat_log(name: str | None = None) -> list[dict]:
+    try:
+        with open(_chat_log_path(name)) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_chat_log(log: list[dict], name: str | None = None):
+    pp = _chat_log_path(name)
+    os.makedirs(os.path.dirname(pp), exist_ok=True)
+    # Keep last 50 exchanges
+    with open(pp, "w") as f:
+        json.dump(log[-100:], f, indent=2)
+
+
+def _append_chat(role: str, text: str):
+    log = _load_chat_log()
+    log.append({"role": role, "text": text, "time": _time.strftime("%H:%M")})
+    _save_chat_log(log)
+
 _DEFAULT_PREFS = """\
 # Local Finder — User Preferences
 # The assistant reads these on every prompt to personalize results.
@@ -2275,19 +2301,32 @@ _MAX_HISTORY_CONTEXT = 20  # last N exchanges to include
 
 
 def _compact_history() -> str:
-    """Read the last N readline history entries and format as prior context."""
-    hp = _history_path()
-    if not os.path.exists(hp):
-        return ""
-    try:
-        with open(hp) as f:
-            lines = [l.strip() for l in f if l.strip() and not l.startswith("_HiStOrY_V2_")]
-    except Exception:
-        return ""
-    if not lines:
-        return ""
-    recent = lines[-_MAX_HISTORY_CONTEXT:]
-    return "\n".join(f"  - {l}" for l in recent)
+    """Read the last N chat log entries and format as prior context."""
+    log = _load_chat_log()
+    if not log:
+        # Fall back to readline history if no chat log yet
+        hp = _history_path()
+        if not os.path.exists(hp):
+            return ""
+        try:
+            with open(hp) as f:
+                lines = [l.strip() for l in f if l.strip() and not l.startswith("_HiStOrY_V2_")]
+        except Exception:
+            return ""
+        if not lines:
+            return ""
+        recent = lines[-_MAX_HISTORY_CONTEXT:]
+        return "\n".join(f"  - You: {l}" for l in recent)
+    recent = log[-_MAX_HISTORY_CONTEXT:]
+    lines = []
+    for entry in recent:
+        role = entry.get("role", "?").capitalize()
+        text = entry.get("text", "")
+        # Truncate long responses
+        if len(text) > 200:
+            text = text[:200] + "..."
+        lines.append(f"  - {role}: {text}")
+    return "\n".join(lines)
 
 
 def _build_system_message() -> str:
@@ -2890,9 +2929,12 @@ async def main():
         elif etype == "assistant.message":
             _usage.record_llm_turn()
             if not chunks:
-                print(event.data.content)
+                text = event.data.content
+                print(text)
+                _append_chat("assistant", text)
             else:
                 print()
+                _append_chat("assistant", "".join(chunks).strip())
             # Auto-report usage every N paid calls
             if _usage.should_report():
                 print(f"\n{_usage.summary()}\n")
@@ -2968,6 +3010,7 @@ async def main():
                 chunks.clear()
                 _exit_requested.clear()
                 _profile_switch_requested.clear()
+                _append_chat("you", prompt)
                 print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                 print("Assistant: ", end="", flush=True)
                 await session.send({"prompt": prompt})

@@ -1,0 +1,7 @@
+github-copilot-sdk
+pydantic
+httpx
+ddgs
+beautifulsoup4
+pyyaml
+selenium

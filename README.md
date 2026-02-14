@@ -1,6 +1,6 @@
 # Local Finder
 
-A multi-tool CLI assistant powered by the **GitHub Copilot SDK**. Finds nearby places, checks weather & traffic, searches the web, scrapes pages, looks up academic papers, reviews games & movies, manages notifications, and more — all from one conversational interface.
+A multi-tool CLI assistant powered by the **GitHub Copilot SDK**. Finds nearby places, checks weather & traffic, searches the web, scrapes pages, looks up academic papers, reviews games & movies, manages notifications, takes notes, downloads videos, and more — all from one conversational interface.
 
 ## Quick Start
 
@@ -10,9 +10,34 @@ cd local-finder
 uv venv && uv pip install -r requirements.txt
 source .venv/bin/activate
 
-# Run interactive mode
+# Run (curses UI, default)
 python app.py
+
+# Plain terminal mode
+python app.py --plain
+
+# Single-shot mode
+python app.py "Find me good ramen near me"
 ```
+
+## Modes
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| **Curses** (default) | `python app.py` | Rich terminal UI with colored chat, scrolling, status bar, input history |
+| **Plain** | `python app.py --plain` | Original readline-based terminal |
+| **Single-shot** | `python app.py "query"` | One question, one answer, then exit |
+
+### Curses Mode Keybindings
+
+| Key | Action |
+|-----|--------|
+| Enter | Send message |
+| ↑ / ↓ | Browse input history |
+| PgUp / PgDn | Scroll chat output |
+| Ctrl+A / Ctrl+E | Jump to start/end of line |
+| Ctrl+U | Clear input line |
+| Ctrl+D or ESC | Quit |
 
 ## API Setup
 
@@ -92,6 +117,20 @@ These services require **no API key** and work out of the box:
 | **ip-api.com** | IP geolocation fallback | 45 req/min |
 | **Lynx** | Text-mode web browsing | Local (no network limit) |
 | **Selenium + Firefox** | JS-rendered page scraping | Local (rate-limited 3s) |
+| **yt-dlp** | YouTube/video downloads | Local (install separately) |
+
+### Optional CLI Tools
+
+These are used by some tools and should be installed separately:
+
+```bash
+# For yt-dlp_download tool
+pip install yt-dlp
+# or: sudo apt install yt-dlp
+
+# For browse_web tool
+sudo apt install lynx
+```
 
 ## Recommended .bashrc / .profile
 
@@ -111,8 +150,11 @@ Then `source ~/.bashrc` or restart your terminal.
 ```bash
 source .venv/bin/activate
 
-# Interactive mode (recommended)
+# Curses mode (default, recommended)
 python app.py
+
+# Plain terminal mode
+python app.py --plain
 
 # Single-shot mode
 python app.py "Find me good ramen near me"
@@ -142,9 +184,21 @@ Set an alarm for 30 minutes — pizza is in the oven
 Create a notification channel for deal alerts
 I'm vegetarian and I don't like spicy food
 Browse the menu at joe's-crab-shack.com
+Write a note about today's meeting in notes/work/meetings.md
+Download that YouTube video as audio
+List my notes
 ```
 
-## All Tools (30)
+## Features
+
+- **Session context**: conversation history persists across restarts
+- **Profiles**: per-user preferences, history, saved places, ntfy subscriptions
+- **Auto-restore**: remembers last active profile on startup
+- **History summary**: shows recent queries on launch for context
+- **Timestamps**: each response is timestamped
+- **Usage tracking**: per-session and lifetime cost estimates
+
+## All Tools (35)
 
 | Category | Tools |
 |----------|-------|
@@ -158,4 +212,6 @@ Browse the menu at joe's-crab-shack.com
 | **Notifications** | `generate_ntfy_topic`, `ntfy_subscribe`, `ntfy_unsubscribe`, `ntfy_publish`, `ntfy_list` |
 | **Alarms** | `set_alarm`, `list_alarms`, `cancel_alarm` |
 | **Profile** | `switch_profile`, `update_preferences` |
+| **Notes** | `write_note`, `read_note`, `notes_mkdir`, `notes_ls` |
+| **Downloads** | `yt_dlp_download` |
 | **System** | `setup_google_auth`, `get_usage`, `exit_app` |

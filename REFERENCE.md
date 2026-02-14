@@ -12,21 +12,27 @@ used by this project.
 | OSRM (routing) | `https://router.project-osrm.org/route/v1/{profile}/{coords}` | None (free, public demo) | Coords in **lon,lat** order. 1 req/sec limit |
 | Open-Meteo (weather) | `https://api.open-meteo.com/v1/forecast` | None (free, no key) | Returns WMO weather codes |
 | DuckDuckGo (web search) | Via `ddgs` Python library | None (free) | `DDGS().text(query, max_results=N)` |
+| Semantic Scholar | `https://api.semanticscholar.org/graph/v1/paper/search` | None (free) | ~100 req/5min |
+| arXiv | `https://export.arxiv.org/api/query` | None (free) | HTTPS required, `follow_redirects=True` |
+| OMDB (movies/TV) | `https://www.omdbapi.com/` | `OMDB_API_KEY` | 1,000 req/day (free tier) |
+| RAWG (games) | `https://api.rawg.io/api/games` | `RAWG_API_KEY` | 20,000 req/month (free tier) |
+| ntfy.sh | `https://ntfy.sh/{topic}` | None (free) | Push notifications |
 | ip-api.com (IP geolocation) | `http://ip-api.com/json/` | None (free for non-commercial) | Fallback for device location |
-| OpenMenus (defunct/unreliable) | `https://openmenu.com/search/search.php` | None | Was used for menu scraping; site unreachable as of Feb 2026 |
 
 ## Key Websites (Uncommon)
 
 | Name | URL | Purpose |
 |------|-----|---------|
-| OpenMenu Search | https://openmenu.com/search/ | Restaurant menu search (currently down) |
-| OpenMenu API Docs | https://openmenu.com/api/ | Menu API documentation |
 | OSRM Project | https://project-osrm.org/ | Open Source Routing Machine |
 | Open-Meteo | https://open-meteo.com/ | Free weather API, no key needed |
-| WMO Weather Codes | https://open-meteo.com/en/docs | Weather code reference for traffic heuristics |
+| Semantic Scholar | https://www.semanticscholar.org/ | Academic paper search |
+| arXiv | https://arxiv.org/ | Preprint repository |
+| OMDB | https://www.omdbapi.com/ | Movie/TV database (free API key) |
+| RAWG | https://rawg.io/ | Video game database (free API key) |
+| ntfy.sh | https://ntfy.sh/ | Free push notification service |
 | ip-api | http://ip-api.com/ | Free IP geolocation |
+| yt-dlp | https://github.com/yt-dlp/yt-dlp | YouTube/video downloader |
 | GitHub Copilot SDK (PyPI) | https://pypi.org/project/github-copilot-sdk/ | Python SDK for Copilot tool-calling |
-| Documenu (alternative) | https://rapidapi.com/collection/restaurant-api | Paid menu API alternative on RapidAPI |
 
 ## Google Cloud Setup
 
@@ -41,9 +47,16 @@ used by this project.
 | Path | Purpose |
 |------|---------|
 | `~/.config/local-finder/profiles/<name>/preferences.yaml` | Per-profile user preferences |
-| `~/.config/local-finder/profiles/<name>/history` | Per-profile readline history |
+| `~/.config/local-finder/profiles/<name>/history` | Per-profile readline/input history |
+| `~/.config/local-finder/profiles/<name>/ntfy_subscriptions.json` | Per-profile ntfy subscriptions |
+| `~/.config/local-finder/profiles/<name>/saved_places.json` | Per-profile address book |
+| `~/.config/local-finder/last_profile` | Last active profile (auto-restored on startup) |
 | `~/.config/local-finder/usage.json` | Lifetime usage/cost tracking |
+| `~/.config/local-finder/ntfy/ntfy_watcher.sh` | Auto-generated cron watcher script |
+| `~/.config/local-finder/ntfy/seen.json` | Seen ntfy message IDs (dedup) |
 | `~/.local/share/local-finder/alarms/` | Self-destructing alarm scripts |
+| `~/Notes/` | Markdown notes directory |
+| `~/Downloads/yt-dlp/` | Downloaded videos/audio |
 
 ## Browser Automation
 

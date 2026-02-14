@@ -665,6 +665,225 @@ async def cancel_alarm(params: CancelAlarmParams) -> str:
         return f"Error cancelling alarm: {e}"
 
 
+# ── Tool: ntfy push notifications ───────────────────────────────────────────
+
+import random as _random
+
+_NTFY_BASE = "https://ntfy.sh"
+
+
+def _ntfy_subs_path() -> str:
+    return os.path.join(_profile_dir(), "ntfy_subscriptions.json")
+
+
+def _load_ntfy_subs() -> dict:
+    try:
+        with open(_ntfy_subs_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_ntfy_subs(subs: dict):
+    pp = _ntfy_subs_path()
+    os.makedirs(os.path.dirname(pp), exist_ok=True)
+    with open(pp, "w") as f:
+        json.dump(subs, f, indent=2)
+
+
+def _generate_topic() -> str:
+    """Generate a correct-horse-battery-staple style topic from system dict."""
+    dict_path = "/usr/share/dict/words"
+    try:
+        with open(dict_path) as f:
+            words = [
+                w.strip().lower() for w in f
+                if w.strip().isalpha() and 3 <= len(w.strip()) <= 8
+            ]
+    except Exception:
+        words = [
+            "alpha", "bravo", "cedar", "delta", "ember",
+            "frost", "grove", "haste", "ivory", "jade",
+        ]
+    chosen = _random.sample(words, min(5, len(words)))
+    return "-".join(chosen)
+
+
+async def _poll_ntfy_topic(topic: str) -> list[dict]:
+    """Poll a ntfy topic for messages since last check."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{_NTFY_BASE}/{topic}/json",
+                params={"poll": "1", "since": "1h"},
+            )
+            resp.raise_for_status()
+            messages = []
+            for line in resp.text.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line)
+                    if msg.get("event") == "message":
+                        messages.append({
+                            "time": msg.get("time", 0),
+                            "message": msg.get("message", ""),
+                            "title": msg.get("title", ""),
+                            "tags": msg.get("tags", []),
+                        })
+                except json.JSONDecodeError:
+                    continue
+            return messages
+    except Exception:
+        return []
+
+
+async def _check_all_subscriptions() -> str:
+    """Check all subscribed topics and return new notifications."""
+    subs = _load_ntfy_subs()
+    if not subs:
+        return ""
+    lines = []
+    for topic, info in subs.items():
+        messages = await _poll_ntfy_topic(topic)
+        if messages:
+            label = info.get("label", topic)
+            lines.append(f"📬 Notifications for '{label}' ({topic}):")
+            for m in messages[-5:]:  # last 5
+                title = f" [{m['title']}]" if m.get("title") else ""
+                lines.append(f"  • {m['message']}{title}")
+    return "\n".join(lines)
+
+
+class GenerateNtfyTopicParams(BaseModel):
+    label: str = Field(
+        default="",
+        description="Optional friendly label for this topic (e.g. 'dinner alerts', 'deal watch')",
+    )
+
+
+class NtfySubscribeParams(BaseModel):
+    topic: str = Field(description="The ntfy topic name to subscribe to")
+    label: str = Field(
+        default="",
+        description="Friendly label for this subscription",
+    )
+
+
+class NtfyUnsubscribeParams(BaseModel):
+    topic: str = Field(description="The ntfy topic name to unsubscribe from")
+
+
+class NtfyPublishParams(BaseModel):
+    topic: str = Field(description="The ntfy topic to publish to")
+    message: str = Field(description="The notification message to send")
+    title: str = Field(default="", description="Optional notification title")
+
+
+class NtfyListParams(BaseModel):
+    pass
+
+
+@define_tool(
+    description=(
+        "Generate a unique ntfy.sh notification topic URL using a "
+        "correct-horse-battery-staple style name (5 random dictionary words). "
+        "Returns the topic name and full URL. Optionally subscribes automatically."
+    )
+)
+async def generate_ntfy_topic(params: GenerateNtfyTopicParams) -> str:
+    topic = _generate_topic()
+    url = f"{_NTFY_BASE}/{topic}"
+    label = params.label or topic
+
+    # Auto-subscribe
+    subs = _load_ntfy_subs()
+    subs[topic] = {"label": label, "url": url}
+    _save_ntfy_subs(subs)
+
+    return (
+        f"Generated ntfy topic and subscribed:\n"
+        f"  Topic: {topic}\n"
+        f"  URL:   {url}\n"
+        f"  Label: {label}\n\n"
+        f"Anyone can send notifications to this topic:\n"
+        f"  curl -d 'Hello!' {url}\n\n"
+        f"Or from a browser: {url}"
+    )
+
+
+@define_tool(
+    description=(
+        "Subscribe to an existing ntfy.sh topic to receive notifications. "
+        "New messages will be checked and shown on every prompt."
+    )
+)
+async def ntfy_subscribe(params: NtfySubscribeParams) -> str:
+    topic = params.topic.strip()
+    label = params.label or topic
+    subs = _load_ntfy_subs()
+    subs[topic] = {"label": label, "url": f"{_NTFY_BASE}/{topic}"}
+    _save_ntfy_subs(subs)
+    return f"Subscribed to '{topic}' (label: {label}). {len(subs)} active subscriptions."
+
+
+@define_tool(
+    description="Unsubscribe from a ntfy.sh topic."
+)
+async def ntfy_unsubscribe(params: NtfyUnsubscribeParams) -> str:
+    topic = params.topic.strip()
+    subs = _load_ntfy_subs()
+    if topic not in subs:
+        return f"Not subscribed to '{topic}'."
+    del subs[topic]
+    _save_ntfy_subs(subs)
+    return f"Unsubscribed from '{topic}'. {len(subs)} active subscriptions."
+
+
+@define_tool(
+    description=(
+        "Send a push notification to a ntfy.sh topic. "
+        "Use this when the user wants to send themselves a reminder, "
+        "share a link to their phone, or notify someone."
+    )
+)
+async def ntfy_publish(params: NtfyPublishParams) -> str:
+    topic = params.topic.strip()
+    headers = {}
+    if params.title:
+        headers["Title"] = params.title
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{_NTFY_BASE}/{topic}",
+                content=params.message,
+                headers=headers,
+            )
+            resp.raise_for_status()
+    except Exception as e:
+        return f"Failed to publish: {e}"
+    return f"Notification sent to topic '{topic}'."
+
+
+@define_tool(
+    description="List all active ntfy.sh subscriptions and check for new notifications."
+)
+async def ntfy_list(params: NtfyListParams) -> str:
+    subs = _load_ntfy_subs()
+    if not subs:
+        return "No ntfy subscriptions. Use generate_ntfy_topic to create one."
+    lines = [f"Active subscriptions ({len(subs)}):"]
+    for topic, info in subs.items():
+        lines.append(f"  • {info.get('label', topic)} → {_NTFY_BASE}/{topic}")
+    # Check for new messages
+    notifs = await _check_all_subscriptions()
+    if notifs:
+        lines.append(f"\nNew notifications:\n{notifs}")
+    else:
+        lines.append("\nNo new notifications.")
+    return "\n".join(lines)
+
+
 # ── Tool: Usage report ──────────────────────────────────────────────────────
 
 class GetUsageParams(BaseModel):
@@ -1885,6 +2104,8 @@ async def main():
         scrape_page, browse_web,
         save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,
+        generate_ntfy_topic, ntfy_subscribe, ntfy_unsubscribe,
+        ntfy_publish, ntfy_list,
         switch_profile, update_preferences, exit_app,
     ]
 
@@ -1972,6 +2193,11 @@ async def main():
                             print("\n".join(parts))
                         print()
                     continue
+
+                # Check ntfy subscriptions before each prompt
+                notifs = await _check_all_subscriptions()
+                if notifs:
+                    print(f"\n{notifs}\n")
 
                 done.clear()
                 chunks.clear()

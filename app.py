@@ -17,7 +17,25 @@ import time as _time
 
 import httpx
 from pydantic import BaseModel, Field
-from copilot import CopilotClient, define_tool
+
+try:
+    from copilot import CopilotClient, define_tool as _orig_define_tool
+
+    def define_tool(description=""):
+        """Wrapper that stores description for Ollama tool schema generation."""
+        decorator = _orig_define_tool(description=description)
+        def wrapper(fn):
+            fn._tool_description = description
+            return decorator(fn)
+        return wrapper
+except ImportError:
+    CopilotClient = None
+    def define_tool(description=""):
+        """No-op decorator when copilot SDK is not installed."""
+        def wrapper(fn):
+            fn._tool_description = description
+            return fn
+        return wrapper
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
@@ -62,9 +80,9 @@ class UsageTracker:
         "bookmark_search": 0.0,
         "compact_history": 0.0,
         "search_history_backups": 0.0,
-        # Copilot SDK: GPT-5.2 = 20x multiplier, $0.04/premium request
-        # Each LLM turn = 20 premium requests = $0.80 overage
-        "_llm_turn": 0.80,
+        # Copilot SDK: GPT-4.1 = 1x multiplier, $0.04/premium request
+        # Each LLM turn = 1 premium request = $0.04 overage
+        "_llm_turn": 0.04,
     }
     REPORT_INTERVAL = 10
 
@@ -73,6 +91,7 @@ class UsageTracker:
         self.total_paid_calls = 0
         self.session_cost = 0.0
         self.llm_turns = 0
+        self.ollama_turns = 0
         self._log_path = os.path.expanduser("~/.config/local-finder/usage.json")
 
     def record(self, tool_name: str):
@@ -86,26 +105,43 @@ class UsageTracker:
         self.llm_turns += 1
         self.session_cost += self.COST_PER_CALL["_llm_turn"]
 
+    def record_ollama_turn(self):
+        self.ollama_turns += 1
+
+    def record_local_turn(self, provider: str = "ollama"):
+        """Record a turn handled by a non-Copilot provider (free or cheap)."""
+        self.ollama_turns += 1
+        self.calls[f"_provider:{provider}"] = self.calls.get(f"_provider:{provider}", 0) + 1
+
     def should_report(self) -> bool:
         return self.total_paid_calls > 0 and self.total_paid_calls % self.REPORT_INTERVAL == 0
 
-    _LLM_MODEL = "gpt-5.2"
-    _LLM_MULTIPLIER = 20  # premium requests per LLM turn
+    _LLM_MODEL = "gpt-4.1"
+    _LLM_MULTIPLIER = 1  # premium requests per LLM turn
     _OVERAGE_RATE = 0.04  # $ per premium request (overage)
 
     def summary(self) -> str:
         premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
         llm_cost = self.llm_turns * self.COST_PER_CALL["_llm_turn"]
         lines = [f"📊 Usage — ~${self.session_cost:.2f} this session"]
-        lines.append(
-            f"   LLM ({self._LLM_MODEL}): {self.llm_turns} turns × "
-            f"{self._LLM_MULTIPLIER}x = {premium_reqs} premium reqs "
-            f"(~${llm_cost:.2f})"
-        )
+        if self.llm_turns:
+            lines.append(
+                f"   💲 Copilot ({self._LLM_MODEL}): {self.llm_turns} turns × "
+                f"{self._LLM_MULTIPLIER}x = {premium_reqs} premium reqs "
+                f"(~${llm_cost:.2f})"
+            )
+        # Show per-provider local turns
+        for key, count in sorted(self.calls.items()):
+            if key.startswith("_provider:"):
+                prov = key.split(":", 1)[1]
+                prov_emoji = {"groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
+                lines.append(f"   {prov_emoji} {prov}: {count} turns (free)")
         if self.total_paid_calls:
             api_cost = self.session_cost - llm_cost
             lines.append(f"   Paid API calls: {self.total_paid_calls} (~${api_cost:.3f})")
         for name, count in sorted(self.calls.items()):
+            if name.startswith("_provider:"):
+                continue
             unit = self.COST_PER_CALL.get(name, 0)
             cost_str = f"${unit * count:.3f}" if unit > 0 else "free"
             lines.append(f"   {name}: {count}x ({cost_str})")
@@ -121,6 +157,7 @@ class UsageTracker:
                     cumulative = json.load(f)
             cumulative["total_cost"] = cumulative.get("total_cost", 0) + self.session_cost
             cumulative["total_llm_turns"] = cumulative.get("total_llm_turns", 0) + self.llm_turns
+            cumulative["total_ollama_turns"] = cumulative.get("total_ollama_turns", 0) + self.ollama_turns
             calls = cumulative.get("total_calls", {})
             for name, count in self.calls.items():
                 calls[name] = calls.get(name, 0) + count
@@ -132,7 +169,19 @@ class UsageTracker:
 
     def summary_oneline(self) -> str:
         premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
-        return f"${self.session_cost:.2f} | {self.llm_turns} turns ({premium_reqs} reqs) | {self.total_paid_calls} API"
+        local = f" | {self.ollama_turns} local" if self.ollama_turns else ""
+        parts = [f"${self.session_cost:.2f}"]
+        if self.llm_turns:
+            parts.append(f"💲{self.llm_turns} paid ({premium_reqs} reqs)")
+        # Show provider-specific counts
+        for key, count in sorted(self.calls.items()):
+            if key.startswith("_provider:"):
+                prov = key.split(":", 1)[1]
+                prov_emoji = {"groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
+                parts.append(f"{prov_emoji}{count}")
+        if self.total_paid_calls:
+            parts.append(f"{self.total_paid_calls} API")
+        return " | ".join(parts)
 
     def lifetime_summary(self) -> str:
         try:
@@ -144,6 +193,9 @@ class UsageTracker:
             total_reqs = total_turns * self._LLM_MULTIPLIER
             lines = [f"📊 Lifetime usage — ~${data.get('total_cost', 0):.2f} total"]
             lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
+            ollama_total = data.get("total_ollama_turns", 0)
+            if ollama_total:
+                lines.append(f"   Ollama turns: {ollama_total} (free)")
             for name, count in sorted(data.get("total_calls", {}).items()):
                 lines.append(f"   {name}: {count}x")
             return "\n".join(lines)
@@ -2039,8 +2091,9 @@ class TextSearchParams(BaseModel):
 
 @define_tool(
     description=(
-        "Search for places using a natural-language query via Google Places API. "
-        "Use this when the user describes what they want in plain English, "
+        "Search for places using a natural-language query. "
+        "Automatically uses Google Places API if available, otherwise falls back "
+        "to OpenStreetMap. Just call this tool — it always returns results. "
         "e.g. 'best pizza near me', 'quiet cafes to work from in Brooklyn'."
     )
 )
@@ -2112,9 +2165,10 @@ class NearbySearchParams(BaseModel):
 
 @define_tool(
     description=(
-        "Search for nearby places by type and coordinates via Google Places API. "
-        "Use this when you know the exact location (lat/lng) and the type of "
-        "place the user wants, e.g. restaurants, gyms, gas stations near a point."
+        "Search for nearby places by type and coordinates. "
+        "Automatically uses Google Places API if available, otherwise falls back "
+        "to OpenStreetMap. Just call this tool — it always returns results. "
+        "Use when you know the exact location (lat/lng) and place type."
     )
 )
 async def places_nearby_search(params: NearbySearchParams) -> str:
@@ -2754,6 +2808,15 @@ def _build_system_message() -> str:
     prefs = _load_prefs()
     base = (
         "You are a helpful local-business and general-purpose assistant. "
+        "CRITICAL: You MUST use your available tools to answer questions. "
+        "NEVER guess, fabricate, or answer from memory when a tool can provide "
+        "the information. For example, always call places_text_search for "
+        "restaurant/business queries, web_search for factual questions, "
+        "weather_forecast for weather, etc. If in doubt, use a tool. "
+        "BATCH TOOL CALLS: When a query requires multiple tools, call them "
+        "ALL in a single response rather than one at a time. For example, "
+        "if asked 'find pizza near me and check the weather', call both "
+        "places_text_search and weather_forecast simultaneously. "
         "IMPORTANT: On your first response in a session, and periodically every "
         "few responses, call get_my_location to know where the user is. Cache "
         "the result and use it for any location-relevant queries. "
@@ -2767,8 +2830,10 @@ def _build_system_message() -> str:
         "exact coordinates and a specific place type. "
         "If the user says 'near me' or doesn't specify a location, use your "
         "cached location or call get_my_location. "
-        "If a Places API call fails with a permissions, auth, or quota error, "
-        "call setup_google_auth to fix it, then retry the search. "
+        "The places search tools automatically fall back to OpenStreetMap if "
+        "Google Places is unavailable — just call them normally and they will "
+        "return results either way. Do NOT call setup_google_auth unless the "
+        "user explicitly asks to set up Google authentication. "
         "If the user tells you their name (e.g. 'I'm Alex', 'my name is Alex', "
         "'this is Alex'), call switch_profile with that name to load their profile. "
         "If the user expresses a food preference, dislike, allergy, dietary "
@@ -5090,6 +5155,461 @@ async def search_history_backups(params: SearchHistoryBackupsParams) -> str:
     return header + "\n" + "\n".join(matches)
 
 
+# ── LLM Provider Infrastructure ─────────────────────────────────────────────
+#
+# Providers (set via LLM_PROVIDER env var or --provider flag):
+#   "groq"     ⚡  — Groq cloud API (default, fast & cheap)
+#   "ollama"   🏠  — Local Ollama instance (free, slower)
+#   "openai"   🌐  — OpenAI-compatible endpoint (non-Chinese providers)
+#   "copilot"  💲  — Copilot SDK fallback (paid premium requests)
+
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "groq")
+
+# ── Groq config ──
+_groq_key_path = os.path.expanduser("~/.ssh/GROQ_API_KEY")
+if not os.environ.get("GROQ_API_KEY") and os.path.isfile(_groq_key_path):
+    with open(_groq_key_path) as _f:
+        _key = _f.read().strip()
+        if _key:
+            os.environ["GROQ_API_KEY"] = _key
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3-groq-70b-tool-use")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# ── OpenAI-compatible config (e.g. OpenRouter, DeepInfra, Together) ──
+OPENAI_API_KEY = os.environ.get("OPENAI_COMPAT_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_COMPAT_MODEL", "qwen/qwen3-32b")
+OPENAI_URL = os.environ.get(
+    "OPENAI_COMPAT_URL", "https://openrouter.ai/api/v1/chat/completions"
+)
+
+# ── Ollama config ──
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+
+# ── Provider metadata ──
+PROVIDER_EMOJI = {
+    "groq": "⚡",
+    "ollama": "🏠",
+    "openai": "🌐",
+    "copilot": "💲",
+}
+PROVIDER_LABEL = {
+    "groq": f"Groq ({GROQ_MODEL})",
+    "ollama": f"Ollama ({OLLAMA_MODEL})",
+    "openai": f"OpenAI-compat ({OPENAI_MODEL})",
+    "copilot": "Copilot SDK (GPT-4.1)",
+}
+
+_ollama_ok: bool | None = None
+
+
+def _free_ram_gb() -> float:
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except Exception:
+        pass
+    return 0.0
+
+
+async def _ensure_ollama() -> bool:
+    """Ensure Ollama is installed, running, and has the model pulled."""
+    global _ollama_ok
+    if _ollama_ok is not None:
+        return _ollama_ok
+
+    if _free_ram_gb() < 16:
+        print(f"⚠️  Only {_free_ram_gb():.0f}GB free RAM — skipping local LLM")
+        _ollama_ok = False
+        return False
+
+    async def _ping() -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{OLLAMA_URL}/api/tags")
+                return r.status_code == 200
+        except Exception:
+            return False
+
+    if not await _ping():
+        if not shutil.which("ollama"):
+            print("📦 Installing Ollama...")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=120)
+                if proc.returncode != 0:
+                    _ollama_ok = False
+                    return False
+            except Exception:
+                _ollama_ok = False
+                return False
+
+        print("🚀 Starting Ollama...")
+        try:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            for _ in range(30):
+                await asyncio.sleep(1)
+                if await _ping():
+                    break
+            else:
+                _ollama_ok = False
+                return False
+        except Exception:
+            _ollama_ok = False
+            return False
+
+    # Check if model is already pulled
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            models = [m["name"] for m in r.json().get("models", [])]
+            model_base = OLLAMA_MODEL.split(":")[0]
+            if not any(model_base in m for m in models):
+                print(f"📥 Pulling {OLLAMA_MODEL} (this may take a while)...")
+                proc = await asyncio.create_subprocess_exec(
+                    "ollama", "pull", OLLAMA_MODEL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=1800)
+                if proc.returncode != 0:
+                    _ollama_ok = False
+                    return False
+                print(f"✅ {OLLAMA_MODEL} ready")
+    except Exception:
+        _ollama_ok = False
+        return False
+
+    _ollama_ok = True
+    return True
+
+
+def _tools_to_openai_format(tool_funcs: list) -> list[dict]:
+    """Convert @define_tool functions to OpenAI tool call format."""
+    import inspect
+    tools = []
+    for func in tool_funcs:
+        sig = inspect.signature(func)
+        params_type = None
+        for p in sig.parameters.values():
+            if p.annotation and p.annotation is not inspect.Parameter.empty:
+                params_type = p.annotation
+                break
+
+        properties = {}
+        required = []
+        if params_type and hasattr(params_type, "model_json_schema"):
+            schema = params_type.model_json_schema()
+            properties = schema.get("properties", {})
+            required = schema.get("required", [])
+            for prop in properties.values():
+                prop.pop("title", None)
+
+        desc = getattr(func, "_tool_description", "") or func.__doc__ or ""
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": func.__name__,
+                "description": desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        })
+    return tools
+
+
+async def _openai_chat(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    stream: bool = True,
+    *,
+    api_url: str,
+    api_key: str,
+    model: str,
+) -> dict:
+    """OpenAI-compatible chat completion (works with Groq, OpenRouter, etc.)."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    body: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    }
+    if tools:
+        body["tools"] = tools
+        body["stream"] = False
+        stream = False
+
+    timeout = httpx.Timeout(180.0, connect=10.0)
+
+    if not stream:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(api_url, headers=headers, json=body)
+            r.raise_for_status()
+            choice = r.json()["choices"][0]
+            return choice["message"]
+
+    # Streaming
+    full_content = ""
+    final_msg: dict = {}
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        async with c.stream("POST", api_url, headers=headers, json=body) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {})
+                text = delta.get("content", "")
+                if text:
+                    print(text, end="", flush=True)
+                    full_content += text
+
+    final_msg = {"role": "assistant", "content": full_content}
+    return final_msg
+
+
+async def _ollama_chat(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    stream: bool = True,
+) -> dict:
+    """Ollama chat completion."""
+    body: dict = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": stream,
+    }
+    if tools:
+        body["tools"] = tools
+        body["stream"] = False
+        stream = False
+
+    timeout = httpx.Timeout(300.0, connect=10.0)
+
+    if not stream:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(f"{OLLAMA_URL}/api/chat", json=body)
+            r.raise_for_status()
+            return r.json().get("message", {})
+
+    full_content = ""
+    final_msg: dict = {}
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        async with c.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if chunk.get("done"):
+                    final_msg = chunk.get("message", {"role": "assistant", "content": full_content})
+                    break
+                delta = chunk.get("message", {}).get("content", "")
+                if delta:
+                    print(delta, end="", flush=True)
+                    full_content += delta
+
+    if not final_msg:
+        final_msg = {"role": "assistant", "content": full_content}
+    return final_msg
+
+
+async def _provider_chat(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    stream: bool = True,
+    provider: str | None = None,
+) -> dict:
+    """Route chat to the active provider."""
+    prov = provider or LLM_PROVIDER
+    if prov == "groq":
+        return await _openai_chat(
+            messages, tools, stream,
+            api_url=GROQ_URL, api_key=GROQ_API_KEY, model=GROQ_MODEL,
+        )
+    elif prov == "openai":
+        return await _openai_chat(
+            messages, tools, stream,
+            api_url=OPENAI_URL, api_key=OPENAI_API_KEY, model=OPENAI_MODEL,
+        )
+    elif prov == "ollama":
+        return await _ollama_chat(messages, tools, stream)
+    else:
+        raise ValueError(f"Unknown provider: {prov} (use groq/ollama/openai/copilot)")
+
+
+async def _run_tool_loop(
+    prompt: str,
+    tool_funcs: list,
+    system_message: str,
+    provider: str | None = None,
+    max_rounds: int = 3,
+) -> str:
+    """Run a full tool-calling loop via any OpenAI-compatible provider.
+    Returns the final assistant response text."""
+    import inspect
+    prov = provider or LLM_PROVIDER
+    emoji = PROVIDER_EMOJI.get(prov, "?")
+    tool_map = {f.__name__: f for f in tool_funcs}
+    tools_schema = _tools_to_openai_format(tool_funcs)
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt},
+    ]
+
+    for _round in range(max_rounds):
+        _usage.record_local_turn(prov)
+        response = await _provider_chat(messages, tools=tools_schema, stream=False, provider=prov)
+
+        tool_calls = response.get("tool_calls", [])
+        if not tool_calls:
+            content = response.get("content", "")
+            if content:
+                print(content, end="", flush=True)
+                return content
+            messages.append(response)
+            response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+            return response.get("content", "")
+
+        messages.append(response)
+
+        async def _exec_tool(tc):
+            fn = tc.get("function", {})
+            fn_name = fn.get("name", "")
+            fn_args = fn.get("arguments", {})
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except json.JSONDecodeError:
+                    fn_args = {}
+            func = tool_map.get(fn_name)
+            if not func:
+                return tc.get("id", ""), fn_name, f"Unknown tool: {fn_name}"
+            try:
+                sig = inspect.signature(func)
+                params_type = None
+                for p in sig.parameters.values():
+                    if p.annotation and p.annotation is not inspect.Parameter.empty:
+                        params_type = p.annotation
+                        break
+                if params_type:
+                    result = await func(params_type(**fn_args))
+                else:
+                    result = await func()
+            except Exception as e:
+                result = f"Error calling {fn_name}: {e}"
+            return tc.get("id", ""), fn_name, result
+
+        tasks = [_exec_tool(tc) for tc in tool_calls]
+        results = await asyncio.gather(*tasks)
+
+        tool_names = [name for _, name, _ in results]
+        print(f"  {emoji} 🔧 {', '.join(tool_names)}", flush=True)
+
+        for call_id, fn_name, result in results:
+            _usage.record(fn_name)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": str(result),
+            })
+
+    # Max rounds — final summary
+    _usage.record_local_turn(prov)
+    response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+    return response.get("content", "")
+
+
+# ── Speech-to-text via Groq Whisper ─────────────────────────────────────────
+
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-large-v3")
+_stt_enabled = False
+
+
+def _check_stt_deps() -> bool:
+    """Check if audio recording dependencies are available."""
+    try:
+        import sounddevice  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+async def _record_and_transcribe(duration: float = 5.0) -> str:
+    """Record audio from mic and transcribe via Groq Whisper API."""
+    import sounddevice as sd
+    import tempfile
+    import wave
+
+    sample_rate = 16000
+    print(f"🎤 Recording ({duration}s)... ", end="", flush=True)
+
+    # Record audio synchronously (sounddevice blocks)
+    audio = sd.rec(
+        int(duration * sample_rate),
+        samplerate=sample_rate,
+        channels=1,
+        dtype="int16",
+    )
+    sd.wait()
+    print("done. Transcribing... ", end="", flush=True)
+
+    # Write to temp WAV file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+        with wave.open(tmp, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio.tobytes())
+
+    try:
+        # Send to Groq Whisper API
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            with open(tmp_path, "rb") as f:
+                r = await c.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                    files={"file": ("audio.wav", f, "audio/wav")},
+                    data={"model": WHISPER_MODEL},
+                )
+            r.raise_for_status()
+            text = r.json().get("text", "").strip()
+            print(f"✅ \"{text}\"")
+            return text
+    finally:
+        os.unlink(tmp_path)
+
+
 class _CursesRequested(Exception):
     def __init__(self, app_module):
         self.app_module = app_module
@@ -5100,7 +5620,21 @@ async def main():
 
     # Curses is default; --plain disables it
     use_plain = "--plain" in sys.argv
-    args = [a for a in sys.argv[1:] if a not in ("--plain", "--curses")]
+    # Filter out flags from prompt args
+    skip_next = False
+    args = []
+    for a in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("--plain", "--curses"):
+            continue
+        if a == "--provider":
+            skip_next = True
+            continue
+        if a.startswith("--provider="):
+            continue
+        args.append(a)
 
     if not GOOGLE_API_KEY and not shutil.which("gcloud"):
         pass  # Places will silently fall back to OpenStreetMap
@@ -5116,7 +5650,6 @@ async def main():
         import curses as _curses
         import curses_ui
         import app as _self_module
-        # Must run curses outside the async context — handled by __main__
         raise _CursesRequested(_self_module)
 
     all_tools = [
@@ -5154,26 +5687,71 @@ async def main():
         search_history_backups,
     ]
 
-    # Ensure the bundled copilot binary is executable
-    try:
-        from copilot.client import _get_bundled_cli_path
-        cli_bin = _get_bundled_cli_path()
-        if cli_bin and not os.access(cli_bin, os.X_OK):
-            os.chmod(cli_bin, 0o755)
-    except Exception:
-        pass
+    # ── Determine active provider ──────────────────────────────────────────
+    # CLI flag: --provider groq|ollama|openai|copilot
+    active_provider = LLM_PROVIDER
+    for a in sys.argv[1:]:
+        if a.startswith("--provider="):
+            active_provider = a.split("=", 1)[1]
+        elif a == "--provider" and sys.argv.index(a) + 1 < len(sys.argv):
+            active_provider = sys.argv[sys.argv.index(a) + 1]
 
-    client = CopilotClient()
-    await client.start()
+    if active_provider == "ollama":
+        ok = await _ensure_ollama()
+        if not ok:
+            print("⚠️  Ollama unavailable — falling back to groq")
+            active_provider = "groq" if GROQ_API_KEY else "copilot"
 
-    session = await client.create_session({
-        "model": "gpt-5.2",
-        "tools": all_tools,
-        "system_message": {"content": _build_system_message()},
-    })
+    emoji = PROVIDER_EMOJI.get(active_provider, "?")
+    label = PROVIDER_LABEL.get(active_provider, active_provider)
+    print(f"{emoji} Provider: {label}")
 
+    # Lazy-init Copilot SDK — only when needed
+    _sdk_client = None
+    _sdk_session = None
+
+    async def _get_sdk_session():
+        nonlocal _sdk_client, _sdk_session
+        if _sdk_session is not None:
+            return _sdk_session
+        if CopilotClient is None:
+            raise RuntimeError("Copilot SDK not installed — cannot use paid fallback")
+        try:
+            from copilot.client import _get_bundled_cli_path
+            cli_bin = _get_bundled_cli_path()
+            if cli_bin and not os.access(cli_bin, os.X_OK):
+                os.chmod(cli_bin, 0o755)
+        except Exception:
+            pass
+        _sdk_client = CopilotClient()
+        await _sdk_client.start()
+        _sdk_session = await _sdk_client.create_session({
+            "model": "gpt-4.1",
+            "tools": all_tools,
+            "system_message": {"content": _build_system_message()},
+        })
+        return _sdk_session
+
+    async def _rebuild_sdk_session():
+        nonlocal _sdk_session
+        if _sdk_session:
+            await _sdk_session.destroy()
+        _sdk_session = await _sdk_client.create_session({
+            "model": "gpt-4.1",
+            "tools": all_tools,
+            "system_message": {"content": _build_system_message()},
+        })
+        return _sdk_session
+    # ── SDK fallback helpers ───────────────────────────────────────────────
+    _SESSION_TIMEOUT = 120
     done = asyncio.Event()
     chunks: list[str] = []
+
+    async def _wait_for_done():
+        try:
+            await asyncio.wait_for(done.wait(), timeout=_SESSION_TIMEOUT)
+        except asyncio.TimeoutError:
+            print(f"\n⚠️  Response timed out after {_SESSION_TIMEOUT}s. Try again.")
 
     def on_event(event):
         etype = event.type.value
@@ -5190,13 +5768,33 @@ async def main():
             else:
                 print()
                 _append_chat("assistant", "".join(chunks).strip())
-            # Auto-report usage every N paid calls
             if _usage.should_report():
                 print(f"\n{_usage.summary()}\n")
         elif etype == "session.idle":
             done.set()
 
-    session.on(on_event)
+    async def _send_sdk(user_prompt: str):
+        """Send a prompt via Copilot SDK (paid fallback)."""
+        session = await _get_sdk_session()
+        session.on(on_event)
+        done.clear()
+        chunks.clear()
+        await session.send({"prompt": user_prompt})
+        await _wait_for_done()
+
+    async def _send_prompt(user_prompt: str, force_sdk: bool = False):
+        """Send a prompt via active provider, with Copilot SDK as fallback."""
+        if not force_sdk and active_provider != "copilot":
+            try:
+                result = await _run_tool_loop(
+                    user_prompt, all_tools, _build_system_message(),
+                    provider=active_provider,
+                )
+                _append_chat("assistant", result.strip() if result else "")
+                return
+            except Exception as e:
+                print(f"\n⚠️  {emoji} error: {e} — falling back to 💲 Copilot SDK")
+        await _send_sdk(user_prompt)
 
     # Schedule calendar reminders on startup
     _schedule_calendar_reminders()
@@ -5210,8 +5808,13 @@ async def main():
         else:
             print("Local Finder — interactive mode")
             print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
-        print("Tab to complete, Ctrl+R to search history, 'quit' to exit.\n")
+        print("Tab to complete, Ctrl+R to search history, 'quit' to exit.")
+        if _check_stt_deps() and GROQ_API_KEY:
+            _stt_enabled = True
+            print("🎤 Voice: '!v' for one-shot, '!voice' to toggle always-on")
+        print()
         shell_mode = False
+        voice_mode = False
         try:
             while True:
                 if _exit_requested.is_set():
@@ -5223,7 +5826,17 @@ async def main():
                     print()
                     break
                 if not prompt:
-                    continue
+                    if voice_mode and _stt_enabled:
+                        try:
+                            prompt = await _record_and_transcribe()
+                        except Exception as e:
+                            print(f"⚠️  Voice error: {e}\n")
+                            continue
+                        if not prompt:
+                            print("(no speech detected)\n")
+                            continue
+                    else:
+                        continue
 
                 # Toggle shell mode
                 if prompt.lower() in ("!shell", "!sh"):
@@ -5233,8 +5846,33 @@ async def main():
                           f"{'Type commands directly. !shell to exit.' if shell_mode else 'Back to assistant mode.'}\n")
                     continue
 
+                # Voice mode toggle
+                if prompt.lower() == "!voice" and _stt_enabled:
+                    voice_mode = not voice_mode
+                    state = "ON 🎤" if voice_mode else "OFF"
+                    print(f"Voice mode {state}\n")
+                    continue
+
+                # One-shot voice input
+                if prompt.lower().startswith("!v") and _stt_enabled:
+                    parts = prompt.split(None, 1)
+                    dur = 5.0
+                    if len(parts) > 1:
+                        try:
+                            dur = float(parts[1])
+                        except ValueError:
+                            pass
+                    try:
+                        prompt = await _record_and_transcribe(dur)
+                    except Exception as e:
+                        print(f"⚠️  Voice error: {e}\n")
+                        continue
+                    if not prompt:
+                        print("(no speech detected)\n")
+                        continue
+
                 # Shell mode: run command directly
-                if shell_mode or prompt.startswith("!"):
+                if shell_mode or (prompt.startswith("!") and not prompt.startswith("!pro")):
                     cmd_str = prompt if shell_mode else prompt[1:].strip()
                     if not cmd_str:
                         continue
@@ -5253,7 +5891,6 @@ async def main():
                         print(output)
                     else:
                         print("(no output)")
-                    # Log to chat history
                     _append_chat("you", f"$ {cmd_str}")
                     _append_chat("assistant", output or "(no output)")
                     print()
@@ -5262,7 +5899,6 @@ async def main():
                     print(f"Opening {_prefs_path()}")
                     editor = os.environ.get("EDITOR", "nano")
                     subprocess.call([editor, _prefs_path()])
-                    session._system_message = {"content": _build_system_message()}
                     print("Preferences reloaded.\n")
                     continue
                 if prompt.lower() == "profiles":
@@ -5300,63 +5936,55 @@ async def main():
                 if notifs:
                     print(f"\n{notifs}\n")
 
-                done.clear()
-                chunks.clear()
+                # Check for !pro prefix to force paid model
+                force_sdk = False
+                if prompt.lower().startswith("!pro "):
+                    force_sdk = True
+                    prompt = prompt[5:].strip()
+                    print("☁️  Forcing Copilot SDK for this query")
+
                 _exit_requested.clear()
                 _profile_switch_requested.clear()
                 _compact_session_requested.clear()
                 _append_chat("you", prompt)
                 print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                 print("Assistant: ", end="", flush=True)
-                await session.send({"prompt": prompt})
-                await done.wait()
+                await _send_prompt(prompt, force_sdk=force_sdk)
                 print()
 
-                # If profile was switched, rebuild session with new prefs
+                # If profile was switched, rebuild SDK session if active
                 if _profile_switch_requested.is_set():
                     _profile_switch_requested.clear()
-                    await session.destroy()
-                    session = await client.create_session({
-                        "model": "gpt-5.2",
-                        "tools": all_tools,
-                        "system_message": {"content": _build_system_message()},
-                    })
-                    session.on(on_event)
-                    print(f"[Session rebuilt for profile: {_active_profile}]\n")
+                    if _sdk_session:
+                        await _rebuild_sdk_session()
+                    print(f"[Profile switched: {_active_profile}]\n")
 
-                    # Re-send the prompt so the LLM can finish processing
-                    # (e.g. updating preferences after a profile switch)
-                    done.clear()
-                    chunks.clear()
-                    _profile_switch_requested.clear()
+                    _append_chat("you", prompt)
                     print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                     print("Assistant: ", end="", flush=True)
-                    await session.send({"prompt": prompt})
-                    await done.wait()
+                    await _send_prompt(prompt, force_sdk=force_sdk)
                     print()
 
-                # If history was compacted, rebuild session with fresh context
                 if _compact_session_requested.is_set():
                     _compact_session_requested.clear()
-                    await session.destroy()
-                    session = await client.create_session({
-                        "model": "gpt-5.2",
-                        "tools": all_tools,
-                        "system_message": {"content": _build_system_message()},
-                    })
-                    session.on(on_event)
+                    if _sdk_session:
+                        await _rebuild_sdk_session()
                     print("[Session rebuilt with compacted history]\n")
         finally:
             _save_history()
             _save_last_profile()
             _usage.save()
     else:
-        await session.send({"prompt": prompt})
-        await done.wait()
+        _append_chat("you", prompt)
+        print("Assistant: ", end="", flush=True)
+        await _send_prompt(prompt)
+        print()
         _usage.save()
 
-    await session.destroy()
-    await client.stop()
+    if _sdk_session:
+        await _sdk_session.destroy()
+    if _sdk_client:
+        await _sdk_client.stop()
 
 
 if __name__ == "__main__":

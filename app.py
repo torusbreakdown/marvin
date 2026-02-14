@@ -2145,118 +2145,138 @@ async def steam_user_summary(params: SteamUserSummaryParams) -> str:
     return "\n".join(lines)
 
 
-# ── Tool: Edamam recipe search ───────────────────────────────────────────────
+# ── Tool: TheMealDB recipe search ────────────────────────────────────────────
 
-_EDAMAM_BASE = "https://api.edamam.com/api/recipes/v2"
-
-
-def _edamam_creds():
-    app_id = _load_ssh_key("EDAMAM_APP_ID")
-    app_key = _load_ssh_key("EDAMAM_APP_KEY")
-    return app_id, app_key
+_MEALDB_BASE = "https://www.themealdb.com/api/json/v1/1"
 
 
 class RecipeSearchParams(BaseModel):
-    query: str = Field(description="Search query (ingredient, dish name, cuisine, etc.)")
-    diet: str | None = Field(default=None, description="Diet filter: balanced, high-fiber, high-protein, low-carb, low-fat, low-sodium")
-    health: str | None = Field(default=None, description="Health filter: vegan, vegetarian, gluten-free, dairy-free, peanut-free, keto-friendly, paleo, etc.")
-    cuisine_type: str | None = Field(default=None, description="Cuisine: American, Asian, Chinese, French, Indian, Italian, Japanese, Mexican, etc.")
-    meal_type: str | None = Field(default=None, description="Meal: Breakfast, Lunch, Dinner, Snack, Teatime")
-    dish_type: str | None = Field(default=None, description="Dish: Soup, Salad, Main course, Desserts, Side dish, Drinks, etc.")
-    calories: str | None = Field(default=None, description="Calorie range, e.g. '200-500' or '100+'")
-    excluded: list[str] | None = Field(default=None, description="Ingredients to exclude")
-    max_results: int = Field(default=5, description="Max results (1-10)")
+    query: str = Field(description="Search query — a dish name like 'pasta' or 'chicken curry'")
+    search_type: str = Field(
+        default="name",
+        description="'name' to search by dish name, 'ingredient' to search by main ingredient (e.g. 'chicken')"
+    )
+
+
+class RecipeLookupParams(BaseModel):
+    meal_id: str = Field(description="TheMealDB meal ID from search results")
 
 
 @define_tool(
     description=(
-        "Search for recipes using the Edamam API. Supports filtering by diet, "
-        "health labels, cuisine, meal type, dish type, calories, and excluded "
-        "ingredients. Returns recipe names, ingredients, nutrition, and source links."
+        "Search for recipes by dish name or main ingredient using TheMealDB. "
+        "Free, no API key needed. Returns meal names, categories, cuisines, "
+        "and instructions."
     )
 )
 async def recipe_search(params: RecipeSearchParams) -> str:
-    app_id, app_key = _edamam_creds()
-    if not app_id or not app_key:
-        return (
-            "Edamam credentials not configured. Sign up at https://developer.edamam.com/ "
-            "then put your credentials in:\n  ~/.ssh/EDAMAM_APP_ID\n  ~/.ssh/EDAMAM_APP_KEY"
-        )
-
-    query_params: dict = {
-        "type": "public",
-        "q": params.query,
-        "app_id": app_id,
-        "app_key": app_key,
-    }
-    if params.diet:
-        query_params["diet"] = params.diet
-    if params.health:
-        query_params["health"] = params.health
-    if params.cuisine_type:
-        query_params["cuisineType"] = params.cuisine_type
-    if params.meal_type:
-        query_params["mealType"] = params.meal_type
-    if params.dish_type:
-        query_params["dishType"] = params.dish_type
-    if params.calories:
-        query_params["calories"] = params.calories
-    if params.excluded:
-        query_params["excluded"] = params.excluded
+    if params.search_type == "ingredient":
+        url = f"{_MEALDB_BASE}/filter.php"
+        qp = {"i": params.query}
+    else:
+        url = f"{_MEALDB_BASE}/search.php"
+        qp = {"s": params.query}
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(_EDAMAM_BASE, params=query_params)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=qp)
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
         return f"Recipe search failed: {e}"
 
-    hits = data.get("hits", [])[:min(params.max_results, 10)]
-    if not hits:
+    meals = data.get("meals") or []
+    if not meals:
         return f"No recipes found for '{params.query}'."
 
-    lines = [f"Found {data.get('count', len(hits))} recipes for '{params.query}' (showing {len(hits)}):\n"]
-    for i, hit in enumerate(hits, 1):
-        r = hit.get("recipe", {})
-        label = r.get("label", "?")
-        source = r.get("source", "?")
-        url = r.get("url", "")
-        servings = r.get("yield", "?")
-        cal = r.get("calories", 0)
-        cal_per = round(cal / max(r.get("yield", 1), 1))
-        time_min = r.get("totalTime", 0)
-        ingredients = r.get("ingredientLines", [])
-        diet_labels = r.get("dietLabels", [])
-        health_labels = r.get("healthLabels", [])
-        cuisine = r.get("cuisineType", [])
-        meal = r.get("mealType", [])
+    lines = [f"Found {len(meals)} recipe(s) for '{params.query}':\n"]
+    for i, m in enumerate(meals[:10], 1):
+        name = m.get("strMeal", "?")
+        mid = m.get("idMeal", "")
+        cat = m.get("strCategory", "")
+        area = m.get("strArea", "")
+        instructions = m.get("strInstructions", "")
 
-        lines.append(f"{i}. **{label}**")
-        lines.append(f"   Source: {source}")
-        if url:
-            lines.append(f"   Recipe: {url}")
-        if time_min:
-            lines.append(f"   Time: {int(time_min)} min | Servings: {servings} | ~{cal_per} cal/serving")
+        lines.append(f"{i}. **{name}** (id: {mid})")
+        if cat or area:
+            lines.append(f"   {cat}{' · ' + area if area else ''}")
+
+        # Ingredient search only returns name/id/thumb — no details
+        if instructions:
+            # Collect ingredients
+            ingredients = []
+            for j in range(1, 21):
+                ing = m.get(f"strIngredient{j}", "")
+                measure = m.get(f"strMeasure{j}", "")
+                if ing and ing.strip():
+                    ingredients.append(f"{measure.strip()} {ing.strip()}".strip())
+            if ingredients:
+                lines.append(f"   Ingredients: {', '.join(ingredients[:10])}")
+                if len(ingredients) > 10:
+                    lines.append(f"     ... and {len(ingredients) - 10} more")
+            # Truncate instructions
+            short = instructions[:200].replace("\r\n", " ").replace("\n", " ")
+            if len(instructions) > 200:
+                short += "..."
+            lines.append(f"   Instructions: {short}")
+            lines.append(f"   Use recipe_lookup with meal_id='{mid}' for full details.")
         else:
-            lines.append(f"   Servings: {servings} | ~{cal_per} cal/serving")
-        if diet_labels:
-            lines.append(f"   Diet: {', '.join(diet_labels)}")
-        if health_labels:
-            shown = [h for h in health_labels if h not in ("DASH", "Mediterranean")][:6]
-            if shown:
-                lines.append(f"   Health: {', '.join(shown)}")
-        if cuisine:
-            lines.append(f"   Cuisine: {', '.join(cuisine)}")
-        if meal:
-            lines.append(f"   Meal: {', '.join(meal)}")
-        if ingredients:
-            lines.append(f"   Ingredients ({len(ingredients)}):")
-            for ing in ingredients[:12]:
-                lines.append(f"     • {ing}")
-            if len(ingredients) > 12:
-                lines.append(f"     ... and {len(ingredients) - 12} more")
+            lines.append(f"   Use recipe_lookup with meal_id='{mid}' for full recipe.")
         lines.append("")
+
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get full recipe details by TheMealDB meal ID. Returns complete "
+        "ingredients list, measurements, instructions, category, cuisine, "
+        "and source links."
+    )
+)
+async def recipe_lookup(params: RecipeLookupParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{_MEALDB_BASE}/lookup.php", params={"i": params.meal_id})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Recipe lookup failed: {e}"
+
+    meals = data.get("meals") or []
+    if not meals:
+        return f"No recipe found for ID '{params.meal_id}'."
+
+    m = meals[0]
+    name = m.get("strMeal", "?")
+    cat = m.get("strCategory", "")
+    area = m.get("strArea", "")
+    instructions = m.get("strInstructions", "")
+    source = m.get("strSource", "")
+    youtube = m.get("strYoutube", "")
+    tags = m.get("strTags", "") or ""
+
+    ingredients = []
+    for j in range(1, 21):
+        ing = m.get(f"strIngredient{j}", "")
+        measure = m.get(f"strMeasure{j}", "")
+        if ing and ing.strip():
+            ingredients.append(f"  • {measure.strip()} {ing.strip()}".strip())
+
+    lines = [f"**{name}**"]
+    if cat or area:
+        lines.append(f"Category: {cat} | Cuisine: {area}")
+    if tags:
+        lines.append(f"Tags: {tags}")
+    if ingredients:
+        lines.append(f"\nIngredients ({len(ingredients)}):")
+        lines.extend(ingredients)
+    if instructions:
+        lines.append(f"\nInstructions:\n{instructions.strip()}")
+    if source:
+        lines.append(f"\nSource: {source}")
+    if youtube:
+        lines.append(f"Video: {youtube}")
 
     return "\n".join(lines)
 
@@ -7150,7 +7170,7 @@ def _build_all_tools():
         search_games, get_game_details,
         steam_search, steam_app_details, steam_featured,
         steam_player_stats, steam_user_games, steam_user_summary,
-        recipe_search,
+        recipe_search, recipe_lookup,
         music_search, music_lookup,
         spotify_auth, spotify_search, spotify_create_playlist, spotify_add_tracks,
         scrape_page, browse_web,

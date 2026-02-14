@@ -215,8 +215,8 @@ The app is designed to work with **zero API keys** for most features:
 | Web search | DuckDuckGo | — | No |
 | Academic search | Semantic Scholar / arXiv | — | No |
 | Notifications | ntfy.sh | — | No |
-| Movies/TV | OMDB | ❌ No fallback | Yes (free key) |
-| Games | RAWG | ❌ No fallback | Yes (free key) |
+| Movies/TV | OMDB | DuckDuckGo web search | No (DDG is free) |
+| Games | RAWG | DuckDuckGo web search | No (DDG is free) |
 
 ### Calendar Reminders
 

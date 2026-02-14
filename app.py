@@ -1263,19 +1263,29 @@ class GetMovieDetailsParams(BaseModel):
 
 @define_tool(
     description=(
-        "Search for movies and TV shows using OMDB. Returns titles, year, "
-        "IMDb/Rotten Tomatoes/Metacritic ratings, plot, and more. "
-        "Set OMDB_API_KEY env var (free at omdbapi.com/apikey.aspx). "
+        "Search for movies and TV shows. Uses OMDB if API key is set, "
+        "otherwise falls back to DuckDuckGo web search. "
         "Use this when users ask about film reviews, movie ratings, "
         "or 'is X movie good'."
     )
 )
 async def search_movies(params: SearchMoviesParams) -> str:
     if not OMDB_API_KEY:
-        return (
-            "OMDB_API_KEY not set. Get a free key at https://www.omdbapi.com/apikey.aspx "
-            "and set it: export OMDB_API_KEY=your_key"
-        )
+        # Fallback to DuckDuckGo
+        from ddgs import DDGS
+        try:
+            q = f"{params.query} movie"
+            if params.year:
+                q += f" {params.year}"
+            results = DDGS().text(q, max_results=min(params.max_results, 10))
+        except Exception as e:
+            return f"Search failed: {e}"
+        if not results:
+            return f"No results for '{params.query}'."
+        lines = [f"Movie results via web search (set OMDB_API_KEY for richer data):"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r.get('title', '?')}\n   {r.get('href', '')}\n   {r.get('body', '')}")
+        return "\n\n".join(lines)
 
     api_params = {"apikey": OMDB_API_KEY, "s": params.query}
     if params.year:
@@ -1312,7 +1322,21 @@ async def search_movies(params: SearchMoviesParams) -> str:
 )
 async def get_movie_details(params: GetMovieDetailsParams) -> str:
     if not OMDB_API_KEY:
-        return "OMDB_API_KEY not set. Get a free key at https://www.omdbapi.com/apikey.aspx"
+        # Fallback to DuckDuckGo
+        from ddgs import DDGS
+        q = params.title or params.imdb_id or ""
+        if not q:
+            return "Provide either a title or IMDb ID."
+        try:
+            results = DDGS().text(f"{q} movie review rating", max_results=5)
+        except Exception as e:
+            return f"Search failed: {e}"
+        if not results:
+            return f"No results for '{q}'."
+        lines = [f"Movie details via web search (set OMDB_API_KEY for richer data):"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r.get('title', '?')}\n   {r.get('href', '')}\n   {r.get('body', '')}")
+        return "\n\n".join(lines)
 
     api_params = {"apikey": OMDB_API_KEY, "plot": "full"}
     if params.imdb_id:
@@ -1363,18 +1387,28 @@ class GetGameDetailsParams(BaseModel):
 
 @define_tool(
     description=(
-        "Search for video games using RAWG. Returns titles, platforms, "
-        "ratings, Metacritic scores, and release dates. "
-        "Set RAWG_API_KEY env var (free at rawg.io/apidocs). "
+        "Search for video games. Uses RAWG if API key is set, "
+        "otherwise falls back to DuckDuckGo web search. "
         "Use when users ask about game reviews or 'is X game good'."
     )
 )
 async def search_games(params: SearchGamesParams) -> str:
     if not RAWG_API_KEY:
-        return (
-            "RAWG_API_KEY not set. Get a free key at https://rawg.io/apidocs "
-            "and set it: export RAWG_API_KEY=your_key"
-        )
+        # Fallback to DuckDuckGo
+        from ddgs import DDGS
+        try:
+            results = DDGS().text(
+                f"{params.query} video game review",
+                max_results=min(params.max_results, 10),
+            )
+        except Exception as e:
+            return f"Search failed: {e}"
+        if not results:
+            return f"No results for '{params.query}'."
+        lines = [f"Game results via web search (set RAWG_API_KEY for richer data):"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"{i}. {r.get('title', '?')}\n   {r.get('href', '')}\n   {r.get('body', '')}")
+        return "\n\n".join(lines)
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1422,7 +1456,10 @@ async def search_games(params: SearchGamesParams) -> str:
 )
 async def get_game_details(params: GetGameDetailsParams) -> str:
     if not RAWG_API_KEY:
-        return "RAWG_API_KEY not set. Get a free key at https://rawg.io/apidocs"
+        return (
+            "RAWG_API_KEY not set — cannot look up by game ID without it. "
+            "Use search_games to find info via web search, or set RAWG_API_KEY."
+        )
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:

@@ -2676,12 +2676,37 @@ async def spotify_add_tracks(params: SpotifyAddTracksParams) -> str:
                 try:
                     resp = await client.get(
                         "https://api.spotify.com/v1/search",
-                        params={"q": q, "type": "track", "limit": 1},
+                        params={"q": q, "type": "track", "limit": 5},
                     )
                     resp.raise_for_status()
                     items = resp.json().get("tracks", {}).get("items", [])
                     if items:
-                        track = items[0]
+                        def score_track(t: dict) -> int:
+                            name = (t.get("name") or "").lower()
+                            album = (t.get("album", {}).get("name") or "").lower()
+                            artists = " ".join((a.get("name") or "") for a in t.get("artists", [])).lower()
+                            blob = f"{name} {album} {artists}"
+
+                            score = 0
+                            for kw, w in (
+                                ("gregorian", 5),
+                                ("chant", 4),
+                                ("monk", 3),
+                                ("monks", 3),
+                                ("schola", 3),
+                                ("abbey", 2),
+                                ("antiphon", 2),
+                                ("plainchant", 5),
+                                ("silos", 2),
+                            ):
+                                if kw in blob:
+                                    score += w
+                            for kw, w in (("remix", 6), ("version", 2), ("rainstorm", 6), ("double", 2)):
+                                if kw in blob:
+                                    score -= w
+                            return score
+
+                        track = max(items, key=score_track)
                         uris.append(track["uri"])
                         artists = ", ".join(a["name"] for a in track.get("artists", []))
                         added.append(f"  ✅ {track['name']} — {artists}")
@@ -3749,6 +3774,8 @@ def _save_chat_log(log: list[dict], name: str | None = None):
 
 
 def _append_chat(role: str, text: str):
+    if not text or not text.strip():
+        return
     log = _load_chat_log()
     log.append({"role": role, "text": text, "time": _time.strftime("%H:%M")})
 

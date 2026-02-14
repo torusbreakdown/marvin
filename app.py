@@ -2891,6 +2891,11 @@ def _build_system_message() -> str:
         "IMPORTANT: On your first response in a session, and periodically every "
         "few responses, call get_my_location to know where the user is. Cache "
         "the result and use it for any location-relevant queries. "
+        "CRITICAL: The user's location is ONLY determined by get_my_location. "
+        "If the user searches for places in another city (e.g. 'restaurants in "
+        "San Diego'), that does NOT change their location — they are still where "
+        "get_my_location said they are. Only use the searched city for that "
+        "specific query, not for subsequent 'near me' queries. "
         "Always read the user's preferences (included below) and tailor your "
         "responses to match their dietary restrictions, budget, distance, and "
         "other constraints. "
@@ -5437,7 +5442,7 @@ async def blender_screenshot(params: BlenderScreenshotParams) -> str:
 #   "openai"   🌐  — OpenAI-compatible endpoint (non-Chinese providers)
 #   "copilot"  💲  — Copilot SDK fallback (paid premium requests)
 
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "copilot")
 
 # ── Groq config ──
 _groq_key_path = os.path.expanduser("~/.ssh/GROQ_API_KEY")

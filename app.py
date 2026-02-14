@@ -2900,8 +2900,13 @@ async def main():
 
     if interactive:
         _setup_readline()
-        print("Local Finder — interactive mode")
-        print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
+        history = _compact_history()
+        if history:
+            print(f"Welcome back! Profile: {_active_profile}")
+            print(f"Recent history:\n{history}")
+        else:
+            print("Local Finder — interactive mode")
+            print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
         print("Tab to complete, Ctrl+R to search history, 'quit' to exit.\n")
         try:
             while True:

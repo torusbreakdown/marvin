@@ -431,11 +431,21 @@ async def curses_main(stdscr, app_module):
 
     session.on(on_event)
 
-    ui.add_message("system",
-        f"Welcome to Local Finder (curses mode).\n"
-        f"Profile: {app_module._active_profile}\n"
-        f"Type your message below. PgUp/PgDn to scroll. Ctrl+D to quit."
-    )
+    # Show history summary or welcome message
+    if ui.input_history:
+        recent = ui.input_history[-10:]
+        summary = "\n".join(f"  • {l}" for l in recent)
+        ui.add_message("system",
+            f"Welcome back! Profile: {app_module._active_profile}\n"
+            f"Recent history:\n{summary}\n\n"
+            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+D to quit."
+        )
+    else:
+        ui.add_message("system",
+            f"Welcome to Local Finder!\n"
+            f"Profile: {app_module._active_profile}\n"
+            f"Type your message below. PgUp/PgDn to scroll. Ctrl+D to quit."
+        )
     update_status()
     ui.render()
 

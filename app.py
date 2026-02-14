@@ -2145,6 +2145,122 @@ async def steam_user_summary(params: SteamUserSummaryParams) -> str:
     return "\n".join(lines)
 
 
+# ── Tool: Edamam recipe search ───────────────────────────────────────────────
+
+_EDAMAM_BASE = "https://api.edamam.com/api/recipes/v2"
+
+
+def _edamam_creds():
+    app_id = _load_ssh_key("EDAMAM_APP_ID")
+    app_key = _load_ssh_key("EDAMAM_APP_KEY")
+    return app_id, app_key
+
+
+class RecipeSearchParams(BaseModel):
+    query: str = Field(description="Search query (ingredient, dish name, cuisine, etc.)")
+    diet: str | None = Field(default=None, description="Diet filter: balanced, high-fiber, high-protein, low-carb, low-fat, low-sodium")
+    health: str | None = Field(default=None, description="Health filter: vegan, vegetarian, gluten-free, dairy-free, peanut-free, keto-friendly, paleo, etc.")
+    cuisine_type: str | None = Field(default=None, description="Cuisine: American, Asian, Chinese, French, Indian, Italian, Japanese, Mexican, etc.")
+    meal_type: str | None = Field(default=None, description="Meal: Breakfast, Lunch, Dinner, Snack, Teatime")
+    dish_type: str | None = Field(default=None, description="Dish: Soup, Salad, Main course, Desserts, Side dish, Drinks, etc.")
+    calories: str | None = Field(default=None, description="Calorie range, e.g. '200-500' or '100+'")
+    excluded: list[str] | None = Field(default=None, description="Ingredients to exclude")
+    max_results: int = Field(default=5, description="Max results (1-10)")
+
+
+@define_tool(
+    description=(
+        "Search for recipes using the Edamam API. Supports filtering by diet, "
+        "health labels, cuisine, meal type, dish type, calories, and excluded "
+        "ingredients. Returns recipe names, ingredients, nutrition, and source links."
+    )
+)
+async def recipe_search(params: RecipeSearchParams) -> str:
+    app_id, app_key = _edamam_creds()
+    if not app_id or not app_key:
+        return (
+            "Edamam credentials not configured. Sign up at https://developer.edamam.com/ "
+            "then put your credentials in:\n  ~/.ssh/EDAMAM_APP_ID\n  ~/.ssh/EDAMAM_APP_KEY"
+        )
+
+    query_params: dict = {
+        "type": "public",
+        "q": params.query,
+        "app_id": app_id,
+        "app_key": app_key,
+    }
+    if params.diet:
+        query_params["diet"] = params.diet
+    if params.health:
+        query_params["health"] = params.health
+    if params.cuisine_type:
+        query_params["cuisineType"] = params.cuisine_type
+    if params.meal_type:
+        query_params["mealType"] = params.meal_type
+    if params.dish_type:
+        query_params["dishType"] = params.dish_type
+    if params.calories:
+        query_params["calories"] = params.calories
+    if params.excluded:
+        query_params["excluded"] = params.excluded
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(_EDAMAM_BASE, params=query_params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Recipe search failed: {e}"
+
+    hits = data.get("hits", [])[:min(params.max_results, 10)]
+    if not hits:
+        return f"No recipes found for '{params.query}'."
+
+    lines = [f"Found {data.get('count', len(hits))} recipes for '{params.query}' (showing {len(hits)}):\n"]
+    for i, hit in enumerate(hits, 1):
+        r = hit.get("recipe", {})
+        label = r.get("label", "?")
+        source = r.get("source", "?")
+        url = r.get("url", "")
+        servings = r.get("yield", "?")
+        cal = r.get("calories", 0)
+        cal_per = round(cal / max(r.get("yield", 1), 1))
+        time_min = r.get("totalTime", 0)
+        ingredients = r.get("ingredientLines", [])
+        diet_labels = r.get("dietLabels", [])
+        health_labels = r.get("healthLabels", [])
+        cuisine = r.get("cuisineType", [])
+        meal = r.get("mealType", [])
+
+        lines.append(f"{i}. **{label}**")
+        lines.append(f"   Source: {source}")
+        if url:
+            lines.append(f"   Recipe: {url}")
+        if time_min:
+            lines.append(f"   Time: {int(time_min)} min | Servings: {servings} | ~{cal_per} cal/serving")
+        else:
+            lines.append(f"   Servings: {servings} | ~{cal_per} cal/serving")
+        if diet_labels:
+            lines.append(f"   Diet: {', '.join(diet_labels)}")
+        if health_labels:
+            shown = [h for h in health_labels if h not in ("DASH", "Mediterranean")][:6]
+            if shown:
+                lines.append(f"   Health: {', '.join(shown)}")
+        if cuisine:
+            lines.append(f"   Cuisine: {', '.join(cuisine)}")
+        if meal:
+            lines.append(f"   Meal: {', '.join(meal)}")
+        if ingredients:
+            lines.append(f"   Ingredients ({len(ingredients)}):")
+            for ing in ingredients[:12]:
+                lines.append(f"     • {ing}")
+            if len(ingredients) > 12:
+                lines.append(f"     ... and {len(ingredients) - 12} more")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Tool: MusicBrainz search ─────────────────────────────────────────────────
 
 _MB_BASE = "https://musicbrainz.org/ws/2"
@@ -7034,6 +7150,7 @@ def _build_all_tools():
         search_games, get_game_details,
         steam_search, steam_app_details, steam_featured,
         steam_player_stats, steam_user_games, steam_user_summary,
+        recipe_search,
         music_search, music_lookup,
         spotify_auth, spotify_search, spotify_create_playlist, spotify_add_tracks,
         scrape_page, browse_web,

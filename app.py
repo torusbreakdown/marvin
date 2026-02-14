@@ -1041,10 +1041,11 @@ class WebSearchParams(BaseModel):
 @define_tool(
     description=(
         "Search the web using DuckDuckGo. Returns titles, URLs, and snippets. "
-        "Use this for general knowledge questions, looking up menus, hours, "
-        "reviews, news, or anything not covered by the other tools. "
-        "For example: 'does this restaurant have outdoor seating', "
-        "'what are the hours for ...', 'latest food truck events in Austin'."
+        "THIS IS THE DEFAULT TOOL FOR ALL WEB SEARCHES. Use this FIRST whenever "
+        "the user asks to look something up, find information, search for "
+        "anything online, check reviews, hours, menus, news, events, etc. "
+        "Only use browse_web or scrape_page if you already have a specific URL "
+        "and need to read the full page content."
     )
 )
 async def web_search(params: WebSearchParams) -> str:
@@ -1521,12 +1522,10 @@ class ScrapePageParams(BaseModel):
 
 @define_tool(
     description=(
-        "Scrape a web page using a real browser (Selenium + Firefox). "
-        "Use this to read restaurant menus, prices, hours, or any page "
-        "content that requires JavaScript rendering. Pair with web_search "
-        "to first find the URL, then scrape it for details. "
-        "Rate-limited to 1 request per 3 seconds. "
-        "Supports extracting full text, menu items, or links."
+        "Scrape a specific web page URL using Selenium + Firefox (headless). "
+        "ONLY use this when you have a specific URL AND the page requires "
+        "JavaScript to render. Do NOT use this for searching — use web_search "
+        "instead. Slow (launches browser). Rate-limited to 1 request per 3 seconds."
     )
 )
 async def scrape_page(params: ScrapePageParams) -> str:
@@ -1644,12 +1643,11 @@ class BrowseWebParams(BaseModel):
 
 @define_tool(
     description=(
-        "Browse a web page using Lynx and return clean, human-readable text. "
-        "Much faster than scrape_page (no browser startup) but cannot render "
-        "JavaScript-heavy pages. Use this first for static pages like articles, "
-        "blog posts, restaurant info pages, wiki pages, and docs. "
-        "Fall back to scrape_page only if the page needs JavaScript. "
-        "Rate-limited to 1 request per second."
+        "Read a specific web page URL using Lynx (text browser). "
+        "ONLY use this when you have a specific URL and want to read its full "
+        "content. Faster than scrape_page but cannot render JavaScript. "
+        "Do NOT use this for searching — use web_search instead. "
+        "Good for articles, docs, wiki pages. Rate-limited to 1 request/sec."
     )
 )
 async def browse_web(params: BrowseWebParams) -> str:

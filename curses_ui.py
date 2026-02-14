@@ -74,7 +74,10 @@ class CursesUI:
         try:
             if os.path.exists(path):
                 with open(path) as f:
-                    self.input_history = [l.strip() for l in f if l.strip()]
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("_HiStOrY_V2_"):
+                            self.input_history.append(line)
         except Exception:
             pass
 

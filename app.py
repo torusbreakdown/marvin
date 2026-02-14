@@ -3313,12 +3313,22 @@ def _schedule_calendar_reminders():
     now = _dt.now()
     cutoff = now + _td(days=7)
 
-    # Find first ntfy topic for push notifications
+    # Find or create ntfy topic for push notifications
     subs = _load_ntfy_subs()
     ntfy_topic = ""
     if subs:
-        first = next(iter(subs))
-        ntfy_topic = first
+        # Prefer a topic labelled "reminders" or "calendar", else use the first
+        for t, info in subs.items():
+            if "remind" in info.get("label", "").lower() or "calendar" in info.get("label", "").lower():
+                ntfy_topic = t
+                break
+        if not ntfy_topic:
+            ntfy_topic = next(iter(subs))
+    else:
+        # Auto-create a reminders topic
+        ntfy_topic = _generate_topic()
+        subs[ntfy_topic] = {"label": "reminders", "url": f"{_NTFY_BASE}/{ntfy_topic}"}
+        _save_ntfy_subs(subs)
 
     # Read existing crontab
     try:

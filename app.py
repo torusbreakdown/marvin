@@ -1992,6 +1992,23 @@ class LaunchAgentParams(BaseModel):
         )
     )
     working_dir: str | None = Field(default=None, description="Working directory (defaults to current coding dir)")
+    design_first: bool = Field(
+        default=False,
+        description=(
+            "Run a design pass before implementation. Uses claude-opus-4.5 to generate "
+            "a UX design schema and architecture doc saved to .marvin/design.md. "
+            "The implementation agent then reads this as context. "
+            "Recommended for large greenfield tasks (new projects, full features)."
+        )
+    )
+    tdd: bool = Field(
+        default=False,
+        description=(
+            "Enable TDD workflow: (1) write failing tests first in parallel agents, "
+            "(2) implement code, (3) run debug loop until all tests pass. "
+            "Requires design_first=true or an existing .marvin/design.md."
+        )
+    )
 
 
 # ── Coding tools ─────────────────────────────────────────────────────────────
@@ -2456,45 +2473,223 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     if not wd:
         return "No working directory set for sub-agent."
 
-    # Build sub-agent command
-    agent_env = os.environ.copy()
-    agent_env["MARVIN_DEPTH"] = str(depth + 1)
-    agent_env["MARVIN_MODEL"] = model_name
-    agent_env["MARVIN_TICKET"] = params.ticket_id
+    import sys as _sys
+    app_path = os.path.abspath(_sys.argv[0])
 
-    import sys
-    app_path = os.path.abspath(sys.argv[0])
-    cmd = [sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", params.prompt]
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=wd, env=agent_env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+    async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "") -> tuple[int, str, str]:
+        """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
+        sub_env = os.environ.copy()
+        sub_env["MARVIN_DEPTH"] = str(depth + 1)
+        sub_env["MARVIN_MODEL"] = model
+        sub_env["MARVIN_TICKET"] = params.ticket_id
+        sub_env["PYTHONUNBUFFERED"] = "1"
+        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=wd, env=sub_env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            return proc.returncode or 0, (sout or b"").decode(errors="replace").strip(), (serr or b"").decode(errors="replace").strip()
         except asyncio.TimeoutError:
-            proc.kill()
-            # Add failure note to ticket
-            _run_cmd(["tk", "add-note", params.ticket_id, "Sub-agent timed out after 300s"], timeout=5)
-            return f"Sub-agent timed out after 300s (ticket {params.ticket_id})"
-    except Exception as e:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Sub-agent launch failed: {e}"], timeout=5)
-        return f"Failed to launch sub-agent: {e}"
+            if proc.returncode is None:
+                proc.kill()
+            return -1, "", f"{label or 'Sub-agent'} timed out after {timeout_s}s"
+        except Exception as e:
+            return -1, "", f"{label or 'Sub-agent'} failed: {e}"
 
-    out = stdout.decode(errors="replace").strip()
-    err = stderr.decode(errors="replace").strip()
+    # ── Phase 1: Design pass (optional) ──────────────────────────────────
+    if params.design_first:
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1: Design pass (claude-opus-4.5)"], timeout=5)
+        design_dir = os.path.join(wd, ".marvin")
+        os.makedirs(design_dir, exist_ok=True)
 
-    if proc.returncode != 0:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Sub-agent failed (exit {proc.returncode})"], timeout=5)
-        return f"Sub-agent failed (exit {proc.returncode}, ticket {params.ticket_id}):\n{err or out}"
+        instructions_ctx = ""
+        for ipath in (".marvin-instructions", ".marvin/instructions.md"):
+            full = os.path.join(wd, ipath)
+            if os.path.isfile(full):
+                try:
+                    instructions_ctx = open(full).read()
+                except Exception:
+                    pass
+                break
 
-    # Success — close ticket and add result note
-    result_summary = out[:500] if len(out) > 500 else out
+        design_prompt = (
+            "You are a senior software architect. Your job is to produce a detailed "
+            "design document for the following task. Do NOT write any code. Instead produce:\n\n"
+            "1. **UX Design Schema** — describe every screen/view, its components, layout, "
+            "interactions, states, and responsive breakpoints. Use a structured format.\n"
+            "2. **Architecture** — describe the file structure, modules, data flow, API "
+            "endpoints (with request/response shapes), error handling strategy, and "
+            "technology choices with rationale.\n"
+            "3. **Implementation Plan** — ordered list of files to create, with a 1-2 sentence "
+            "description of each file's responsibility and key functions/classes.\n"
+            "4. **Style Guide** — colors, typography, spacing, component naming conventions.\n"
+            "5. **Test Plan** — for each module/component, list the test file path and the "
+            "specific test cases (function names + what they verify). Group by module. "
+            "Include both unit tests and integration tests.\n\n"
+            f"TASK:\n{params.prompt}\n\n"
+        )
+        if instructions_ctx:
+            design_prompt += f"PROJECT INSTRUCTIONS (from .marvin-instructions):\n{instructions_ctx}\n\n"
+        design_prompt += (
+            "Output the full design document in Markdown. Be thorough and specific — "
+            "this document will be the sole reference for the test and implementation agents."
+        )
+
+        rc, dout, derr = await _run_sub(design_prompt, "claude-opus-4.5", timeout_s=600, label="Design pass")
+        if rc != 0 or not dout:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Design pass failed (exit {rc})"], timeout=5)
+            return f"Design pass failed (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+
+        design_path = os.path.join(design_dir, "design.md")
+        with open(design_path, "w") as f:
+            f.write(dout)
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Design pass complete — {len(dout)} chars → .marvin/design.md"], timeout=5)
+
+    # ── Phase 2: Test-first pass (TDD, optional) ─────────────────────────
+    design_path = os.path.join(wd, ".marvin", "design.md")
+    if params.tdd:
+        if not os.path.isfile(design_path):
+            return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
+
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: Writing failing tests (parallel agents)"], timeout=5)
+
+        try:
+            design_doc = open(design_path).read()
+        except Exception as e:
+            return f"Failed to read design doc: {e}"
+
+        # Parse test plan from design doc — find "Test Plan" section
+        # Split into chunks of ~3 test files each for parallel agents
+        test_sections: list[str] = []
+        in_test_plan = False
+        current_section: list[str] = []
+        for line in design_doc.split("\n"):
+            if "test plan" in line.lower() and line.strip().startswith("#"):
+                in_test_plan = True
+                continue
+            if in_test_plan:
+                if line.strip().startswith("#") and "test" not in line.lower():
+                    break
+                current_section.append(line)
+                # Split on sub-headers (each test file/module)
+                if line.strip().startswith("##") or line.strip().startswith("###"):
+                    if len(current_section) > 3:
+                        test_sections.append("\n".join(current_section[:-1]))
+                        current_section = [line]
+        if current_section:
+            test_sections.append("\n".join(current_section))
+
+        # If we couldn't parse sections, send the whole test plan as one chunk
+        if not test_sections:
+            test_sections = [f"See Test Plan section in .marvin/design.md"]
+
+        # Batch into groups of ~3 sections per agent
+        batches: list[list[str]] = []
+        for i in range(0, len(test_sections), 3):
+            batches.append(test_sections[i:i+3])
+
+        # Launch test-writing agents in parallel
+        test_tasks = []
+        for i, batch in enumerate(batches):
+            batch_text = "\n\n---\n\n".join(batch)
+            test_prompt = (
+                "You are writing tests for a TDD workflow. Read the design document at "
+                ".marvin/design.md, then write ONLY the test files described below. "
+                "The tests MUST fail (the implementation doesn't exist yet). "
+                "Write comprehensive tests that cover:\n"
+                "- Happy path for each endpoint/function\n"
+                "- Error cases (bad input, missing data, auth failures)\n"
+                "- Edge cases (empty strings, large inputs, concurrent access)\n\n"
+                "Use pytest. Create the test files in the appropriate directories. "
+                "Import from the module paths specified in the design doc. "
+                "Do NOT write any implementation code — only tests.\n"
+                "Do NOT try to run the tests — they are expected to fail.\n\n"
+                f"TEST SECTIONS TO WRITE:\n{batch_text}\n\n"
+                "Commit the test files with a descriptive message like "
+                "'Add failing tests for <module> (TDD red phase)'."
+            )
+            test_tasks.append(_run_sub(test_prompt, "gpt-5.3-codex", timeout_s=300, label=f"Test agent {i+1}"))
+
+        test_results = await asyncio.gather(*test_tasks)
+        failures = []
+        for i, (rc, out, err) in enumerate(test_results):
+            if rc != 0:
+                failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
+        if failures:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Test-first pass: {len(failures)}/{len(test_results)} agents failed"], timeout=5)
+            # Continue anyway — partial tests are better than none
+
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+
+    # ── Phase 3: Implementation ──────────────────────────────────────────
+    _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5)
+
+    impl_prompt = params.prompt
+    if os.path.isfile(design_path):
+        impl_prompt = (
+            f"{params.prompt}\n\n"
+            "IMPORTANT: A design document exists at .marvin/design.md. "
+            "Read it with read_file BEFORE writing any code. Follow the architecture, "
+            "file structure, and UX design specified in that document exactly. "
+            "Do not deviate from the design unless you encounter a technical impossibility."
+        )
+    if params.tdd:
+        impl_prompt += (
+            "\n\nTDD MODE: Failing tests have already been written. "
+            "Read the test files to understand what's expected, then implement "
+            "the code to make them pass. After implementing, run the tests with "
+            "run_command to verify they pass."
+        )
+
+    rc, impl_out, impl_err = await _run_sub(impl_prompt, model_name, timeout_s=600, label="Implementation")
+    if rc != 0:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Implementation failed (exit {rc})"], timeout=5)
+        return f"Implementation failed (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
+
+    _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
+
+    # ── Phase 4: Debug loop (TDD green phase) ────────────────────────────
+    if params.tdd:
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: Debug loop — running tests until green"], timeout=5)
+
+        max_debug_rounds = 5
+        for debug_round in range(1, max_debug_rounds + 1):
+            debug_prompt = (
+                "You are in the TDD debug loop (round {round}/{max}). Your ONLY job:\n"
+                "1. Run ALL tests with run_command (e.g. 'pytest -v' or the project's test runner)\n"
+                "2. If all tests pass → respond with exactly 'ALL_TESTS_PASS' and commit\n"
+                "3. If tests fail → read the failure output carefully, fix the code "
+                "(NOT the tests unless a test has a genuine bug), and run tests again\n"
+                "4. Repeat until all tests pass or you've made 3 fix attempts this round\n\n"
+                "Read .marvin/design.md if you need to understand the intended behavior. "
+                "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
+                "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
+            ).format(round=debug_round, max=max_debug_rounds)
+
+            rc, dbg_out, dbg_err = await _run_sub(debug_prompt, "gpt-5.3-codex", timeout_s=300, label=f"Debug round {debug_round}")
+
+            if "ALL_TESTS_PASS" in (dbg_out or ""):
+                _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5)
+                break
+            if rc != 0:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} agent failed (exit {rc})"], timeout=5)
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
+
+    # ── Done ─────────────────────────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5)
     _run_cmd(["tk", "close", params.ticket_id], timeout=5)
 
-    return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅\n\n{out}"
+    phases = ["Implementation"]
+    if params.design_first:
+        phases.insert(0, "Design")
+    if params.tdd:
+        phases.insert(-1, "Test-first")
+        phases.append("Debug loop")
+
+    return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
 
 
 # ── Tool: Steam store & API ──────────────────────────────────────────────────
@@ -2669,13 +2864,17 @@ async def steam_app_details(params: SteamAppDetailsParams) -> str:
     return "\n".join(lines)
 
 
+class SteamFeaturedParams(BaseModel):
+    pass
+
+
 @define_tool(
     description=(
         "Get current Steam featured games and specials/deals. "
         "No API key required. Use when users ask about Steam sales or deals."
     )
 )
-async def steam_featured(params: None) -> str:
+async def steam_featured(params: SteamFeaturedParams) -> str:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get("https://store.steampowered.com/api/featured/")
@@ -5215,6 +5414,10 @@ def _build_system_message() -> str:
             "11. Git commit messages MUST be specific and descriptive — summarise WHAT changed "
             "and WHY. NEVER use generic messages like 'Initial commit' or 'Update files'. "
             "Good example: 'Bind server to 0.0.0.0 for LAN access, add CORS env config'.\n"
+            "12. For large greenfield tasks (new projects, full features, building UIs from scratch), "
+            "use launch_agent with design_first=true. This runs a design pass in claude-opus-4.5 "
+            "that produces a UX design schema and architecture doc BEFORE any code is written. "
+            "The implementation agent then follows that design exactly.\n"
         )
         if _coding_working_dir:
             base += f"Working directory: {_coding_working_dir}\n"
@@ -5224,6 +5427,19 @@ def _build_system_message() -> str:
         instructions = _read_instructions_file()
         if instructions:
             base += f"\n\nPROJECT INSTRUCTIONS (from .marvin-instructions):\n{instructions}\n"
+        # Include design doc if present
+        design_path = os.path.join(_coding_working_dir, ".marvin", "design.md")
+        if os.path.isfile(design_path):
+            try:
+                design_doc = open(design_path).read()
+                if design_doc.strip():
+                    base += (
+                        f"\n\nDESIGN DOCUMENT (from .marvin/design.md):\n"
+                        "Follow this design EXACTLY when implementing.\n\n"
+                        f"{design_doc}\n"
+                    )
+            except Exception:
+                pass
 
     if prefs.strip():
         base += (
@@ -8389,9 +8605,10 @@ class SessionManager:
         cli_path = shutil.which("copilot") or "copilot"
         self._sdk_client = CopilotClient({"cli_path": cli_path})
         await self._sdk_client.start()
+        effort = "high" if _coding_mode else "low"
         self._sdk_session = await self._sdk_client.create_session({
             "model": "gpt-5.2",
-            "reasoning_effort": "low",
+            "reasoning_effort": effort,
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
@@ -8400,9 +8617,10 @@ class SessionManager:
     async def rebuild_sdk_session(self):
         if self._sdk_session:
             await self._sdk_session.destroy()
+        effort = "high" if _coding_mode else "low"
         self._sdk_session = await self._sdk_client.create_session({
             "model": "gpt-5.2",
-            "reasoning_effort": "low",
+            "reasoning_effort": effort,
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
@@ -8741,13 +8959,59 @@ async def _run_non_interactive():
     all_tools = _build_all_tools()
     system_msg = _build_system_message()
 
-    # Run via tool loop with the appropriate provider
+    model_override = os.environ.get("MARVIN_MODEL")  # e.g. "claude-opus-4.6"
+
+    # Route through Copilot SDK when available — it handles all model tiers.
+    # Fall back to _run_tool_loop only for explicit non-SDK providers.
+    use_sdk = CopilotClient is not None and LLM_PROVIDER == "copilot"
+    # If MARVIN_MODEL is set to a known non-SDK provider, use the tool loop instead
+    _non_sdk_providers = {"gemini", "groq", "ollama", "openai"}
+    if model_override and model_override in _non_sdk_providers:
+        use_sdk = False
+
     try:
-        result, _ = await _run_tool_loop(
-            prompt_text, all_tools, system_msg,
-            max_rounds=50,
-        )
-        print(result or "(no output)")
+        if use_sdk:
+            import shutil
+            cli_path = shutil.which("copilot") or "copilot"
+            client = CopilotClient({"cli_path": cli_path})
+            await client.start()
+            done = asyncio.Event()
+            chunks: list[str] = []
+
+            def _on_event(event):
+                etype = event.get("type", "")
+                if etype == "content.delta":
+                    delta = event.get("delta", "")
+                    chunks.append(delta)
+                    # Each delta on its own line so subprocess pipe can stream
+                    print(delta, flush=True)
+                elif etype == "session.idle":
+                    done.set()
+
+            sdk_model = model_override or "gpt-5.2"
+            session = await client.create_session({
+                "model": sdk_model,
+                "reasoning_effort": "high" if _coding_mode else "low",
+                "tools": all_tools,
+                "system_message": {"content": system_msg},
+            })
+            session.on(_on_event)
+            await session.send({"prompt": prompt_text})
+            try:
+                await asyncio.wait_for(done.wait(), timeout=900)
+            except asyncio.TimeoutError:
+                print("\n(timed out after 900s)", file=sys.stderr)
+            print()  # final newline
+            await session.destroy()
+            await client.stop()
+        else:
+            prov = model_override or LLM_PROVIDER
+            result, _ = await _run_tool_loop(
+                prompt_text, all_tools, system_msg,
+                provider=prov,
+                max_rounds=50,
+            )
+            print(result or "(no output)")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -8846,13 +8846,15 @@ async def _run_curses_interactive(stdscr):
                         state = "ON 🔧" if _coding_mode else "OFF"
                         info = f"Coding mode {state}"
                         if _coding_mode:
-                            info += "\n  Max tool rounds: 50 | Context: 100 msgs"
+                            info += "\n  Max tool rounds: 50 | Context: 100 msgs | Reasoning: high"
                             if _coding_working_dir:
                                 info += f"\n  Working dir: {_coding_working_dir}"
                             else:
                                 info += "\n  Set working dir with: set_working_dir"
                         ui.add_message("system", info)
                         ui.render()
+                        # Rebuild SDK session to pick up reasoning_effort change
+                        await mgr.rebuild_sdk_session()
                     else:
                         try:
                             notifs = await _check_all_subscriptions()

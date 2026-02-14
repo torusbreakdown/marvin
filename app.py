@@ -2794,6 +2794,11 @@ async def yt_dlp_download(params: YtDlpParams) -> str:
     return f"{kind} downloaded: {filepath}"
 
 
+class _CursesRequested(Exception):
+    def __init__(self, app_module):
+        self.app_module = app_module
+
+
 async def main():
     global _profile_switch_requested
 
@@ -2815,10 +2820,8 @@ async def main():
         import curses as _curses
         import curses_ui
         import app as _self_module
-        def _run(stdscr):
-            asyncio.run(curses_ui.curses_main(stdscr, _self_module))
-        _curses.wrapper(_run)
-        return
+        # Must run curses outside the async context — handled by __main__
+        raise _CursesRequested(_self_module)
 
     all_tools = [
         get_my_location, setup_google_auth,
@@ -2974,4 +2977,11 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except _CursesRequested as req:
+        import curses as _curses
+        import curses_ui
+        def _run(stdscr):
+            asyncio.run(curses_ui.curses_main(stdscr, req.app_module))
+        _curses.wrapper(_run)

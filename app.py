@@ -1,8 +1,8 @@
 """
-Local business finder using GitHub Copilot SDK + Google Places API (New).
+Marvin — local-business and general-purpose assistant.
 
-The LLM decides when to call the places search tools based on your prompt.
-Set GOOGLE_PLACES_API_KEY env var before running.
+Multi-provider LLM backend (Groq, Ollama, OpenAI-compat, Copilot SDK).
+Set GOOGLE_PLACES_API_KEY env var for places search.
 """
 
 import asyncio
@@ -629,7 +629,7 @@ async def set_alarm(params: SetAlarmParams) -> str:
     safe_msg = params.message.replace("'", "'\\''")
 
     script = f"""#!/bin/bash
-# Local Finder Alarm: {label}
+# Marvin Alarm: {label}
 export DISPLAY=${{DISPLAY:-:0}}
 export DBUS_SESSION_BUS_ADDRESS=${{DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}}
 
@@ -690,7 +690,7 @@ rm -f '{script_path}'
 
 @define_tool(
     description=(
-        "List all active Local Finder alarms. Shows label, scheduled time, "
+        "List all active Marvin alarms. Shows label, scheduled time, "
         "and message for each alarm."
     )
 )
@@ -2676,8 +2676,8 @@ def _append_chat(role: str, text: str):
     _save_chat_log(log)
 
 _DEFAULT_PREFS = """\
-# Local Finder — User Preferences
-# The assistant reads these on every prompt to personalize results.
+# Marvin — User Preferences
+# Marvin reads these on every prompt to personalize results.
 
 # Dietary restrictions or preferences
 # e.g. vegetarian, vegan, gluten-free, halal, kosher
@@ -2807,7 +2807,7 @@ def _compact_history() -> str:
 def _build_system_message() -> str:
     prefs = _load_prefs()
     base = (
-        "You are a helpful local-business and general-purpose assistant. "
+        "You are Marvin, a helpful local-business and general-purpose assistant. "
         "CRITICAL: You MUST use your available tools to answer questions. "
         "NEVER guess, fabricate, or answer from memory when a tool can provide "
         "the information. For example, always call places_text_search for "
@@ -3170,8 +3170,8 @@ async def update_preferences(params: UpdatePreferencesParams) -> str:
     # Write back preserving comments by rewriting the full YAML
     try:
         with open(pp, "w") as f:
-            f.write("# Local Finder — User Preferences\n")
-            f.write("# Updated dynamically by the assistant.\n\n")
+            f.write("# Marvin — User Preferences\n")
+            f.write("# Updated dynamically by Marvin.\n\n")
             yaml.dump(prefs, f, default_flow_style=False, sort_keys=False)
     except Exception as e:
         return f"Failed to save preferences: {e}"
@@ -6008,7 +6008,7 @@ async def main():
             print(f"Welcome back! Profile: {_active_profile}")
             print(f"Recent history:\n{history}")
         else:
-            print("Local Finder — interactive mode")
+            print("Marvin — interactive mode")
             print(f"Profile: {_active_profile} | Preferences: {_prefs_path()}")
         print("Tab to complete, Ctrl+R to search history, 'quit' to exit.")
         if _check_stt_deps() and GROQ_API_KEY:
@@ -6049,7 +6049,7 @@ async def main():
                     shell_mode = not shell_mode
                     state = "ON" if shell_mode else "OFF"
                     print(f"Shell mode {state}. "
-                          f"{'Type commands directly. !shell to exit.' if shell_mode else 'Back to assistant mode.'}\n")
+                          f"{'Type commands directly. !shell to exit.' if shell_mode else 'Back to Marvin.'}\n")
                     continue
 
                 # Voice mode toggle
@@ -6164,7 +6164,7 @@ async def main():
                 _compact_session_requested.clear()
                 _append_chat("you", prompt)
                 print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
-                print("Assistant: ", end="", flush=True)
+                print("Marvin: ", end="", flush=True)
                 await _send_prompt(prompt, force_sdk=force_sdk)
                 print()
 
@@ -6177,7 +6177,7 @@ async def main():
 
                     _append_chat("you", prompt)
                     print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
-                    print("Assistant: ", end="", flush=True)
+                    print("Marvin: ", end="", flush=True)
                     await _send_prompt(prompt, force_sdk=force_sdk)
                     print()
 
@@ -6192,7 +6192,7 @@ async def main():
             _usage.save()
     else:
         _append_chat("you", prompt)
-        print("Assistant: ", end="", flush=True)
+        print("Marvin: ", end="", flush=True)
         await _send_prompt(prompt)
         print()
         _usage.save()

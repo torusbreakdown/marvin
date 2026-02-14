@@ -2827,9 +2827,9 @@ class _CursesRequested(Exception):
 async def main():
     global _profile_switch_requested
 
-    # Check for --curses flag
-    use_curses = "--curses" in sys.argv
-    args = [a for a in sys.argv[1:] if a != "--curses"]
+    # Curses is default; --plain disables it
+    use_plain = "--plain" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--plain", "--curses")]
 
     if not GOOGLE_API_KEY and not shutil.which("gcloud"):
         print("Error: Set GOOGLE_PLACES_API_KEY or authenticate with 'gcloud auth login'.")
@@ -2841,7 +2841,7 @@ async def main():
     prompt = " ".join(args) if args else None
     interactive = prompt is None
 
-    if use_curses and interactive:
+    if not use_plain and interactive:
         import curses as _curses
         import curses_ui
         import app as _self_module

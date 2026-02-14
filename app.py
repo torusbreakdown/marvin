@@ -966,7 +966,14 @@ async def browse_web(params: BrowseWebParams) -> str:
     result = "\n".join(cleaned).strip()
     if len(result) > max_len:
         result = result[:max_len] + "\n\n[... truncated]"
-    return result
+    return (
+        "[INSTRUCTION: The raw text below was extracted by Lynx and may contain "
+        "formatting artifacts like broken columns, garbled tables, stray unicode, "
+        "or repeated whitespace. Clean it up before presenting to the user: fix "
+        "alignment, merge broken lines, format tables/lists readably, and remove "
+        "navigation/boilerplate junk. Keep all factual content.]\n\n"
+        + result
+    )
 
 
 def _format_places(data: dict) -> str:

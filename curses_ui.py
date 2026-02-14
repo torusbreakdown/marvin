@@ -352,6 +352,20 @@ class CursesUI:
 
 async def curses_main(stdscr, app_module):
     """Run the interactive loop inside curses."""
+    import sys as _sys
+
+    # Redirect stdout/stderr to a log file so library warnings
+    # don't corrupt the curses display
+    _log_path = os.path.join(
+        os.path.expanduser("~/.config/local-finder"), "curses.log"
+    )
+    os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+    _log_file = open(_log_path, "a")
+    _orig_stdout = _sys.stdout
+    _orig_stderr = _sys.stderr
+    _sys.stdout = _log_file
+    _sys.stderr = _log_file
+
     ui = CursesUI(stdscr)
 
     # Load input history from profile
@@ -591,3 +605,8 @@ async def curses_main(stdscr, app_module):
         _usage.save()
         await session.destroy()
         await client.stop()
+
+        # Restore stdout/stderr
+        _sys.stdout = _orig_stdout
+        _sys.stderr = _orig_stderr
+        _log_file.close()

@@ -3804,6 +3804,15 @@ async def main():
         file_read_lines, file_apply_patch,
     ]
 
+    # Ensure the bundled copilot binary is executable
+    try:
+        from copilot.client import _get_bundled_cli_path
+        cli_bin = _get_bundled_cli_path()
+        if cli_bin and not os.access(cli_bin, os.X_OK):
+            os.chmod(cli_bin, 0o755)
+    except Exception:
+        pass
+
     client = CopilotClient()
     await client.start()
 

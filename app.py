@@ -2615,6 +2615,186 @@ async def update_preferences(params: UpdatePreferencesParams) -> str:
     return msg + "\n(Preferences saved and will apply to all future recommendations.)"
 
 
+# ── Tool: Markdown notes ────────────────────────────────────────────────────
+
+_NOTES_DIR = os.path.expanduser("~/Notes")
+
+
+class WriteNoteParams(BaseModel):
+    path: str = Field(
+        description=(
+            "Relative path inside ~/Notes, e.g. 'recipes/pasta.md' or 'todo.md'. "
+            "Parent directories are created automatically."
+        )
+    )
+    content: str = Field(description="Markdown content to write.")
+    append: bool = Field(
+        default=False,
+        description="If true, append to the file instead of overwriting.",
+    )
+
+
+@define_tool(
+    description=(
+        "Write or append to a Markdown note in ~/Notes. "
+        "Use this when the user asks to save, write, or jot down notes, "
+        "summaries, recipes, lists, etc."
+    )
+)
+async def write_note(params: WriteNoteParams) -> str:
+    rel = params.path.lstrip("/")
+    if ".." in rel:
+        return "Path cannot contain '..'."
+    full = os.path.join(_NOTES_DIR, rel)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    mode = "a" if params.append else "w"
+    try:
+        with open(full, mode) as f:
+            f.write(params.content)
+            if not params.content.endswith("\n"):
+                f.write("\n")
+    except Exception as e:
+        return f"Failed to write note: {e}"
+    action = "Appended to" if params.append else "Wrote"
+    return f"{action} {full} ({len(params.content)} chars)"
+
+
+class ReadNoteParams(BaseModel):
+    path: str = Field(description="Relative path inside ~/Notes to read.")
+
+
+@define_tool(
+    description="Read a Markdown note from ~/Notes."
+)
+async def read_note(params: ReadNoteParams) -> str:
+    rel = params.path.lstrip("/")
+    if ".." in rel:
+        return "Path cannot contain '..'."
+    full = os.path.join(_NOTES_DIR, rel)
+    if not os.path.isfile(full):
+        return f"Note not found: {rel}"
+    try:
+        with open(full) as f:
+            return f.read()
+    except Exception as e:
+        return f"Failed to read note: {e}"
+
+
+class NotesMkdirParams(BaseModel):
+    path: str = Field(
+        description="Relative directory path inside ~/Notes to create, e.g. 'projects/ai'."
+    )
+
+
+@define_tool(
+    description="Create a subdirectory inside ~/Notes for organizing notes."
+)
+async def notes_mkdir(params: NotesMkdirParams) -> str:
+    rel = params.path.lstrip("/")
+    if ".." in rel:
+        return "Path cannot contain '..'."
+    full = os.path.join(_NOTES_DIR, rel)
+    os.makedirs(full, exist_ok=True)
+    return f"Created directory: {full}"
+
+
+class NotesLsParams(BaseModel):
+    path: str = Field(
+        default="",
+        description="Relative directory path inside ~/Notes to list. Empty = root.",
+    )
+
+
+@define_tool(
+    description="List files and directories inside ~/Notes."
+)
+async def notes_ls(params: NotesLsParams) -> str:
+    rel = params.path.strip().lstrip("/") if params.path else ""
+    if ".." in rel:
+        return "Path cannot contain '..'."
+    full = os.path.join(_NOTES_DIR, rel) if rel else _NOTES_DIR
+    if not os.path.isdir(full):
+        return f"Directory not found: {rel or '~/Notes'}"
+    entries = sorted(os.listdir(full))
+    if not entries:
+        return f"{rel or '~/Notes'} is empty."
+    lines = [f"Contents of {rel or '~/Notes'} ({len(entries)} items):"]
+    for e in entries:
+        fp = os.path.join(full, e)
+        if os.path.isdir(fp):
+            lines.append(f"  📁 {e}/")
+        else:
+            size = os.path.getsize(fp)
+            lines.append(f"  📄 {e} ({size} bytes)")
+    return "\n".join(lines)
+
+
+# ── Tool: YouTube download via yt-dlp ───────────────────────────────────────
+
+_DOWNLOADS_DIR = os.path.expanduser("~/Downloads/yt-dlp")
+
+
+class YtDlpParams(BaseModel):
+    url: str = Field(description="YouTube (or other supported) video URL.")
+    audio_only: bool = Field(
+        default=False,
+        description="If true, download audio only (mp3/m4a).",
+    )
+    output_dir: str = Field(
+        default="",
+        description="Subdirectory inside ~/Downloads/yt-dlp. Empty = root.",
+    )
+
+
+@define_tool(
+    description=(
+        "Download a video (or audio) from YouTube or other sites using yt-dlp. "
+        "Use this when the user wants to download, save, or grab a video or audio."
+    )
+)
+async def yt_dlp_download(params: YtDlpParams) -> str:
+    if not shutil.which("yt-dlp"):
+        return (
+            "yt-dlp is not installed. Install it with:\n"
+            "  pip install yt-dlp\n"
+            "  # or: sudo apt install yt-dlp\n"
+            "  # or: brew install yt-dlp"
+        )
+    dest = os.path.join(_DOWNLOADS_DIR, params.output_dir.strip().lstrip("/")) if params.output_dir else _DOWNLOADS_DIR
+    os.makedirs(dest, exist_ok=True)
+
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "-o", os.path.join(dest, "%(title)s.%(ext)s"),
+        "--restrict-filenames",
+        "--print", "after_move:filepath",
+    ]
+    if params.audio_only:
+        cmd.extend(["-x", "--audio-format", "mp3"])
+    cmd.append(params.url)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except asyncio.TimeoutError:
+        return "Download timed out after 10 minutes."
+    except Exception as e:
+        return f"yt-dlp error: {e}"
+
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace").strip()[-500:]
+        return f"yt-dlp failed (exit {proc.returncode}):\n{err}"
+
+    filepath = stdout.decode(errors="replace").strip().split("\n")[-1]
+    kind = "Audio" if params.audio_only else "Video"
+    return f"{kind} downloaded: {filepath}"
+
+
 async def main():
     global _profile_switch_requested
 
@@ -2655,6 +2835,8 @@ async def main():
         generate_ntfy_topic, ntfy_subscribe, ntfy_unsubscribe,
         ntfy_publish, ntfy_list,
         switch_profile, update_preferences, exit_app,
+        write_note, read_note, notes_mkdir, notes_ls,
+        yt_dlp_download,
     ]
 
     client = CopilotClient()

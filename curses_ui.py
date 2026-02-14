@@ -343,6 +343,9 @@ async def curses_main(stdscr, app_module):
         app_module.generate_ntfy_topic, app_module.ntfy_subscribe,
         app_module.ntfy_unsubscribe, app_module.ntfy_publish, app_module.ntfy_list,
         app_module.switch_profile, app_module.update_preferences, app_module.exit_app,
+        app_module.write_note, app_module.read_note,
+        app_module.notes_mkdir, app_module.notes_ls,
+        app_module.yt_dlp_download,
     ]
 
     def update_status():

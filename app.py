@@ -2145,6 +2145,133 @@ async def steam_user_summary(params: SteamUserSummaryParams) -> str:
     return "\n".join(lines)
 
 
+# ── Tool: Stack Exchange ─────────────────────────────────────────────────────
+
+_SE_API = "https://api.stackexchange.com/2.3"
+_SE_SITES = {
+    "stackoverflow": "Stack Overflow",
+    "serverfault": "Server Fault",
+    "superuser": "Super User",
+    "askubuntu": "Ask Ubuntu",
+    "unix": "Unix & Linux",
+    "math": "Mathematics",
+    "physics": "Physics",
+    "gaming": "Arqade (Gaming)",
+}
+
+
+class StackSearchParams(BaseModel):
+    query: str = Field(description="Search query")
+    site: str = Field(
+        default="stackoverflow",
+        description="Stack Exchange site: stackoverflow, serverfault, superuser, askubuntu, unix, math, physics, gaming"
+    )
+    tagged: str | None = Field(default=None, description="Filter by tags, semicolon-separated (e.g. 'python;asyncio')")
+    sort: str = Field(default="relevance", description="Sort by: relevance, votes, creation, activity")
+    max_results: int = Field(default=5, description="Max results (1-10)")
+
+
+class StackAnswersParams(BaseModel):
+    question_id: int = Field(description="Question ID from search results")
+    site: str = Field(default="stackoverflow", description="Stack Exchange site the question is on")
+
+
+@define_tool(
+    description=(
+        "Search Stack Exchange (Stack Overflow, Server Fault, Ask Ubuntu, Unix & Linux, etc.) "
+        "for questions. Returns titles, scores, answer counts, and tags. "
+        "Use stack_answers to get the actual answers for a question."
+    )
+)
+async def stack_search(params: StackSearchParams) -> str:
+    qp: dict = {
+        "order": "desc",
+        "sort": params.sort,
+        "intitle": params.query,
+        "site": params.site,
+        "pagesize": min(params.max_results, 10),
+        "filter": "!nNPvSNVZJS",  # include body excerpt
+    }
+    if params.tagged:
+        qp["tagged"] = params.tagged
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{_SE_API}/search/advanced", params=qp)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Stack Exchange search failed: {e}"
+
+    items = data.get("items", [])
+    if not items:
+        return f"No questions found for '{params.query}' on {params.site}."
+
+    site_name = _SE_SITES.get(params.site, params.site)
+    lines = [f"{site_name} results for '{params.query}':\n"]
+    for i, q in enumerate(items, 1):
+        title = q.get("title", "?")
+        qid = q.get("question_id", 0)
+        score = q.get("score", 0)
+        answers = q.get("answer_count", 0)
+        accepted = "✅" if q.get("accepted_answer_id") else ""
+        tags = ", ".join(q.get("tags", [])[:5])
+        link = q.get("link", "")
+        is_answered = q.get("is_answered", False)
+
+        lines.append(f"{i}. [{score}↑] **{title}** {accepted}")
+        lines.append(f"   ID: {qid} | {answers} answer(s) | Tags: {tags}")
+        if link:
+            lines.append(f"   {link}")
+        lines.append("")
+
+    quota = data.get("quota_remaining", "?")
+    lines.append(f"_API quota remaining: {quota}_")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get the top answers for a Stack Exchange question by ID. "
+        "Returns answer text, scores, and whether it's the accepted answer."
+    )
+)
+async def stack_answers(params: StackAnswersParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{_SE_API}/questions/{params.question_id}/answers",
+                params={
+                    "order": "desc", "sort": "votes",
+                    "site": params.site, "pagesize": 3,
+                    "filter": "!nNPvSNe7B1",  # include answer body as markdown
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Stack Exchange answers failed: {e}"
+
+    items = data.get("items", [])
+    if not items:
+        return f"No answers found for question {params.question_id}."
+
+    lines = [f"Top {len(items)} answer(s) for question {params.question_id}:\n"]
+    for i, a in enumerate(items, 1):
+        score = a.get("score", 0)
+        accepted = " ✅ ACCEPTED" if a.get("is_accepted") else ""
+        body = a.get("body_markdown", a.get("body", ""))
+        # Truncate very long answers
+        if len(body) > 1500:
+            body = body[:1500] + "\n... (truncated)"
+
+        lines.append(f"── Answer {i} [{score}↑]{accepted} ──")
+        lines.append(body)
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Tool: Wikipedia ──────────────────────────────────────────────────────────
 
 _WIKI_API = "https://en.wikipedia.org/w/api.php"
@@ -4328,6 +4455,13 @@ def _build_system_message() -> str:
         "This is especially important for: dates, statistics, technical specifications, "
         "biographical details, scientific explanations, and historical events. "
         "Always cite Wikipedia when you use it. "
+        "STACK EXCHANGE: When the user has a programming question, debugging issue, "
+        "sysadmin problem, or technical how-to, use stack_search to find relevant "
+        "Stack Overflow / Server Fault / Ask Ubuntu / Unix & Linux answers. Then "
+        "use stack_answers to get the actual solution. This is better than guessing "
+        "because real answers have been vetted and voted on by the community. "
+        "Use the appropriate site parameter (e.g. 'unix' for Linux questions, "
+        "'askubuntu' for Ubuntu, 'serverfault' for infrastructure). "
         "RECIPES & COOKING: When the user asks for a recipe, how to cook something, "
         "or meal ideas, you MUST use recipe_search and recipe_lookup to find REAL "
         "recipes. Do NOT make up recipes from your own knowledge — you hallucinate "
@@ -7384,6 +7518,7 @@ def _build_all_tools():
         search_games, get_game_details,
         steam_search, steam_app_details, steam_featured,
         steam_player_stats, steam_user_games, steam_user_summary,
+        stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,
         recipe_search, recipe_lookup,
         music_search, music_lookup,

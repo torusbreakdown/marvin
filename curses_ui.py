@@ -449,8 +449,13 @@ async def curses_main(stdscr, app_module):
             update_status()
             ui.render()
         elif etype == "session.idle":
+            # Clear streaming state in case no assistant.message was sent
+            # (e.g. tool-only responses)
+            if ui.is_streaming:
+                ui.end_stream()
             busy = False
             done.set()
+            ui.render()
 
     session.on(on_event)
 

@@ -139,7 +139,7 @@ class UsageTracker:
     def should_report(self) -> bool:
         return self.total_paid_calls > 0 and self.total_paid_calls % self.REPORT_INTERVAL == 0
 
-    _LLM_MODEL = "gpt-4.1"
+    _LLM_MODEL = "gpt-5.2"
     _LLM_MULTIPLIER = 1  # premium requests per LLM turn
     _OVERAGE_RATE = 0.04  # $ per premium request (overage)
 
@@ -431,21 +431,13 @@ async def _location_linux() -> dict | None:
 
 
 async def _location_ip() -> dict | None:
-    """IP-based geolocation fallback (free, no key required)."""
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get("http://ip-api.com/json/?fields=lat,lon,city,regionName,country")
-            if resp.status_code == 200:
-                data = resp.json()
-                return {
-                    "latitude": data["lat"],
-                    "longitude": data["lon"],
-                    "source": "ip",
-                    "approximate_location": f"{data.get('city', '')}, {data.get('regionName', '')}, {data.get('country', '')}",
-                }
-    except Exception:
-        pass
-    return None
+    """Fallback location — hardcoded server location."""
+    return {
+        "latitude": 34.1064,
+        "longitude": -117.5931,
+        "source": "configured",
+        "approximate_location": "7903 Elm Ave, Rancho Cucamonga, CA, USA",
+    }
 
 
 async def _get_device_location() -> dict | None:
@@ -483,10 +475,17 @@ async def get_my_location(params: GetLocationParams) -> str:
     loc = await _get_device_location()
     if not loc:
         return "Could not determine location. Please provide your coordinates or city name."
-    parts = [f"Latitude: {loc['latitude']}", f"Longitude: {loc['longitude']}"]
+    parts = []
+    if "latitude" in loc and "longitude" in loc:
+        parts.append(f"Latitude: {loc['latitude']}")
+        parts.append(f"Longitude: {loc['longitude']}")
     parts.append(f"Source: {loc.get('source', 'unknown')}")
     if "approximate_location" in loc:
         parts.append(f"Approximate location: {loc['approximate_location']}")
+    if "timezone" in loc:
+        parts.append(f"Timezone: {loc['timezone']}")
+    if "latitude" not in loc:
+        parts.append("NOTE: Only country-level location available. Ask the user for their city if needed.")
     return "\n".join(parts)
 
 
@@ -1222,11 +1221,29 @@ async def web_search(params: WebSearchParams) -> str:
     return "\n\n".join(lines)
 
 
-# ── Tool: News search (DuckDuckGo News) ────────────────────────────────────
+# ── Tool: News search (GNews → NewsAPI → DuckDuckGo fallback) ──────────────
+
+GNEWS_API_KEY = os.environ.get("GNEWS_API_KEY", "")
+if not GNEWS_API_KEY:
+    _gnews_key_path = os.path.expanduser("~/.ssh/GNEWS_API_KEY")
+    if os.path.isfile(_gnews_key_path):
+        with open(_gnews_key_path) as _f:
+            _key = _f.read().strip()
+            if _key:
+                GNEWS_API_KEY = _key
+
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
+if not NEWSAPI_KEY:
+    _newsapi_key_path = os.path.expanduser("~/.ssh/NEWSAPI_KEY")
+    if os.path.isfile(_newsapi_key_path):
+        with open(_newsapi_key_path) as _f:
+            _key = _f.read().strip()
+            if _key:
+                NEWSAPI_KEY = _key
 
 class SearchNewsParams(BaseModel):
     query: str = Field(description="News search query, e.g. 'AI regulation' or 'SpaceX launch'")
-    max_results: int = Field(default=5, description="Max results (1-10)")
+    max_results: int = Field(default=20, description="Max results per source (1-50)")
     time_filter: str = Field(
         default="",
         description="Time filter: 'd' = past day, 'w' = past week, 'm' = past month. Empty = any time.",
@@ -1235,40 +1252,114 @@ class SearchNewsParams(BaseModel):
 
 @define_tool(
     description=(
-        "Search for recent news articles using DuckDuckGo News. Free, no API key. "
-        "Use this when the user asks about current events, headlines, breaking news, "
-        "or 'what's happening with X'. Returns headlines, source, date, and summary."
+        "Search for recent news articles on ANY topic. Queries GNews, NewsAPI, and "
+        "DuckDuckGo News simultaneously, deduplicates, and returns ALL articles from "
+        "the last 2 days. Use this whenever the user asks about news, current events, "
+        "headlines, what's happening, recent developments, or wants to know what's new "
+        "in a field (e.g. 'indie game news', 'AI news', 'tech news'). "
+        "IMPORTANT: Return ALL articles from the results to the user — do not "
+        "summarize or omit any. The user wants an exhaustive list."
     )
 )
 async def search_news(params: SearchNewsParams) -> str:
-    from ddgs import DDGS
+    from datetime import datetime, timedelta, timezone
+    max_res = min(params.max_results, 50)
+    two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT00:00:00Z")
+    seen_urls: set[str] = set()
+    all_articles: list[str] = []
 
-    try:
-        results = DDGS().news(
-            params.query,
-            max_results=min(params.max_results, 10),
-            timelimit=params.time_filter or None,
+    def _dedup_add(title: str, source: str, date: str, url: str, body: str, via: str):
+        if not url or url in seen_urls:
+            return
+        seen_urls.add(url)
+        all_articles.append(
+            f"• {title}\n"
+            f"  📰 {source} — {date} [{via}]\n"
+            f"  {url}\n"
+            f"  {body}"
         )
+
+    async def _fetch_gnews():
+        if not GNEWS_API_KEY:
+            return
+        try:
+            gn_params: dict = {
+                "q": params.query, "lang": "en", "max": max_res,
+                "apikey": GNEWS_API_KEY, "sortby": "publishedAt",
+                "from": two_days_ago,
+            }
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get("https://gnews.io/api/v4/search", params=gn_params)
+                if r.status_code == 200:
+                    for a in r.json().get("articles", []):
+                        _dedup_add(
+                            a.get("title", ""), a.get("source", {}).get("name", ""),
+                            a.get("publishedAt", ""), a.get("url", ""),
+                            a.get("description", ""), "GNews",
+                        )
+        except Exception:
+            pass
+
+    async def _fetch_newsapi():
+        if not NEWSAPI_KEY:
+            return
+        try:
+            na_params: dict = {
+                "q": params.query, "language": "en", "pageSize": max_res,
+                "sortBy": "publishedAt", "apiKey": NEWSAPI_KEY,
+                "from": two_days_ago,
+            }
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get("https://newsapi.org/v2/everything", params=na_params)
+                if r.status_code == 200:
+                    for a in r.json().get("articles", []):
+                        _dedup_add(
+                            a.get("title", ""), a.get("source", {}).get("name", ""),
+                            a.get("publishedAt", ""), a.get("url", ""),
+                            a.get("description", ""), "NewsAPI",
+                        )
+        except Exception:
+            pass
+
+    async def _fetch_ddg():
+        from ddgs import DDGS
+        try:
+            results = DDGS().news(params.query, max_results=max_res, timelimit="d")
+            for r in (results or []):
+                _dedup_add(
+                    r.get("title", ""), r.get("source", ""),
+                    r.get("date", ""), r.get("url", ""),
+                    r.get("body", ""), "DDG",
+                )
+        except Exception:
+            pass
+
+    await asyncio.gather(_fetch_gnews(), _fetch_newsapi(), _fetch_ddg())
+
+    if all_articles:
+        header = f"News for '{params.query}' (last 2 days) — {len(all_articles)} articles:\n"
+        return header + "\n\n".join(all_articles)
+
+    # Last resort: DDG web search
+    from ddgs import DDGS
+    try:
+        results = DDGS().text(
+            f"{params.query} news latest",
+            max_results=max_res, timelimit="d",
+        )
+        if results:
+            lines = []
+            for r in results:
+                lines.append(
+                    f"• {r.get('title', '')}\n"
+                    f"  {r.get('href', '')}\n"
+                    f"  {r.get('body', '')}"
+                )
+            return f"(web search fallback) News for '{params.query}':\n\n" + "\n\n".join(lines)
     except Exception as e:
         return f"News search failed: {e}"
 
-    if not results:
-        return f"No news found for '{params.query}'."
-
-    lines = []
-    for i, r in enumerate(results, 1):
-        title = r.get("title", "No title")
-        url = r.get("url", "")
-        source = r.get("source", "")
-        date = r.get("date", "")
-        body = r.get("body", "")
-        lines.append(
-            f"{i}. {title}\n"
-            f"   📰 {source} — {date}\n"
-            f"   {url}\n"
-            f"   {body}"
-        )
-    return "\n\n".join(lines)
+    return f"No news found for '{params.query}'."
 
 
 # ── Tool: Academic paper search ─────────────────────────────────────────────
@@ -1700,6 +1791,972 @@ async def get_game_details(params: GetGameDetailsParams) -> str:
 
     lines.append(f"\n   {desc}")
     lines.append(f"\n   RAWG: https://rawg.io/games/{g.get('slug', '')}")
+    return "\n".join(lines)
+
+
+# ── Tool: Steam store & API ──────────────────────────────────────────────────
+
+STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "")
+if not STEAM_API_KEY:
+    _steam_key_path = os.path.expanduser("~/.ssh/STEAM_API_KEY")
+    if os.path.isfile(_steam_key_path):
+        with open(_steam_key_path) as _f:
+            _key = _f.read().strip()
+            if _key:
+                STEAM_API_KEY = _key
+
+
+class SteamSearchParams(BaseModel):
+    query: str = Field(description="Game title to search for on Steam")
+    max_results: int = Field(default=10, description="Max results (1-25)")
+
+
+class SteamAppDetailsParams(BaseModel):
+    app_id: int = Field(description="Steam app ID (from steam_search results)")
+
+
+class SteamPlayerStatsParams(BaseModel):
+    app_id: int = Field(description="Steam app ID to get player stats for")
+
+
+class SteamUserGamesParams(BaseModel):
+    steam_id: str = Field(description="Steam user's 64-bit ID (e.g. '76561198000000000')")
+
+
+class SteamUserSummaryParams(BaseModel):
+    steam_id: str = Field(description="Steam user's 64-bit ID")
+
+
+@define_tool(
+    description=(
+        "Search the Steam store for games. Returns titles, app IDs, and prices. "
+        "No API key required. Use when users ask about Steam games, prices, or deals."
+    )
+)
+async def steam_search(params: SteamSearchParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://store.steampowered.com/api/storesearch/",
+                params={"term": params.query, "l": "english", "cc": "US"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Steam search failed: {e}"
+
+    items = data.get("items", [])
+    if not items:
+        return f"No Steam results for '{params.query}'."
+
+    lines = []
+    for i, item in enumerate(items[:params.max_results], 1):
+        name = item.get("name", "?")
+        app_id = item.get("id", 0)
+        price_info = item.get("price", {})
+        if price_info:
+            price = price_info.get("final", 0) / 100
+            initial = price_info.get("initial", 0) / 100
+            discount = ""
+            if initial > price:
+                pct = round((1 - price / initial) * 100)
+                discount = f" (-{pct}%, was ${initial:.2f})"
+            price_str = f"${price:.2f}{discount}" if price > 0 else "Free"
+        else:
+            price_str = "N/A"
+        platforms = []
+        meta = item.get("metascore", "")
+        if item.get("platforms", {}).get("windows"):
+            platforms.append("Win")
+        if item.get("platforms", {}).get("mac"):
+            platforms.append("Mac")
+        if item.get("platforms", {}).get("linux"):
+            platforms.append("Linux")
+        plat_str = "/".join(platforms) if platforms else "?"
+        meta_str = f" | Metascore: {meta}" if meta else ""
+        lines.append(
+            f"{i}. {name} — {price_str}\n"
+            f"   Platforms: {plat_str}{meta_str}\n"
+            f"   Steam ID: {app_id} | https://store.steampowered.com/app/{app_id}"
+        )
+    return f"Steam results for '{params.query}':\n\n" + "\n\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get detailed info for a Steam game by app ID. Returns description, price, "
+        "reviews, genres, release date, screenshots, system requirements, and more. "
+        "No API key required."
+    )
+)
+async def steam_app_details(params: SteamAppDetailsParams) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://store.steampowered.com/api/appdetails/",
+                params={"appids": str(params.app_id), "cc": "US", "l": "english"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Steam app details failed: {e}"
+
+    entry = data.get(str(params.app_id), {})
+    if not entry.get("success"):
+        return f"No Steam data for app ID {params.app_id}."
+    d = entry["data"]
+
+    name = d.get("name", "?")
+    desc = (d.get("short_description") or "")[:400]
+    release = d.get("release_date", {}).get("date", "N/A")
+    devs = ", ".join(d.get("developers", []))
+    pubs = ", ".join(d.get("publishers", []))
+    genres = ", ".join(g.get("description", "") for g in d.get("genres", []))
+    categories = ", ".join(c.get("description", "") for c in d.get("categories", [])[:6])
+
+    # Price
+    price_data = d.get("price_overview", {})
+    if d.get("is_free"):
+        price_str = "Free to Play"
+    elif price_data:
+        price_str = price_data.get("final_formatted", "N/A")
+        discount = price_data.get("discount_percent", 0)
+        if discount:
+            price_str += f" (-{discount}%, was {price_data.get('initial_formatted', '?')})"
+    else:
+        price_str = "N/A"
+
+    # Review summary
+    rec = d.get("recommendations", {})
+    total_reviews = rec.get("total", "N/A")
+
+    # Metacritic
+    mc = d.get("metacritic", {})
+    mc_str = f"{mc.get('score', 'N/A')}" if mc else "N/A"
+
+    # Platforms
+    platforms = d.get("platforms", {})
+    plats = []
+    if platforms.get("windows"):
+        plats.append("Windows")
+    if platforms.get("mac"):
+        plats.append("macOS")
+    if platforms.get("linux"):
+        plats.append("Linux")
+
+    # DLC count
+    dlc = d.get("dlc", [])
+    dlc_str = f"{len(dlc)} DLC available" if dlc else ""
+
+    lines = [
+        f"🎮 {name}",
+        f"   Released: {release}",
+        f"   Price: {price_str}",
+        f"   Metacritic: {mc_str} | Reviews: {total_reviews} recommendations",
+        f"   Genres: {genres}",
+        f"   Categories: {categories}",
+        f"   Developers: {devs}",
+        f"   Publishers: {pubs}",
+        f"   Platforms: {', '.join(plats)}",
+    ]
+    if dlc_str:
+        lines.append(f"   {dlc_str}")
+    lines.append(f"\n   {desc}")
+    lines.append(f"\n   Store: https://store.steampowered.com/app/{params.app_id}")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get current Steam featured games and specials/deals. "
+        "No API key required. Use when users ask about Steam sales or deals."
+    )
+)
+async def steam_featured(params: None) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://store.steampowered.com/api/featured/")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Steam featured failed: {e}"
+
+    lines = []
+    for section in ("featured_win", "featured_mac", "featured_linux"):
+        items = data.get(section, [])
+        if items and not lines:
+            lines.append("🔥 Steam Featured Games:")
+        for item in items[:8]:
+            name = item.get("name", "?")
+            app_id = item.get("id", 0)
+            price = item.get("final_price", 0) / 100
+            orig = item.get("original_price", 0) / 100
+            discount = item.get("discount_percent", 0)
+            if discount:
+                price_str = f"${price:.2f} (-{discount}%, was ${orig:.2f})"
+            elif price > 0:
+                price_str = f"${price:.2f}"
+            else:
+                price_str = "Free"
+            lines.append(f"  • {name} — {price_str}  (ID: {app_id})")
+        if items:
+            break  # one platform is enough
+
+    # Specials
+    specials = data.get("specials", {}).get("items", [])
+    if specials:
+        lines.append("\n💰 Current Specials:")
+        for item in specials[:10]:
+            name = item.get("name", "?")
+            app_id = item.get("id", 0)
+            price = item.get("final_price", 0) / 100
+            orig = item.get("original_price", 0) / 100
+            discount = item.get("discount_percent", 0)
+            price_str = f"${price:.2f} (-{discount}%, was ${orig:.2f})" if discount else f"${price:.2f}"
+            lines.append(f"  • {name} — {price_str}  (ID: {app_id})")
+
+    return "\n".join(lines) if lines else "No featured games found."
+
+
+@define_tool(
+    description=(
+        "Get current player count and global achievement stats for a Steam game. "
+        "Requires STEAM_API_KEY for achievements; player count works without key."
+    )
+)
+async def steam_player_stats(params: SteamPlayerStatsParams) -> str:
+    lines = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Current player count (no key needed)
+            resp = await client.get(
+                "https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/",
+                params={"appid": params.app_id},
+            )
+            resp.raise_for_status()
+            count = resp.json().get("response", {}).get("player_count")
+            if count is not None:
+                lines.append(f"👥 Current players: {count:,}")
+    except Exception as e:
+        lines.append(f"Player count unavailable: {e}")
+
+    if STEAM_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/",
+                    params={"gameid": params.app_id},
+                )
+                resp.raise_for_status()
+                achievements = resp.json().get("achievementpercentages", {}).get("achievements", [])
+                if achievements:
+                    lines.append(f"\n🏆 Achievements ({len(achievements)} total):")
+                    for a in sorted(achievements, key=lambda x: -x.get("percent", 0))[:10]:
+                        lines.append(f"  • {a.get('name', '?')}: {a.get('percent', 0):.1f}%")
+                    if len(achievements) > 10:
+                        lines.append(f"  ... and {len(achievements) - 10} more")
+        except Exception:
+            pass
+    elif not lines:
+        lines.append("Set STEAM_API_KEY for achievement data.")
+
+    return "\n".join(lines) if lines else f"No stats available for app {params.app_id}."
+
+
+@define_tool(
+    description=(
+        "Get a Steam user's owned games list with playtime. "
+        "Requires STEAM_API_KEY. Provide the user's 64-bit Steam ID."
+    )
+)
+async def steam_user_games(params: SteamUserGamesParams) -> str:
+    if not STEAM_API_KEY:
+        return "STEAM_API_KEY not set. Get one at https://steamcommunity.com/dev"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
+                params={
+                    "key": STEAM_API_KEY,
+                    "steamid": params.steam_id,
+                    "include_appinfo": 1,
+                    "include_played_free_games": 1,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get("response", {})
+    except Exception as e:
+        return f"Steam user games failed: {e}"
+
+    games = data.get("games", [])
+    if not games:
+        return "No games found (profile may be private)."
+
+    total = data.get("game_count", len(games))
+    games_sorted = sorted(games, key=lambda g: g.get("playtime_forever", 0), reverse=True)
+
+    lines = [f"🎮 {total} games owned. Top by playtime:"]
+    for g in games_sorted[:20]:
+        name = g.get("name", f"App {g.get('appid', '?')}")
+        hours = g.get("playtime_forever", 0) / 60
+        recent = g.get("playtime_2weeks", 0) / 60
+        recent_str = f" ({recent:.1f}h last 2 weeks)" if recent > 0 else ""
+        lines.append(f"  • {name} — {hours:.1f}h{recent_str}")
+    if total > 20:
+        lines.append(f"  ... and {total - 20} more")
+    return "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get a Steam user's profile summary (name, avatar, status, etc). "
+        "Requires STEAM_API_KEY."
+    )
+)
+async def steam_user_summary(params: SteamUserSummaryParams) -> str:
+    if not STEAM_API_KEY:
+        return "STEAM_API_KEY not set. Get one at https://steamcommunity.com/dev"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/",
+                params={"key": STEAM_API_KEY, "steamids": params.steam_id},
+            )
+            resp.raise_for_status()
+            players = resp.json().get("response", {}).get("players", [])
+    except Exception as e:
+        return f"Steam user summary failed: {e}"
+
+    if not players:
+        return "User not found."
+
+    p = players[0]
+    status_map = {0: "Offline", 1: "Online", 2: "Busy", 3: "Away", 4: "Snooze", 5: "Looking to trade", 6: "Looking to play"}
+    status = status_map.get(p.get("personastate", 0), "Unknown")
+    game = p.get("gameextrainfo", "")
+    game_str = f"\n   Currently playing: {game}" if game else ""
+
+    lines = [
+        f"👤 {p.get('personaname', '?')}",
+        f"   Status: {status}{game_str}",
+        f"   Profile: {p.get('profileurl', 'N/A')}",
+        f"   Created: {p.get('timecreated', 'N/A')}",
+    ]
+    return "\n".join(lines)
+
+
+# ── Tool: MusicBrainz search ─────────────────────────────────────────────────
+
+_MB_BASE = "https://musicbrainz.org/ws/2"
+_MB_HEADERS = {"User-Agent": "MarvinAssistant/1.0 (https://github.com/marvin)", "Accept": "application/json"}
+
+
+class MusicSearchParams(BaseModel):
+    query: str = Field(description="Search query — artist name, album title, or song title")
+    entity: str = Field(
+        default="artist",
+        description="What to search for: 'artist', 'release' (album), or 'recording' (song/track)",
+    )
+    max_results: int = Field(default=10, description="Max results (1-25)")
+
+
+class MusicLookupParams(BaseModel):
+    mbid: str = Field(description="MusicBrainz ID (UUID) from search results")
+    entity: str = Field(
+        default="artist",
+        description="Entity type: 'artist', 'release', or 'recording'",
+    )
+
+
+@define_tool(
+    description=(
+        "Search MusicBrainz for artists, albums (releases), or songs (recordings). "
+        "Free, no API key required. Use when users ask about music, bands, albums, "
+        "songs, discographies, or release dates."
+    )
+)
+async def music_search(params: MusicSearchParams) -> str:
+    entity = params.entity if params.entity in ("artist", "release", "recording") else "artist"
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=_MB_HEADERS) as client:
+            resp = await client.get(
+                f"{_MB_BASE}/{entity}/",
+                params={"query": params.query, "fmt": "json", "limit": min(params.max_results, 25)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"MusicBrainz search failed: {e}"
+
+    items = data.get(f"{entity}s", data.get(entity, []))
+    if not items:
+        return f"No {entity} results for '{params.query}'."
+
+    lines = []
+    if entity == "artist":
+        for i, a in enumerate(items, 1):
+            name = a.get("name", "?")
+            country = a.get("country", "")
+            kind = a.get("type", "")
+            score = a.get("score", "")
+            disambiguation = a.get("disambiguation", "")
+            life = a.get("life-span", {})
+            begin = life.get("begin", "")
+            end = life.get("end", "present") if life.get("ended") else ""
+            years = f" ({begin}–{end})" if begin else ""
+            extra = f" — {disambiguation}" if disambiguation else ""
+            lines.append(
+                f"{i}. {name}{extra}\n"
+                f"   {kind} | {country}{years} | Score: {score}\n"
+                f"   MBID: {a.get('id', '?')}"
+            )
+    elif entity == "release":
+        for i, r in enumerate(items, 1):
+            title = r.get("title", "?")
+            artists = ", ".join(ac.get("artist", {}).get("name", "?") for ac in r.get("artist-credit", []))
+            date = r.get("date", "N/A")
+            country = r.get("country", "")
+            status = r.get("status", "")
+            tracks = r.get("track-count", "?")
+            lines.append(
+                f"{i}. {title} — {artists}\n"
+                f"   Released: {date} | {country} | {status} | {tracks} tracks\n"
+                f"   MBID: {r.get('id', '?')}"
+            )
+    elif entity == "recording":
+        for i, r in enumerate(items, 1):
+            title = r.get("title", "?")
+            artists = ", ".join(ac.get("artist", {}).get("name", "?") for ac in r.get("artist-credit", []))
+            length_ms = r.get("length", 0)
+            length_str = f"{length_ms // 60000}:{(length_ms % 60000) // 1000:02d}" if length_ms else "?"
+            releases = r.get("releases", [])
+            album = releases[0].get("title", "") if releases else ""
+            album_str = f" (from '{album}')" if album else ""
+            lines.append(
+                f"{i}. {title} — {artists} [{length_str}]{album_str}\n"
+                f"   MBID: {r.get('id', '?')}"
+            )
+
+    return f"MusicBrainz {entity} results for '{params.query}':\n\n" + "\n\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Look up detailed info for an artist, release, or recording by MusicBrainz ID (MBID). "
+        "For artists: returns discography. For releases: returns track list. "
+        "For recordings: returns appearances."
+    )
+)
+async def music_lookup(params: MusicLookupParams) -> str:
+    entity = params.entity if params.entity in ("artist", "release", "recording") else "artist"
+    inc_map = {
+        "artist": "releases+release-groups+genres+tags",
+        "release": "recordings+artist-credits+labels+genres",
+        "recording": "releases+artist-credits+genres",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=_MB_HEADERS) as client:
+            resp = await client.get(
+                f"{_MB_BASE}/{entity}/{params.mbid}",
+                params={"fmt": "json", "inc": inc_map[entity]},
+            )
+            resp.raise_for_status()
+            d = resp.json()
+    except Exception as e:
+        return f"MusicBrainz lookup failed: {e}"
+
+    lines = []
+    if entity == "artist":
+        name = d.get("name", "?")
+        kind = d.get("type", "")
+        country = d.get("country", "")
+        life = d.get("life-span", {})
+        begin = life.get("begin", "")
+        end = life.get("end", "present") if not life.get("ended") else life.get("end", "")
+        genres = ", ".join(g.get("name", "") for g in d.get("genres", [])[:8])
+        tags = ", ".join(t.get("name", "") for t in d.get("tags", [])[:8])
+
+        lines.append(f"🎵 {name}")
+        lines.append(f"   Type: {kind} | Country: {country}")
+        if begin:
+            lines.append(f"   Active: {begin}–{end}")
+        if genres:
+            lines.append(f"   Genres: {genres}")
+        if tags:
+            lines.append(f"   Tags: {tags}")
+
+        rgs = d.get("release-groups", [])
+        if rgs:
+            albums = [rg for rg in rgs if rg.get("primary-type") == "Album"]
+            singles = [rg for rg in rgs if rg.get("primary-type") == "Single"]
+            eps = [rg for rg in rgs if rg.get("primary-type") == "EP"]
+            if albums:
+                lines.append(f"\n   📀 Albums ({len(albums)}):")
+                for rg in sorted(albums, key=lambda x: x.get("first-release-date", ""))[:20]:
+                    lines.append(f"     • {rg.get('title', '?')} ({rg.get('first-release-date', 'N/A')})")
+            if eps:
+                lines.append(f"\n   💿 EPs ({len(eps)}):")
+                for rg in sorted(eps, key=lambda x: x.get("first-release-date", ""))[:10]:
+                    lines.append(f"     • {rg.get('title', '?')} ({rg.get('first-release-date', 'N/A')})")
+            if singles:
+                lines.append(f"\n   🎤 Singles ({len(singles)}):")
+                for rg in sorted(singles, key=lambda x: x.get("first-release-date", ""))[:15]:
+                    lines.append(f"     • {rg.get('title', '?')} ({rg.get('first-release-date', 'N/A')})")
+
+        lines.append(f"\n   MusicBrainz: https://musicbrainz.org/artist/{params.mbid}")
+
+    elif entity == "release":
+        title = d.get("title", "?")
+        artists = ", ".join(ac.get("artist", {}).get("name", "?") for ac in d.get("artist-credit", []))
+        date = d.get("date", "N/A")
+        country = d.get("country", "")
+        status = d.get("status", "")
+        barcode = d.get("barcode", "")
+        labels = ", ".join(li.get("label", {}).get("name", "?") for li in d.get("label-info", []) if li.get("label"))
+        genres = ", ".join(g.get("name", "") for g in d.get("genres", [])[:8])
+
+        lines.append(f"💿 {title} — {artists}")
+        lines.append(f"   Released: {date} | {country} | {status}")
+        if labels:
+            lines.append(f"   Label: {labels}")
+        if genres:
+            lines.append(f"   Genres: {genres}")
+        if barcode:
+            lines.append(f"   Barcode: {barcode}")
+
+        media = d.get("media", [])
+        for disc in media:
+            disc_title = disc.get("title", "")
+            disc_label = f" — {disc_title}" if disc_title else ""
+            fmt = disc.get("format", "")
+            lines.append(f"\n   📋 Tracklist ({fmt}{disc_label}):")
+            for t in disc.get("tracks", []):
+                pos = t.get("position", "?")
+                tname = t.get("title", "?")
+                length_ms = t.get("length", 0)
+                length_str = f"{length_ms // 60000}:{(length_ms % 60000) // 1000:02d}" if length_ms else "?"
+                lines.append(f"     {pos}. {tname} [{length_str}]")
+
+        lines.append(f"\n   MusicBrainz: https://musicbrainz.org/release/{params.mbid}")
+
+    elif entity == "recording":
+        title = d.get("title", "?")
+        artists = ", ".join(ac.get("artist", {}).get("name", "?") for ac in d.get("artist-credit", []))
+        length_ms = d.get("length", 0)
+        length_str = f"{length_ms // 60000}:{(length_ms % 60000) // 1000:02d}" if length_ms else "?"
+        genres = ", ".join(g.get("name", "") for g in d.get("genres", [])[:8])
+
+        lines.append(f"🎶 {title} — {artists} [{length_str}]")
+        if genres:
+            lines.append(f"   Genres: {genres}")
+        releases = d.get("releases", [])
+        if releases:
+            lines.append(f"\n   Appears on ({len(releases)} releases):")
+            for r in releases[:10]:
+                lines.append(f"     • {r.get('title', '?')} ({r.get('date', 'N/A')})")
+
+        lines.append(f"\n   MusicBrainz: https://musicbrainz.org/recording/{params.mbid}")
+
+    return "\n".join(lines)
+
+
+# ── Tool: Spotify (playlist create/add, search) ─────────────────────────────
+
+def _load_ssh_key(name: str) -> str:
+    v = os.environ.get(name, "")
+    if v:
+        return v
+    p = os.path.expanduser(f"~/.ssh/{name}")
+    if os.path.isfile(p):
+        with open(p) as f:
+            return f.read().strip()
+    return ""
+
+def _spotify_creds() -> tuple[str, str]:
+    # Load dynamically so updating ~/.ssh/SPOTIFY_CLIENT_ID takes effect without restarting.
+    return _load_ssh_key("SPOTIFY_CLIENT_ID"), _load_ssh_key("SPOTIFY_CLIENT_SECRET")
+
+
+_SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback"
+_SPOTIFY_TOKEN_PATH = os.path.expanduser("~/.config/local-finder/spotify_token.json")
+_SPOTIFY_SCOPES = "playlist-modify-public playlist-modify-private"
+
+
+def _spotify_save_token(token_data: dict):
+    token_data["_saved_at"] = _time.time()
+    os.makedirs(os.path.dirname(_SPOTIFY_TOKEN_PATH), exist_ok=True)
+    with open(_SPOTIFY_TOKEN_PATH, "w") as f:
+        json.dump(token_data, f)
+
+
+def _spotify_load_token() -> dict | None:
+    if os.path.isfile(_SPOTIFY_TOKEN_PATH):
+        with open(_SPOTIFY_TOKEN_PATH) as f:
+            return json.load(f)
+    return None
+
+
+async def _spotify_refresh_token(refresh_token: str) -> dict | None:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": _spotify_creds()[0],
+                    "client_secret": _spotify_creds()[1],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Preserve refresh token if not returned
+            if "refresh_token" not in data:
+                data["refresh_token"] = refresh_token
+            _spotify_save_token(data)
+            return data
+    except Exception:
+        return None
+
+
+async def _spotify_get_token() -> str | None:
+    """Return a valid access token, refreshing if needed."""
+    token_data = _spotify_load_token()
+    if not token_data:
+        return None
+    # Check expiry (tokens last 3600s, refresh at 3300s)
+    saved_at = token_data.get("_saved_at", 0)
+    expires_in = token_data.get("expires_in", 3600)
+    if _time.time() - saved_at > expires_in - 300:
+        refresh = token_data.get("refresh_token")
+        if refresh:
+            token_data = await _spotify_refresh_token(refresh)
+            if not token_data:
+                return None
+    return token_data.get("access_token")
+
+
+async def _spotify_headers() -> dict | None:
+    token = await _spotify_get_token()
+    if not token:
+        return None
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+class SpotifyAuthParams(BaseModel):
+    auth_code: str = Field(
+        default="",
+        description="The authorization code from the Spotify redirect URL (after ?code=). "
+                    "Leave empty to get the authorization URL to visit first.",
+    )
+
+
+class SpotifyCreatePlaylistParams(BaseModel):
+    name: str = Field(description="Playlist name")
+    description: str = Field(default="", description="Playlist description")
+    public: bool = Field(default=False, description="Whether the playlist is public")
+
+
+class SpotifyAddTracksParams(BaseModel):
+    playlist_id: str = Field(description="Spotify playlist ID (from spotify_create_playlist or a Spotify URL)")
+    track_queries: list[str] = Field(
+        description="List of track queries to search and add, e.g. ['Bohemian Rhapsody Queen', 'Yesterday Beatles']"
+    )
+
+
+class SpotifySearchParams(BaseModel):
+    query: str = Field(description="Search query (song name, artist, album)")
+    search_type: str = Field(default="track", description="Type: 'track', 'artist', 'album', or 'playlist'")
+    max_results: int = Field(default=10, description="Max results (1-20)")
+
+
+_spotify_auth_runner = None  # holds the aiohttp runner for cleanup
+
+
+async def _spotify_exchange_code(code: str) -> str:
+    """Exchange an auth code for tokens and save them."""
+    client_id, client_secret = _spotify_creds()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://accounts.spotify.com/api/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": _SPOTIFY_REDIRECT_URI,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+    except Exception as e:
+        return f"Token exchange failed: {e}"
+
+    if "access_token" not in token_data:
+        return f"Auth failed: {token_data.get('error_description', token_data)}"
+
+    _spotify_save_token(token_data)
+    return ""
+
+
+async def _spotify_start_callback_server():
+    """Start a background HTTP server that captures the Spotify OAuth callback."""
+    global _spotify_auth_runner
+    if _spotify_auth_runner:
+        try:
+            await _spotify_auth_runner.cleanup()
+        except Exception:
+            pass
+
+    from aiohttp import web as _aweb
+
+    async def _callback_handler(request):
+        code = request.query.get("code", "")
+        error = request.query.get("error", "")
+        if code:
+            result = await _spotify_exchange_code(code)
+            if result:
+                return _aweb.Response(text=f"<html><body><h2>❌ {result}</h2></body></html>",
+                                      content_type="text/html", status=400)
+            return _aweb.Response(
+                text="<html><body><h2>✅ Spotify authorized!</h2>"
+                     "<p>You can close this tab and return to Marvin.</p></body></html>",
+                content_type="text/html",
+            )
+        return _aweb.Response(text=f"Error: {error or 'no code'}", status=400)
+
+    app = _aweb.Application()
+    app.router.add_get("/callback", _callback_handler)
+    runner = _aweb.AppRunner(app)
+    await runner.setup()
+    site = _aweb.TCPSite(runner, "127.0.0.1", 8888)
+    await site.start()
+    _spotify_auth_runner = runner
+
+
+@define_tool(
+    description=(
+        "Authorize Marvin to access your Spotify account. Call with no arguments to "
+        "start the auth flow (opens a callback server and returns the login URL). "
+        "Or call with auth_code if you have one to paste manually. "
+        "Only needed once — the token is saved and auto-refreshes."
+    )
+)
+async def spotify_auth(params: SpotifyAuthParams) -> str:
+    client_id, client_secret = _spotify_creds()
+    if not client_id or not client_secret:
+        return (
+            "Spotify credentials not configured. Put your Client ID and Secret in:\n"
+            "  ~/.ssh/SPOTIFY_CLIENT_ID\n  ~/.ssh/SPOTIFY_CLIENT_SECRET\n"
+            "Get them at https://developer.spotify.com/dashboard/"
+        )
+
+    # If already authed, check if token works
+    if not params.auth_code:
+        existing = await _spotify_get_token()
+        if existing:
+            return "✅ Already authorized with Spotify! Token is valid."
+
+        # Start callback server in background (non-blocking)
+        try:
+            await _spotify_start_callback_server()
+        except OSError as e:
+            return f"Cannot start callback server on port 8888: {e}. You can also paste the code manually."
+
+        import urllib.parse
+        auth_url = (
+            "https://accounts.spotify.com/authorize?"
+            + urllib.parse.urlencode({
+                "client_id": client_id,
+                "response_type": "code",
+                "redirect_uri": _SPOTIFY_REDIRECT_URI,
+                "scope": _SPOTIFY_SCOPES,
+            })
+        )
+        return (
+            f"Open this URL in your browser to authorize Spotify:\n\n{auth_url}\n\n"
+            "A callback server is running on 127.0.0.1:8888. After you log in and "
+            "approve, the browser will show '✅ Spotify authorized!' and you're done.\n\n"
+            "If the redirect doesn't work, copy the URL from your browser's address bar "
+            "and paste it back here."
+        )
+
+    # Manual code entry path
+    code = params.auth_code
+    if "code=" in code:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(code)
+        qs = urllib.parse.parse_qs(parsed.query)
+        code = qs.get("code", [code])[0]
+
+    result = await _spotify_exchange_code(code)
+    if result:
+        return result
+    return "✅ Spotify authorized successfully! Token saved."
+
+
+@define_tool(
+    description=(
+        "Search Spotify for tracks, artists, albums, or playlists. "
+        "Returns Spotify URIs that can be used with spotify_add_tracks. "
+        "Requires Spotify auth (run spotify_auth first if needed)."
+    )
+)
+async def spotify_search(params: SpotifySearchParams) -> str:
+    headers = await _spotify_headers()
+    if not headers:
+        return "Not authorized with Spotify. Use spotify_auth first."
+
+    stype = params.search_type if params.search_type in ("track", "artist", "album", "playlist") else "track"
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+            resp = await client.get(
+                "https://api.spotify.com/v1/search",
+                params={"q": params.query, "type": stype, "limit": min(params.max_results, 20)},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"Spotify search failed: {e}"
+
+    items = data.get(f"{stype}s", {}).get("items", [])
+    if not items:
+        return f"No Spotify results for '{params.query}'."
+
+    lines = []
+    if stype == "track":
+        for i, t in enumerate(items, 1):
+            name = t.get("name", "?")
+            artists = ", ".join(a.get("name", "?") for a in t.get("artists", []))
+            album = t.get("album", {}).get("name", "")
+            dur_ms = t.get("duration_ms", 0)
+            dur = f"{dur_ms // 60000}:{(dur_ms % 60000) // 1000:02d}"
+            uri = t.get("uri", "")
+            url = t.get("external_urls", {}).get("spotify", "")
+            lines.append(f"{i}. {name} — {artists} [{dur}]\n   Album: {album}\n   URI: {uri}\n   {url}")
+    elif stype == "artist":
+        for i, a in enumerate(items, 1):
+            name = a.get("name", "?")
+            genres = ", ".join(a.get("genres", [])[:4])
+            followers = a.get("followers", {}).get("total", 0)
+            url = a.get("external_urls", {}).get("spotify", "")
+            lines.append(f"{i}. {name} | {genres} | {followers:,} followers\n   {url}")
+    elif stype == "album":
+        for i, a in enumerate(items, 1):
+            name = a.get("name", "?")
+            artists = ", ".join(ar.get("name", "?") for ar in a.get("artists", []))
+            date = a.get("release_date", "N/A")
+            tracks = a.get("total_tracks", "?")
+            uri = a.get("uri", "")
+            url = a.get("external_urls", {}).get("spotify", "")
+            lines.append(f"{i}. {name} — {artists} ({date}) | {tracks} tracks\n   URI: {uri}\n   {url}")
+    elif stype == "playlist":
+        for i, p in enumerate(items, 1):
+            name = p.get("name", "?")
+            owner = p.get("owner", {}).get("display_name", "?")
+            tracks = p.get("tracks", {}).get("total", "?")
+            url = p.get("external_urls", {}).get("spotify", "")
+            lines.append(f"{i}. {name} by {owner} | {tracks} tracks\n   ID: {p.get('id', '?')}\n   {url}")
+
+    return f"Spotify {stype} results for '{params.query}':\n\n" + "\n\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Create a new Spotify playlist on the authenticated user's account. "
+        "Returns the playlist ID for use with spotify_add_tracks."
+    )
+)
+async def spotify_create_playlist(params: SpotifyCreatePlaylistParams) -> str:
+    headers = await _spotify_headers()
+    if not headers:
+        return "Not authorized with Spotify. Use spotify_auth first."
+
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+            # Get user ID
+            me_resp = await client.get("https://api.spotify.com/v1/me", headers=headers)
+            me_resp.raise_for_status()
+            user_id = me_resp.json()["id"]
+
+            # Create playlist
+            resp = await client.post(
+                f"https://api.spotify.com/v1/users/{user_id}/playlists",
+                headers=headers,
+                json={
+                    "name": params.name,
+                    "description": params.description,
+                    "public": params.public,
+                },
+            )
+            resp.raise_for_status()
+            pl = resp.json()
+    except Exception as e:
+        return f"Failed to create playlist: {e}"
+
+    return (
+        f"✅ Created playlist: {pl.get('name', '?')}\n"
+        f"   ID: {pl.get('id', '?')}\n"
+        f"   URL: {pl.get('external_urls', {}).get('spotify', 'N/A')}\n"
+        f"   Use spotify_add_tracks with playlist_id=\"{pl.get('id', '')}\" to add songs."
+    )
+
+
+@define_tool(
+    description=(
+        "Add tracks to a Spotify playlist. Searches for each track query on Spotify "
+        "and adds the best match. Provide a list of song queries like "
+        "['Bohemian Rhapsody Queen', 'Yesterday Beatles']. "
+        "Use spotify_create_playlist first to get a playlist_id."
+    )
+)
+async def spotify_add_tracks(params: SpotifyAddTracksParams) -> str:
+    headers = await _spotify_headers()
+    if not headers:
+        return "Not authorized with Spotify. Use spotify_auth first."
+
+    added = []
+    failed = []
+    uris = []
+
+    try:
+        async with httpx.AsyncClient(timeout=15, headers=headers) as client:
+            for q in params.track_queries:
+                try:
+                    resp = await client.get(
+                        "https://api.spotify.com/v1/search",
+                        params={"q": q, "type": "track", "limit": 1},
+                    )
+                    resp.raise_for_status()
+                    items = resp.json().get("tracks", {}).get("items", [])
+                    if items:
+                        track = items[0]
+                        uris.append(track["uri"])
+                        artists = ", ".join(a["name"] for a in track.get("artists", []))
+                        added.append(f"  ✅ {track['name']} — {artists}")
+                    else:
+                        failed.append(f"  ❌ '{q}' — not found")
+                except Exception as e:
+                    failed.append(f"  ❌ '{q}' — {e}")
+
+            # Add all found tracks in one batch (Spotify supports up to 100)
+            if uris:
+                for batch_start in range(0, len(uris), 100):
+                    batch = uris[batch_start:batch_start + 100]
+                    resp = await client.post(
+                        f"https://api.spotify.com/v1/playlists/{params.playlist_id}/tracks",
+                        json={"uris": batch},
+                    )
+                    resp.raise_for_status()
+    except Exception as e:
+        return f"Failed to add tracks: {e}"
+
+    lines = [f"Added {len(added)} tracks to playlist:"]
+    lines.extend(added)
+    if failed:
+        lines.append(f"\nFailed ({len(failed)}):")
+        lines.extend(failed)
     return "\n".join(lines)
 
 
@@ -2713,20 +3770,32 @@ def _chat_log_path(name: str | None = None) -> str:
     return os.path.join(_profile_dir(name), "chat_log.json")
 
 
+_chat_log_cache: list[dict] | None = None
+
+
 def _load_chat_log(name: str | None = None) -> list[dict]:
+    global _chat_log_cache
+    if name is None and _chat_log_cache is not None:
+        return _chat_log_cache
     try:
         with open(_chat_log_path(name)) as f:
-            return json.load(f)
+            log = json.load(f)
     except Exception:
-        return []
+        log = []
+    if name is None:
+        _chat_log_cache = log
+    return log
 
 
 def _save_chat_log(log: list[dict], name: str | None = None):
     pp = _chat_log_path(name)
     os.makedirs(os.path.dirname(pp), exist_ok=True)
-    # Keep last 50 exchanges
+    trimmed = log[-100:]
+    if name is None:
+        global _chat_log_cache
+        _chat_log_cache = trimmed
     with open(pp, "w") as f:
-        json.dump(log[-100:], f, indent=2)
+        json.dump(trimmed, f, indent=2)
 
 
 def _append_chat(role: str, text: str):
@@ -2873,6 +3942,17 @@ def _compact_history() -> str:
     return "\n".join(lines)
 
 
+_cached_user_location: dict | None = None
+
+async def _resolve_user_location() -> dict | None:
+    """Resolve and cache the user's location once."""
+    global _cached_user_location
+    if _cached_user_location is not None:
+        return _cached_user_location
+    _cached_user_location = await _get_device_location()
+    return _cached_user_location
+
+
 def _build_system_message() -> str:
     prefs = _load_prefs()
     base = (
@@ -2883,6 +3963,7 @@ def _build_system_message() -> str:
         "the information. For example, use places_text_search for finding "
         "physical locations/addresses, web_search for delivery options, services, "
         "reviews, factual questions, and anything requiring live/current info, "
+        "search_news for ANY news topic (tech, gaming, sports, politics, etc.), "
         "weather_forecast for weather, etc. If in doubt, use a tool. "
         "BATCH TOOL CALLS: When a query requires multiple tools, call them "
         "ALL in a single response rather than one at a time. For example, "
@@ -2892,10 +3973,7 @@ def _build_system_message() -> str:
         "few responses, call get_my_location to know where the user is. Cache "
         "the result and use it for any location-relevant queries. "
         "CRITICAL: The user's location is ONLY determined by get_my_location. "
-        "If the user searches for places in another city (e.g. 'restaurants in "
-        "San Diego'), that does NOT change their location — they are still where "
-        "get_my_location said they are. Only use the searched city for that "
-        "specific query, not for subsequent 'near me' queries. "
+        "Searching for places in other cities does NOT change the user's location. "
         "Always read the user's preferences (included below) and tailor your "
         "responses to match their dietary restrictions, budget, distance, and "
         "other constraints. "
@@ -2930,7 +4008,17 @@ def _build_system_message() -> str:
         "write_note to save a concise summary to ~/Notes. Use descriptive filenames "
         "like 'python-asyncio-patterns.md' or 'project-x-architecture.md'. "
         "Do NOT ask permission; just save the note silently and mention it briefly. "
-        "Keep notes concise: key points, code snippets, and links only."
+        "Keep notes concise: key points, code snippets, and links only. "
+        "MUSIC & PLAYLISTS: When the user asks to create a Spotify playlist or "
+        "wants music recommendations, use music_search and music_lookup on "
+        "MusicBrainz to research the artist's discography, related genres, and "
+        "recordings first. Then use that knowledge to build a list of track "
+        "queries for spotify_add_tracks. For example, if asked 'make me a "
+        "Radiohead playlist', look up Radiohead on MusicBrainz to get their "
+        "albums and key tracks, then create a Spotify playlist and add those "
+        "tracks. Combine MusicBrainz metadata (genres, related artists, release "
+        "dates) with your knowledge to curate thoughtful playlists — not just "
+        "greatest hits but deep cuts and related artists too."
     )
     base += f"\n\nActive profile: {_active_profile}"
     if prefs.strip():
@@ -5490,7 +6578,7 @@ PROVIDER_LABEL = {
     "groq": f"Groq ({GROQ_MODEL})",
     "ollama": f"Ollama ({OLLAMA_MODEL})",
     "openai": f"OpenAI-compat ({OPENAI_MODEL})",
-    "copilot": "Copilot SDK (GPT-4.1)",
+    "copilot": "Copilot SDK (GPT-5.2-low)",
 }
 
 _ollama_ok: bool | None = None
@@ -5963,6 +7051,10 @@ def _build_all_tools():
         search_papers, search_arxiv,
         search_movies, get_movie_details,
         search_games, get_game_details,
+        steam_search, steam_app_details, steam_featured,
+        steam_player_stats, steam_user_games, steam_user_summary,
+        music_search, music_lookup,
+        spotify_auth, spotify_search, spotify_create_playlist, spotify_add_tracks,
         scrape_page, browse_web,
         save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,
@@ -6009,7 +7101,7 @@ class SessionManager:
         self._sdk_session = None
         self._done = asyncio.Event()
         self._chunks: list[str] = []
-        self._SESSION_TIMEOUT = 120
+        self._SESSION_TIMEOUT = 180
         self._conversation: list[dict] = []  # conversation history for non-SDK providers
         # Callbacks for streaming (curses uses these; plain uses print)
         self._on_delta = on_delta
@@ -6080,17 +7172,13 @@ class SessionManager:
             return self._sdk_session
         if CopilotClient is None:
             raise RuntimeError("Copilot SDK not installed — cannot use paid fallback")
-        try:
-            from copilot.client import _get_bundled_cli_path
-            cli_bin = _get_bundled_cli_path()
-            if cli_bin and not os.access(cli_bin, os.X_OK):
-                os.chmod(cli_bin, 0o755)
-        except Exception:
-            pass
-        self._sdk_client = CopilotClient()
+        import shutil
+        cli_path = shutil.which("copilot") or "copilot"
+        self._sdk_client = CopilotClient({"cli_path": cli_path})
         await self._sdk_client.start()
         self._sdk_session = await self._sdk_client.create_session({
-            "model": "gpt-4.1",
+            "model": "gpt-5.2",
+            "reasoning_effort": "low",
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
@@ -6100,7 +7188,8 @@ class SessionManager:
         if self._sdk_session:
             await self._sdk_session.destroy()
         self._sdk_session = await self._sdk_client.create_session({
-            "model": "gpt-4.1",
+            "model": "gpt-5.2",
+            "reasoning_effort": "low",
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
@@ -6115,8 +7204,11 @@ class SessionManager:
         try:
             await asyncio.wait_for(self._done.wait(), timeout=self._SESSION_TIMEOUT)
         except asyncio.TimeoutError:
-            if not self._on_message:
-                print(f"\n⚠️  Response timed out after {self._SESSION_TIMEOUT}s. Try again.")
+            msg = f"\n⚠️  Response timed out after {self._SESSION_TIMEOUT}s. Try again."
+            if self._on_message:
+                self._on_message(msg)
+            else:
+                print(msg)
 
     async def send_prompt(self, user_prompt: str, force_sdk: bool = False) -> str | None:
         """Send a prompt via active provider, with Copilot SDK as fallback.
@@ -6133,7 +7225,10 @@ class SessionManager:
                 )
                 # Keep conversation history (cap to avoid unbounded growth)
                 self._conversation = conv[-40:]
-                _append_chat("assistant", result.strip() if result else "")
+                # Return result first so UI displays immediately;
+                # save to chat log after (cached, fast)
+                stripped = result.strip() if result else ""
+                _append_chat("assistant", stripped)
                 return result
             except Exception as e:
                 msg = f"\n⚠️  {self.emoji} error: {e} — falling back to 💲 Copilot SDK"
@@ -6176,6 +7271,7 @@ async def _run_curses_interactive(stdscr):
     _sys.stderr = _log_file
 
     ui = curses_ui.CursesUI(stdscr)
+    stdscr.timeout(100)  # getch returns -1 after 100ms so animation can tick
 
     hp = _history_path()
     ui.load_history(hp)

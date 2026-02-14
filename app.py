@@ -88,12 +88,23 @@ class UsageTracker:
     }
     REPORT_INTERVAL = 10
 
+    # Per-token costs ($ per 1M tokens) by provider
+    PROVIDER_TOKEN_COSTS = {
+        "gemini": {
+            "input": 2.00 / 1_000_000,   # $2.00 per 1M input tokens (Gemini 3 Pro)
+            "output": 12.00 / 1_000_000,  # $12.00 per 1M output tokens
+        },
+    }
+
     def __init__(self):
         self.calls: dict[str, int] = {}
         self.total_paid_calls = 0
         self.session_cost = 0.0
         self.llm_turns = 0
         self.ollama_turns = 0
+        self.provider_input_tokens: dict[str, int] = {}
+        self.provider_output_tokens: dict[str, int] = {}
+        self.provider_cost: dict[str, float] = {}
         self._log_path = os.path.expanduser("~/.config/local-finder/usage.json")
 
     def record(self, tool_name: str):
@@ -110,10 +121,20 @@ class UsageTracker:
     def record_ollama_turn(self):
         self.ollama_turns += 1
 
-    def record_local_turn(self, provider: str = "ollama"):
-        """Record a turn handled by a non-Copilot provider (free or cheap)."""
+    def record_local_turn(self, provider: str = "ollama", usage: dict | None = None):
+        """Record a turn handled by a non-Copilot provider, with optional token usage."""
         self.ollama_turns += 1
         self.calls[f"_provider:{provider}"] = self.calls.get(f"_provider:{provider}", 0) + 1
+        if usage:
+            in_tok = usage.get("prompt_tokens", 0)
+            out_tok = usage.get("completion_tokens", 0)
+            self.provider_input_tokens[provider] = self.provider_input_tokens.get(provider, 0) + in_tok
+            self.provider_output_tokens[provider] = self.provider_output_tokens.get(provider, 0) + out_tok
+            costs = self.PROVIDER_TOKEN_COSTS.get(provider)
+            if costs:
+                turn_cost = in_tok * costs["input"] + out_tok * costs["output"]
+                self.provider_cost[provider] = self.provider_cost.get(provider, 0) + turn_cost
+                self.session_cost += turn_cost
 
     def should_report(self) -> bool:
         return self.total_paid_calls > 0 and self.total_paid_calls % self.REPORT_INTERVAL == 0
@@ -136,8 +157,18 @@ class UsageTracker:
         for key, count in sorted(self.calls.items()):
             if key.startswith("_provider:"):
                 prov = key.split(":", 1)[1]
-                prov_emoji = {"groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
-                lines.append(f"   {prov_emoji} {prov}: {count} turns (free)")
+                prov_emoji = {"gemini": "✨", "groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
+                in_tok = self.provider_input_tokens.get(prov, 0)
+                out_tok = self.provider_output_tokens.get(prov, 0)
+                cost = self.provider_cost.get(prov, 0)
+                if in_tok or out_tok:
+                    lines.append(
+                        f"   {prov_emoji} {prov}: {count} turns | "
+                        f"{in_tok:,} in + {out_tok:,} out tokens "
+                        f"(${cost:.4f})"
+                    )
+                else:
+                    lines.append(f"   {prov_emoji} {prov}: {count} turns (free)")
         if self.total_paid_calls:
             api_cost = self.session_cost - llm_cost
             lines.append(f"   Paid API calls: {self.total_paid_calls} (~${api_cost:.3f})")
@@ -160,6 +191,14 @@ class UsageTracker:
             cumulative["total_cost"] = cumulative.get("total_cost", 0) + self.session_cost
             cumulative["total_llm_turns"] = cumulative.get("total_llm_turns", 0) + self.llm_turns
             cumulative["total_ollama_turns"] = cumulative.get("total_ollama_turns", 0) + self.ollama_turns
+            # Persist per-provider token counts
+            tok = cumulative.get("total_provider_tokens", {})
+            for prov in set(list(self.provider_input_tokens) + list(self.provider_output_tokens)):
+                pt = tok.get(prov, {"input": 0, "output": 0})
+                pt["input"] = pt.get("input", 0) + self.provider_input_tokens.get(prov, 0)
+                pt["output"] = pt.get("output", 0) + self.provider_output_tokens.get(prov, 0)
+                tok[prov] = pt
+            cumulative["total_provider_tokens"] = tok
             calls = cumulative.get("total_calls", {})
             for name, count in self.calls.items():
                 calls[name] = calls.get(name, 0) + count
@@ -179,8 +218,14 @@ class UsageTracker:
         for key, count in sorted(self.calls.items()):
             if key.startswith("_provider:"):
                 prov = key.split(":", 1)[1]
-                prov_emoji = {"groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
-                parts.append(f"{prov_emoji}{count}")
+                prov_emoji = {"gemini": "✨", "groq": "⚡", "ollama": "🏠", "openai": "🌐"}.get(prov, "?")
+                in_tok = self.provider_input_tokens.get(prov, 0)
+                out_tok = self.provider_output_tokens.get(prov, 0)
+                if in_tok or out_tok:
+                    total_tok = in_tok + out_tok
+                    parts.append(f"{prov_emoji}{count} ({total_tok:,} tok)")
+                else:
+                    parts.append(f"{prov_emoji}{count}")
         if self.total_paid_calls:
             parts.append(f"{self.total_paid_calls} API")
         return " | ".join(parts)
@@ -197,7 +242,15 @@ class UsageTracker:
             lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
             ollama_total = data.get("total_ollama_turns", 0)
             if ollama_total:
-                lines.append(f"   Ollama turns: {ollama_total} (free)")
+                lines.append(f"   Local turns: {ollama_total}")
+            # Show lifetime token usage per provider
+            for prov, tok in sorted(data.get("total_provider_tokens", {}).items()):
+                in_tok = tok.get("input", 0)
+                out_tok = tok.get("output", 0)
+                costs = self.PROVIDER_TOKEN_COSTS.get(prov)
+                if costs and (in_tok or out_tok):
+                    cost = in_tok * costs["input"] + out_tok * costs["output"]
+                    lines.append(f"   {prov}: {in_tok:,} in + {out_tok:,} out tokens (${cost:.4f})")
             for name, count in sorted(data.get("total_calls", {}).items()):
                 lines.append(f"   {name}: {count}x")
             return "\n".join(lines)
@@ -236,6 +289,12 @@ def _get_google_headers() -> dict | None:
             ["gcloud", "config", "get-value", "project"],
             stderr=subprocess.DEVNULL,
         ).decode().strip()
+        if not project or project == "(unset)":
+            # Fallback: pick first available project
+            project = subprocess.check_output(
+                ["gcloud", "projects", "list", "--format=value(projectId)", "--limit=1"],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
         if project and project != "(unset)":
             headers["X-Goog-User-Project"] = project
     except Exception:
@@ -2130,8 +2189,12 @@ async def places_text_search(params: TextSearchParams) -> str:
                 )
                 if resp.status_code == 200:
                     return _format_places(resp.json())
-        except Exception:
-            pass
+                else:
+                    import sys
+                    print(f"  ⚠️  Google Places API {resp.status_code}, falling back to OSM", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"  ⚠️  Google Places error: {e}, falling back to OSM", file=sys.stderr)
 
     # Fallback to OpenStreetMap Nominatim
     return await _nominatim_search(
@@ -2202,8 +2265,12 @@ async def places_nearby_search(params: NearbySearchParams) -> str:
                 )
                 if resp.status_code == 200:
                     return _format_places(resp.json())
-        except Exception:
-            pass
+                else:
+                    import sys
+                    print(f"  ⚠️  Google Places API {resp.status_code}, falling back to OSM", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"  ⚠️  Google Places error: {e}, falling back to OSM", file=sys.stderr)
 
     # Fallback to OpenStreetMap Overpass
     return await _overpass_nearby(
@@ -2810,6 +2877,7 @@ def _build_system_message() -> str:
     prefs = _load_prefs()
     base = (
         "You are Marvin, a helpful local-business and general-purpose assistant. "
+        "Your name is Marvin — always refer to yourself as Marvin, never as 'assistant'. "
         "CRITICAL: You MUST use your available tools to answer questions. "
         "NEVER guess, fabricate, or answer from memory when a tool can provide "
         "the information. For example, use places_text_search for finding "
@@ -5401,7 +5469,7 @@ if not os.environ.get("GEMINI_API_KEY") and os.path.isfile(_gemini_key_path):
         if _key:
             os.environ["GEMINI_API_KEY"] = _key
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 # ── Provider metadata ──
@@ -5578,24 +5646,45 @@ async def _openai_chat(
         "model": model,
         "messages": messages,
         "stream": stream,
+        "stream_options": {"include_usage": True} if stream else None,
     }
+    if not stream:
+        body.pop("stream_options")
+    # Gemini thinking config
+    if "gemini-3" in model:
+        body["google"] = {
+            "thinking_config": {"thinking_level": "low"}
+        }
+    elif "gemini-2.5" in model:
+        body["google"] = {
+            "thinking_config": {
+                "thinking_budget": 2048,
+                "include_thoughts": False,
+            }
+        }
     if tools:
         body["tools"] = tools
         body["stream"] = False
         stream = False
 
-    timeout = httpx.Timeout(180.0, connect=10.0)
+    timeout = httpx.Timeout(300.0, connect=10.0)
 
     if not stream:
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(api_url, headers=headers, json=body)
             r.raise_for_status()
-            choice = r.json()["choices"][0]
-            return choice["message"]
+            rjson = r.json()
+            choice = rjson["choices"][0]
+            usage = rjson.get("usage", {})
+            msg = choice["message"]
+            # Gemini thinking models may return None content
+            if msg.get("content") is None:
+                msg["content"] = ""
+            return msg, usage
 
     # Streaming
     full_content = ""
-    final_msg: dict = {}
+    usage: dict = {}
     async with httpx.AsyncClient(timeout=timeout) as c:
         async with c.stream("POST", api_url, headers=headers, json=body) as r:
             r.raise_for_status()
@@ -5609,14 +5698,17 @@ async def _openai_chat(
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                # Capture usage from final chunk
+                if "usage" in chunk:
+                    usage = chunk["usage"]
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
-                text = delta.get("content", "")
+                text = delta.get("content") or ""
                 if text:
                     print(text, end="", flush=True)
                     full_content += text
 
     final_msg = {"role": "assistant", "content": full_content}
-    return final_msg
+    return final_msg, usage
 
 
 async def _ollama_chat(
@@ -5641,7 +5733,7 @@ async def _ollama_chat(
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(f"{OLLAMA_URL}/api/chat", json=body)
             r.raise_for_status()
-            return r.json().get("message", {})
+            return r.json().get("message", {}), {}
 
     full_content = ""
     final_msg: dict = {}
@@ -5665,7 +5757,7 @@ async def _ollama_chat(
 
     if not final_msg:
         final_msg = {"role": "assistant", "content": full_content}
-    return final_msg
+    return final_msg, {}
 
 
 async def _provider_chat(
@@ -5673,8 +5765,8 @@ async def _provider_chat(
     tools: list[dict] | None = None,
     stream: bool = True,
     provider: str | None = None,
-) -> dict:
-    """Route chat to the active provider."""
+) -> tuple[dict, dict]:
+    """Route chat to the active provider. Returns (message, usage)."""
     prov = provider or LLM_PROVIDER
     if prov == "gemini":
         return await _openai_chat(
@@ -5719,8 +5811,8 @@ async def _run_tool_loop(
     messages.append({"role": "user", "content": prompt})
 
     for _round in range(max_rounds):
-        _usage.record_local_turn(prov)
-        response = await _provider_chat(messages, tools=tools_schema, stream=False, provider=prov)
+        response, resp_usage = await _provider_chat(messages, tools=tools_schema, stream=False, provider=prov)
+        _usage.record_local_turn(prov, resp_usage)
 
         tool_calls = response.get("tool_calls", [])
         if not tool_calls:
@@ -5732,7 +5824,8 @@ async def _run_tool_loop(
                 conv.append({"role": "assistant", "content": content})
                 return content, conv
             messages.append(response)
-            response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+            response, resp_usage = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+            _usage.record_local_turn(prov, resp_usage)
             content = response.get("content", "")
             conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
             conv.append({"role": "assistant", "content": content})
@@ -5785,8 +5878,8 @@ async def _run_tool_loop(
             })
 
     # Max rounds — final summary
-    _usage.record_local_turn(prov)
-    response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+    response, resp_usage = await _provider_chat(messages, tools=None, stream=True, provider=prov)
+    _usage.record_local_turn(prov, resp_usage)
     content = response.get("content", "")
     conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
     conv.append({"role": "assistant", "content": content})

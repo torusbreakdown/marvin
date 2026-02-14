@@ -2273,6 +2273,25 @@ def _list_profiles() -> list[str]:
     return sorted(names) if names else ["default"]
 
 
+_MAX_HISTORY_CONTEXT = 20  # last N exchanges to include
+
+
+def _compact_history() -> str:
+    """Read the last N readline history entries and format as prior context."""
+    hp = _history_path()
+    if not os.path.exists(hp):
+        return ""
+    try:
+        with open(hp) as f:
+            lines = [l.strip() for l in f if l.strip()]
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    recent = lines[-_MAX_HISTORY_CONTEXT:]
+    return "\n".join(f"  - {l}" for l in recent)
+
+
 def _build_system_message() -> str:
     prefs = _load_prefs()
     base = (
@@ -2316,6 +2335,12 @@ def _build_system_message() -> str:
             "\n\nThe user has saved these places. Use them when the user "
             "refers to them by label (e.g. 'near home', 'directions to work'):\n"
             + "\n".join(f"  • {l}" for l in place_lines)
+        )
+    history = _compact_history()
+    if history:
+        base += (
+            "\n\nRecent conversation history (the user's past queries in this profile). "
+            "Use this for context about what they've been asking about:\n" + history
         )
     return base
 

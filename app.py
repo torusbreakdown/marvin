@@ -2397,7 +2397,7 @@ async def main():
     await client.start()
 
     session = await client.create_session({
-        "model": "gpt-4.1",
+        "model": "gpt-5.2",
         "tools": all_tools,
         "system_message": {"content": _build_system_message()},
     })
@@ -2497,7 +2497,7 @@ async def main():
                     _profile_switch_requested.clear()
                     await session.destroy()
                     session = await client.create_session({
-                        "model": "gpt-4.1",
+                        "model": "gpt-5.2",
                         "tools": all_tools,
                         "system_message": {"content": _build_system_message()},
                     })

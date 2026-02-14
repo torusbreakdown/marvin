@@ -212,9 +212,19 @@ class CursesUI:
                 pass
 
     def _render_status(self):
-        """Top status bar."""
+        """Top status bar with live clock."""
         w = self.width
-        bar = self.status_text.ljust(w)[:w]
+        # Clock with sun/moon emoji
+        now = __import__('time').localtime()
+        hour = now.tm_hour
+        icon = "🌙" if hour >= 21 or hour < 6 else "☀️"
+        clock = __import__('time').strftime(f" {icon} %I:%M:%S %p ", now)
+        # Status on left, clock on right
+        left_w = w - len(clock)
+        if left_w < 0:
+            left_w = 0
+        bar = self.status_text[:left_w].ljust(left_w) + clock
+        bar = bar[:w]
         try:
             self.stdscr.addstr(0, 0, bar, curses.color_pair(C_STATUS) | curses.A_BOLD)
         except curses.error:

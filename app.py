@@ -8135,8 +8135,14 @@ PROVIDER_LABEL = {
     "groq": f"Groq ({GROQ_MODEL})",
     "ollama": f"Ollama ({OLLAMA_MODEL})",
     "openai": f"OpenAI-compat ({OPENAI_MODEL})",
-    "copilot": "Copilot SDK (GPT-5.2-low)",
+    "copilot": None,  # dynamic — computed in _copilot_label()
 }
+
+
+def _copilot_label() -> str:
+    effort = "high" if _coding_mode else "low"
+    return f"Copilot SDK (GPT-5.2-{effort})"
+
 
 _ollama_ok: bool | None = None
 
@@ -8688,7 +8694,7 @@ class SessionManager:
                 self.active_provider = "gemini" if GEMINI_API_KEY else ("groq" if GROQ_API_KEY else "copilot")
 
         self.emoji = PROVIDER_EMOJI.get(self.active_provider, "?")
-        self.label = PROVIDER_LABEL.get(self.active_provider, self.active_provider)
+        self.label = _copilot_label() if self.active_provider == "copilot" else PROVIDER_LABEL.get(self.active_provider, self.active_provider)
 
         # Seed conversation history from chat log for context continuity
         if self.active_provider != "copilot":
@@ -8992,6 +8998,7 @@ async def _run_curses_interactive(stdscr):
                         ui.render()
                         # Rebuild SDK session to pick up reasoning_effort change
                         await mgr.rebuild_sdk_session()
+                        mgr.label = _copilot_label()
                     else:
                         try:
                             notifs = await _check_all_subscriptions()

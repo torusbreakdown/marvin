@@ -9250,6 +9250,7 @@ async def _run_non_interactive():
     # Parse args
     prompt_text = None
     working_dir = None
+    design_first = False
     skip_next = False
     for i, a in enumerate(sys.argv[1:], 1):
         if skip_next:
@@ -9264,6 +9265,8 @@ async def _run_non_interactive():
         elif a == "--ntfy" and i < len(sys.argv) - 1:
             _ntfy_override_topic = sys.argv[i + 1]
             skip_next = True
+        elif a == "--design-first":
+            design_first = True
 
     if not prompt_text:
         print("Error: --prompt is required in non-interactive mode", file=sys.stderr)
@@ -9276,6 +9279,23 @@ async def _run_non_interactive():
 
     # Use model from env if specified
     model_override = os.environ.get("MARVIN_MODEL")  # e.g. "claude-opus-4.6"
+
+    # --design-first: bypass LLM orchestration, call launch_agent directly
+    if design_first:
+        ok, out = _run_cmd(["tk", "create", prompt_text[:80]], timeout=5)
+        ticket_id = out.strip().split()[-1] if ok and out else "no-ticket"
+        params = LaunchAgentParams(
+            ticket_id=ticket_id,
+            prompt=prompt_text,
+            model="auto",
+            working_dir=_coding_working_dir,
+            design_first=True,
+            tdd=True,
+        )
+        result = await launch_agent._original_fn(params)
+        print(result)
+        print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
+        return
 
     all_tools = _build_all_tools()
     system_msg = _build_system_message()

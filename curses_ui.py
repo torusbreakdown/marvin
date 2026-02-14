@@ -409,6 +409,7 @@ async def curses_main(stdscr, app_module):
         app_module.yt_dlp_download,
         app_module.calendar_add_event, app_module.calendar_delete_event,
         app_module.calendar_view, app_module.calendar_list_upcoming,
+        app_module.file_read_lines, app_module.file_apply_patch,
     ]
 
     def update_status():

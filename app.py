@@ -3121,6 +3121,213 @@ async def calendar_list_upcoming(params: CalendarListParams) -> str:
     return "\n".join(lines)
 
 
+###############################################################################
+# File tools — read lines & apply unified-diff patch
+###############################################################################
+
+
+class FileReadLinesParams(BaseModel):
+    path: str = Field(
+        description=(
+            "Absolute or ~-prefixed file path to read, e.g. '~/Notes/todo.md' "
+            "or '/home/user/project/main.py'."
+        )
+    )
+    start: int = Field(default=1, description="First line number to read (1-based, inclusive).")
+    end: int = Field(default=0, description="Last line number to read (inclusive). 0 = until end of file.")
+
+
+@define_tool(
+    "file_read_lines",
+    "Read lines from a file with line numbers. Use to inspect file contents before editing."
+)
+async def file_read_lines(params: FileReadLinesParams) -> str:
+    path = os.path.expanduser(params.path)
+    if not os.path.isfile(path):
+        return f"File not found: {params.path}"
+    try:
+        with open(path) as f:
+            all_lines = f.readlines()
+    except Exception as e:
+        return f"Failed to read file: {e}"
+
+    total = len(all_lines)
+    start = max(1, params.start)
+    end = params.end if params.end > 0 else total
+    end = min(end, total)
+
+    if start > total:
+        return f"File has {total} lines; start={start} is past the end."
+
+    selected = all_lines[start - 1 : end]
+    numbered = []
+    for i, line in enumerate(selected, start=start):
+        numbered.append(f"{i:>5} | {line.rstrip()}")
+    header = f"── {params.path} ({total} lines) ──  showing {start}–{end}"
+    return header + "\n" + "\n".join(numbered)
+
+
+class FileApplyPatchParams(BaseModel):
+    path: str = Field(
+        description=(
+            "Absolute or ~-prefixed file path to patch, e.g. '~/Notes/todo.md'. "
+            "The file must already exist."
+        )
+    )
+    patch: str = Field(
+        description=(
+            "A unified-diff style patch to apply. Each hunk starts with "
+            "'@@ -old_start,old_count +new_start,new_count @@'. "
+            "Lines beginning with '-' are removed, '+' are added, ' ' (space) are context. "
+            "Alternatively, provide a simple line-edit format:\n"
+            "  REPLACE <line_number>\n"
+            "  <new content>\n"
+            "  ---\n"
+            "  INSERT <after_line_number>\n"
+            "  <new lines>\n"
+            "  ---\n"
+            "  DELETE <line_number> [count]"
+        )
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="If true, show what would change without modifying the file."
+    )
+
+
+def _apply_simple_patch(lines: list[str], patch_text: str) -> tuple[list[str], list[str]]:
+    """Apply simple REPLACE/INSERT/DELETE commands. Returns (new_lines, log)."""
+    result = list(lines)
+    log: list[str] = []
+    for block in patch_text.split("---"):
+        block = block.strip()
+        if not block:
+            continue
+        block_lines = block.split("\n")
+        cmd = block_lines[0].strip()
+
+        if cmd.upper().startswith("REPLACE "):
+            lno = int(cmd.split()[1])
+            if lno < 1 or lno > len(result):
+                log.append(f"REPLACE {lno}: out of range (file has {len(result)} lines)")
+                continue
+            new_content = "\n".join(block_lines[1:])
+            old = result[lno - 1]
+            result[lno - 1] = new_content
+            log.append(f"REPLACE line {lno}: {old.rstrip()!r} → {new_content.rstrip()!r}")
+
+        elif cmd.upper().startswith("INSERT "):
+            lno = int(cmd.split()[1])
+            new_lines = block_lines[1:]
+            for i, nl in enumerate(new_lines):
+                result.insert(lno + i, nl)
+            log.append(f"INSERT {len(new_lines)} line(s) after line {lno}")
+
+        elif cmd.upper().startswith("DELETE "):
+            parts = cmd.split()
+            lno = int(parts[1])
+            count = int(parts[2]) if len(parts) > 2 else 1
+            if lno < 1 or lno + count - 1 > len(result):
+                log.append(f"DELETE {lno}: out of range")
+                continue
+            del result[lno - 1 : lno - 1 + count]
+            log.append(f"DELETE {count} line(s) starting at line {lno}")
+
+        else:
+            log.append(f"Unknown command: {cmd}")
+    return result, log
+
+
+def _apply_unified_diff(lines: list[str], patch_text: str) -> tuple[list[str], list[str]]:
+    """Apply a unified-diff patch. Returns (new_lines, log)."""
+    import re
+    result = list(lines)
+    log: list[str] = []
+    hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    offset = 0  # cumulative line shift from prior hunks
+
+    patch_lines = patch_text.split("\n")
+    i = 0
+    while i < len(patch_lines):
+        m = hunk_re.match(patch_lines[i])
+        if not m:
+            i += 1
+            continue
+        old_start = int(m.group(1))
+        i += 1
+        # Collect hunk body
+        removes: list[int] = []
+        adds: list[str] = []
+        pos = old_start - 1 + offset
+        while i < len(patch_lines) and not patch_lines[i].startswith("@@"):
+            line = patch_lines[i]
+            if line.startswith("-"):
+                removes.append(pos)
+                pos += 1
+            elif line.startswith("+"):
+                adds.append(line[1:])
+            elif line.startswith(" "):
+                pos += 1
+            else:
+                break
+            i += 1
+
+        # Apply: delete then insert
+        for idx in sorted(removes, reverse=True):
+            if 0 <= idx < len(result):
+                del result[idx]
+        insert_at = (min(removes) if removes else old_start - 1 + offset)
+        for j, new_line in enumerate(adds):
+            result.insert(insert_at + j, new_line)
+        offset += len(adds) - len(removes)
+        log.append(f"Hunk @@ -{old_start}: -{len(removes)} +{len(adds)} lines")
+
+    return result, log
+
+
+@define_tool(
+    "file_apply_patch",
+    "Apply a patch (unified diff or simple REPLACE/INSERT/DELETE commands) to a file. "
+    "Always use file_read_lines first to see the current content and line numbers."
+)
+async def file_apply_patch(params: FileApplyPatchParams) -> str:
+    path = os.path.expanduser(params.path)
+    if not os.path.isfile(path):
+        return f"File not found: {params.path}"
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except Exception as e:
+        return f"Failed to read file: {e}"
+
+    # Strip trailing newlines for processing, re-add on write
+    stripped = [l.rstrip("\n") for l in lines]
+
+    patch = params.patch.strip()
+    if "@@" in patch:
+        new_lines, log = _apply_unified_diff(stripped, patch)
+    else:
+        new_lines, log = _apply_simple_patch(stripped, patch)
+
+    if not log:
+        return "No changes detected in patch."
+
+    summary = "\n".join(log)
+
+    if params.dry_run:
+        return f"Dry run — would apply:\n{summary}"
+
+    try:
+        with open(path, "w") as f:
+            f.write("\n".join(new_lines))
+            if new_lines:
+                f.write("\n")
+    except Exception as e:
+        return f"Failed to write file: {e}"
+
+    return f"Patched {params.path}:\n{summary}"
+
+
 class _CursesRequested(Exception):
     def __init__(self, app_module):
         self.app_module = app_module
@@ -3168,6 +3375,7 @@ async def main():
         yt_dlp_download,
         calendar_add_event, calendar_delete_event,
         calendar_view, calendar_list_upcoming,
+        file_read_lines, file_apply_patch,
     ]
 
     client = CopilotClient()

@@ -214,5 +214,6 @@ List my notes
 | **Profile** | `switch_profile`, `update_preferences` |
 | **Notes** | `write_note`, `read_note`, `notes_mkdir`, `notes_ls` |
 | **Calendar** | `calendar_add_event`, `calendar_delete_event`, `calendar_view`, `calendar_list_upcoming` |
+| **File Editing** | `file_read_lines`, `file_apply_patch` |
 | **Downloads** | `yt_dlp_download` |
 | **System** | `setup_google_auth`, `get_usage`, `exit_app` |

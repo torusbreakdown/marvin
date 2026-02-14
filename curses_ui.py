@@ -134,7 +134,7 @@ class CursesUI:
         content_width = w - 2  # 1 char margin each side
 
         for msg in self.messages:
-            color = self._role_color(msg.role)
+            color = curses.color_pair(self._role_color(msg.role))
             label = f"{msg.timestamp} {self._role_label(msg.role)}:"
             display_lines.append((label, color | curses.A_BOLD))
             for wl in self._wrap_lines(msg.text, content_width - 2):
@@ -144,9 +144,10 @@ class CursesUI:
         # If currently streaming, show partial response
         if self.is_streaming and self.streaming_chunks:
             partial = "".join(self.streaming_chunks)
-            display_lines.append((f"  Assistant: ", C_ASSISTANT | curses.A_BOLD))
+            acolor = curses.color_pair(C_ASSISTANT)
+            display_lines.append(("  Assistant:", acolor | curses.A_BOLD))
             for wl in self._wrap_lines(partial, content_width - 2):
-                display_lines.append((f"  {wl}", curses.color_pair(C_ASSISTANT)))
+                display_lines.append((f"  {wl}", acolor))
             display_lines.append(("", 0))
 
         # Apply scroll offset (offset 0 = show bottom)
@@ -162,11 +163,7 @@ class CursesUI:
             try:
                 self.stdscr.move(row, 1)
                 self.stdscr.clrtoeol()
-                if isinstance(attr, int) and attr > 255:
-                    # Combined bold + color
-                    self.stdscr.addnstr(text, w - 2, attr)
-                else:
-                    self.stdscr.addnstr(text, w - 2, curses.color_pair(attr) if attr <= 7 else attr)
+                self.stdscr.addnstr(text, w - 2, attr)
             except curses.error:
                 pass
 
@@ -383,7 +380,11 @@ async def curses_main(stdscr, app_module):
             ui.render()
         elif etype == "assistant.message":
             _usage.record_llm_turn()
-            ui.end_stream()
+            # If no deltas were streamed, the full content is in the event
+            if not ui.streaming_chunks and hasattr(event.data, 'content') and event.data.content:
+                ui.add_message("assistant", event.data.content)
+            else:
+                ui.end_stream()
             update_status()
             ui.render()
         elif etype == "session.idle":

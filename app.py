@@ -2861,6 +2861,266 @@ async def yt_dlp_download(params: YtDlpParams) -> str:
     return f"{kind} downloaded: {filepath}"
 
 
+###############################################################################
+# Calendar tools — .ics file per profile
+###############################################################################
+
+import uuid as _uuid
+from datetime import datetime as _dt, timedelta as _td
+import calendar as _calendar_mod
+
+
+def _calendar_path(profile: str | None = None) -> str:
+    p = profile or _active_profile
+    return os.path.join(PROFILES_DIR, p, "calendar.ics")
+
+
+def _load_events(profile: str | None = None) -> list[dict]:
+    """Parse calendar.ics into a list of event dicts."""
+    path = _calendar_path(profile)
+    if not os.path.exists(path):
+        return []
+    events = []
+    cur: dict | None = None
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if line == "BEGIN:VEVENT":
+                cur = {}
+            elif line == "END:VEVENT" and cur is not None:
+                events.append(cur)
+                cur = None
+            elif cur is not None and ":" in line:
+                key, _, val = line.partition(":")
+                # Handle DTSTART;VALUE=DATE style keys
+                key = key.split(";")[0]
+                cur[key] = val
+    return events
+
+
+def _save_events(events: list[dict], profile: str | None = None):
+    path = _calendar_path(profile)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//LocalFinder//EN",
+    ]
+    for ev in events:
+        lines.append("BEGIN:VEVENT")
+        for k, v in ev.items():
+            lines.append(f"{k}:{v}")
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    with open(path, "w") as f:
+        f.write("\r\n".join(lines) + "\r\n")
+
+
+def _ics_dt(iso: str) -> str:
+    """Convert ISO-ish datetime string to iCal format (YYYYMMDDTHHMMSS)."""
+    # Accept various formats
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            d = _dt.strptime(iso.strip(), fmt)
+            if fmt == "%Y-%m-%d":
+                return d.strftime("%Y%m%d")
+            return d.strftime("%Y%m%dT%H%M%S")
+        except ValueError:
+            continue
+    return iso.replace("-", "").replace(":", "").replace(" ", "T")
+
+
+def _parse_ics_dt(s: str) -> _dt | None:
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%d"):
+        try:
+            return _dt.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class CalendarAddParams(BaseModel):
+    title: str = Field(description="Event title/summary")
+    start: str = Field(description="Start date/time in ISO format, e.g. 2026-02-14T18:00")
+    end: str = Field(default="", description="End date/time in ISO format. If omitted, defaults to 1 hour after start.")
+    location: str = Field(default="", description="Event location")
+    description: str = Field(default="", description="Event description/notes")
+
+
+@define_tool("calendar_add_event", "Save an event to the user's calendar (.ics file)")
+async def calendar_add_event(params: CalendarAddParams) -> str:
+    events = _load_events()
+    uid = str(_uuid.uuid4())
+    dtstart = _ics_dt(params.start)
+    if params.end:
+        dtend = _ics_dt(params.end)
+    else:
+        parsed = _parse_ics_dt(dtstart)
+        if parsed and len(dtstart) > 8:
+            dtend = (parsed + _td(hours=1)).strftime("%Y%m%dT%H%M%S")
+        else:
+            dtend = dtstart
+
+    ev: dict[str, str] = {
+        "UID": uid,
+        "DTSTART": dtstart,
+        "DTEND": dtend,
+        "SUMMARY": params.title,
+        "CREATED": _dt.utcnow().strftime("%Y%m%dT%H%M%SZ"),
+    }
+    if params.location:
+        ev["LOCATION"] = params.location
+    if params.description:
+        ev["DESCRIPTION"] = params.description
+
+    events.append(ev)
+    _save_events(events)
+
+    nice_start = params.start
+    nice_end = params.end or "(+1h)"
+    parts = [f"📅 Event saved: {params.title}", f"   When: {nice_start} → {nice_end}"]
+    if params.location:
+        parts.append(f"   Where: {params.location}")
+    parts.append(f"   UID: {uid}")
+    return "\n".join(parts)
+
+
+class CalendarDeleteParams(BaseModel):
+    uid: str = Field(default="", description="UID of the event to delete. If empty, match by title.")
+    title: str = Field(default="", description="Title substring to match (case-insensitive). Used if uid is empty.")
+
+
+@define_tool("calendar_delete_event", "Delete an event from the calendar by UID or title")
+async def calendar_delete_event(params: CalendarDeleteParams) -> str:
+    events = _load_events()
+    if not events:
+        return "Calendar is empty."
+    before = len(events)
+    if params.uid:
+        events = [e for e in events if e.get("UID") != params.uid]
+    elif params.title:
+        q = params.title.lower()
+        events = [e for e in events if q not in e.get("SUMMARY", "").lower()]
+    else:
+        return "Provide either uid or title to identify the event."
+    removed = before - len(events)
+    if removed == 0:
+        return "No matching event found."
+    _save_events(events)
+    return f"Deleted {removed} event(s)."
+
+
+class CalendarViewParams(BaseModel):
+    month: int = Field(default=0, description="Month number (1-12). 0 = current month.")
+    year: int = Field(default=0, description="Year. 0 = current year.")
+
+
+@define_tool("calendar_view",
+             "Display a calendar view for a given month with events marked. "
+             "Returns a text calendar grid plus a list of events in that month.")
+async def calendar_view(params: CalendarViewParams) -> str:
+    now = _dt.now()
+    year = params.year if params.year > 0 else now.year
+    month = params.month if 1 <= params.month <= 12 else now.month
+
+    events = _load_events()
+
+    # Build text calendar
+    cal_text = _calendar_mod.TextCalendar(firstweekday=6).formatmonth(year, month)
+
+    # Filter events in this month
+    month_events: list[tuple[_dt, dict]] = []
+    for ev in events:
+        ds = _parse_ics_dt(ev.get("DTSTART", ""))
+        if ds and ds.year == year and ds.month == month:
+            month_events.append((ds, ev))
+    month_events.sort(key=lambda x: x[0])
+
+    # Mark days with events on the calendar grid
+    event_days = {ds.day for ds, _ in month_events}
+    if event_days:
+        lines = cal_text.split("\n")
+        new_lines = [lines[0], lines[1]]  # header + weekday row
+        for line in lines[2:]:
+            new_line = ""
+            i = 0
+            while i < len(line):
+                # Find day numbers in the line
+                if line[i].isdigit():
+                    j = i
+                    while j < len(line) and line[j].isdigit():
+                        j += 1
+                    day_num = int(line[i:j])
+                    if day_num in event_days:
+                        new_line += f"[{line[i:j]}]"
+                        # Consume the trailing space that got replaced by ']'
+                        if j < len(line) and line[j] == " ":
+                            j += 1
+                    else:
+                        new_line += line[i:j]
+                    i = j
+                else:
+                    new_line += line[i]
+                    i += 1
+            new_lines.append(new_line)
+        cal_text = "\n".join(new_lines)
+
+    # Event list
+    if month_events:
+        ev_lines = [f"\nEvents in {_calendar_mod.month_name[month]} {year}:"]
+        for ds, ev in month_events:
+            time_str = ds.strftime("%b %d %H:%M") if len(ev.get("DTSTART", "")) > 8 else ds.strftime("%b %d")
+            title = ev.get("SUMMARY", "(untitled)")
+            loc = ev.get("LOCATION", "")
+            line = f"  • {time_str}  {title}"
+            if loc:
+                line += f"  📍 {loc}"
+            ev_lines.append(line)
+        cal_text += "\n".join(ev_lines)
+    elif not events:
+        cal_text += "\n(No events)"
+    else:
+        cal_text += f"\n(No events in {_calendar_mod.month_name[month]})"
+
+    return cal_text
+
+
+class CalendarListParams(BaseModel):
+    days: int = Field(default=7, description="Number of days ahead to show upcoming events")
+
+
+@define_tool("calendar_list_upcoming",
+             "List upcoming events in the next N days (default 7)")
+async def calendar_list_upcoming(params: CalendarListParams) -> str:
+    events = _load_events()
+    if not events:
+        return "Calendar is empty."
+    now = _dt.now()
+    cutoff = now + _td(days=params.days)
+    upcoming: list[tuple[_dt, dict]] = []
+    for ev in events:
+        ds = _parse_ics_dt(ev.get("DTSTART", ""))
+        if ds and now <= ds <= cutoff:
+            upcoming.append((ds, ev))
+    upcoming.sort(key=lambda x: x[0])
+    if not upcoming:
+        return f"No events in the next {params.days} day(s)."
+    lines = [f"Upcoming events (next {params.days} days):"]
+    for ds, ev in upcoming:
+        time_str = ds.strftime("%a %b %d %H:%M")
+        title = ev.get("SUMMARY", "(untitled)")
+        loc = ev.get("LOCATION", "")
+        line = f"  • {time_str}  {title}"
+        if loc:
+            line += f"  📍 {loc}"
+        uid = ev.get("UID", "")
+        if uid:
+            line += f"  [uid:{uid[:8]}]"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 class _CursesRequested(Exception):
     def __init__(self, app_module):
         self.app_module = app_module
@@ -2906,6 +3166,8 @@ async def main():
         switch_profile, update_preferences, exit_app,
         write_note, read_note, notes_mkdir, notes_ls,
         yt_dlp_download,
+        calendar_add_event, calendar_delete_event,
+        calendar_view, calendar_list_upcoming,
     ]
 
     client = CopilotClient()

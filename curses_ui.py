@@ -407,6 +407,8 @@ async def curses_main(stdscr, app_module):
         app_module.write_note, app_module.read_note,
         app_module.notes_mkdir, app_module.notes_ls,
         app_module.yt_dlp_download,
+        app_module.calendar_add_event, app_module.calendar_delete_event,
+        app_module.calendar_view, app_module.calendar_list_upcoming,
     ]
 
     def update_status():

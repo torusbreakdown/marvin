@@ -9338,11 +9338,15 @@ async def _run_non_interactive():
                     done.set()
 
             sdk_model = model_override or "gpt-5.2"
-            session = await client.create_session({
+            session_opts = {
                 "model": sdk_model,
-                "reasoning_effort": "high" if _coding_mode else "low",
                 "tools": all_tools,
                 "system_message": {"content": system_msg},
+            }
+            # Only set reasoning_effort for models that support it
+            if "codex" not in sdk_model:
+                session_opts["reasoning_effort"] = "high" if _coding_mode else "low"
+            session = await client.create_session(session_opts)
             })
             session.on(_on_event)
             await session.send({"prompt": prompt_text})

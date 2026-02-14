@@ -2011,7 +2011,7 @@ class LaunchAgentParams(BaseModel):
     design_first: bool = Field(
         default=False,
         description=(
-            "Run a design pass before implementation. Uses claude-opus-4.5 to generate "
+            "Run a design pass before implementation. Uses claude-opus-4.6 to generate "
             "a UX design schema and architecture doc saved to .marvin/design.md. "
             "The implementation agent then reads this as context. "
             "Recommended for large greenfield tasks (new projects, full features)."
@@ -2516,7 +2516,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Phase 1: Design pass (optional) ──────────────────────────────────
     if params.design_first:
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1: Design pass (claude-opus-4.5)"], timeout=5)
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1: Design pass (claude-opus-4.6)"], timeout=5)
         design_dir = os.path.join(wd, ".marvin")
         os.makedirs(design_dir, exist_ok=True)
 
@@ -2559,7 +2559,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "this document will be the sole reference for the test and implementation agents."
         )
 
-        rc, dout, derr = await _run_sub(design_prompt, "claude-opus-4.5", timeout_s=600, label="Design pass")
+        rc, dout, derr = await _run_sub(design_prompt, "claude-opus-4.6", timeout_s=600, label="Design pass")
         if rc != 0 or not dout:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Design pass failed (exit {rc})"], timeout=5)
             return f"Design pass failed (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
@@ -5437,7 +5437,7 @@ def _build_system_message() -> str:
             "and WHY. NEVER use generic messages like 'Initial commit' or 'Update files'. "
             "Good example: 'Bind server to 0.0.0.0 for LAN access, add CORS env config'.\n"
             "12. For large greenfield tasks (new projects, full features, building UIs from scratch), "
-            "use launch_agent with design_first=true. This runs a design pass in claude-opus-4.5 "
+            "use launch_agent with design_first=true. This runs a design pass in claude-opus-4.6 "
             "that produces a UX design schema and architecture doc BEFORE any code is written. "
             "The implementation agent then follows that design exactly.\n"
         )

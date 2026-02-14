@@ -2470,9 +2470,6 @@ class SpotifySearchParams(BaseModel):
     max_results: int = Field(default=10, description="Max results (1-20)")
 
 
-_spotify_auth_runner = None  # holds the aiohttp runner for cleanup
-
-
 async def _spotify_exchange_code(code: str) -> str:
     """Exchange an auth code for tokens and save them."""
     client_id, client_secret = _spotify_creds()
@@ -2500,41 +2497,6 @@ async def _spotify_exchange_code(code: str) -> str:
     return ""
 
 
-async def _spotify_start_callback_server():
-    """Start a background HTTP server that captures the Spotify OAuth callback."""
-    global _spotify_auth_runner
-    if _spotify_auth_runner:
-        try:
-            await _spotify_auth_runner.cleanup()
-        except Exception:
-            pass
-
-    from aiohttp import web as _aweb
-
-    async def _callback_handler(request):
-        code = request.query.get("code", "")
-        error = request.query.get("error", "")
-        if code:
-            result = await _spotify_exchange_code(code)
-            if result:
-                return _aweb.Response(text=f"<html><body><h2>❌ {result}</h2></body></html>",
-                                      content_type="text/html", status=400)
-            return _aweb.Response(
-                text="<html><body><h2>✅ Spotify authorized!</h2>"
-                     "<p>You can close this tab and return to Marvin.</p></body></html>",
-                content_type="text/html",
-            )
-        return _aweb.Response(text=f"Error: {error or 'no code'}", status=400)
-
-    app = _aweb.Application()
-    app.router.add_get("/callback", _callback_handler)
-    runner = _aweb.AppRunner(app)
-    await runner.setup()
-    site = _aweb.TCPSite(runner, "127.0.0.1", 8888)
-    await site.start()
-    _spotify_auth_runner = runner
-
-
 @define_tool(
     description=(
         "Authorize Marvin to access your Spotify account. Call with no arguments to "
@@ -2558,12 +2520,6 @@ async def spotify_auth(params: SpotifyAuthParams) -> str:
         if existing:
             return "✅ Already authorized with Spotify! Token is valid."
 
-        # Start callback server in background (non-blocking)
-        try:
-            await _spotify_start_callback_server()
-        except OSError as e:
-            return f"Cannot start callback server on port 8888: {e}. You can also paste the code manually."
-
         import urllib.parse
         auth_url = (
             "https://accounts.spotify.com/authorize?"
@@ -2576,10 +2532,10 @@ async def spotify_auth(params: SpotifyAuthParams) -> str:
         )
         return (
             f"Open this URL in your browser to authorize Spotify:\n\n{auth_url}\n\n"
-            "A callback server is running on 127.0.0.1:8888. After you log in and "
-            "approve, the browser will show '✅ Spotify authorized!' and you're done.\n\n"
-            "If the redirect doesn't work, copy the URL from your browser's address bar "
-            "and paste it back here."
+            "After you log in and approve, the browser will redirect to a page that "
+            "won't load (127.0.0.1) — that's expected.\n"
+            "Copy the ENTIRE URL from your browser's address bar and paste it back here.\n"
+            "It will look like: http://127.0.0.1:8888/callback?code=AQD..."
         )
 
     # Manual code entry path
@@ -2675,15 +2631,9 @@ async def spotify_create_playlist(params: SpotifyCreatePlaylistParams) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=10, headers=headers) as client:
-            # Get user ID
-            me_resp = await client.get("https://api.spotify.com/v1/me", headers=headers)
-            me_resp.raise_for_status()
-            user_id = me_resp.json()["id"]
-
-            # Create playlist
+            # Create playlist (preferred endpoint; avoids user-id permission edge cases)
             resp = await client.post(
-                f"https://api.spotify.com/v1/users/{user_id}/playlists",
-                headers=headers,
+                "https://api.spotify.com/v1/me/playlists",
                 json={
                     "name": params.name,
                     "description": params.description,
@@ -2745,7 +2695,7 @@ async def spotify_add_tracks(params: SpotifyAddTracksParams) -> str:
                 for batch_start in range(0, len(uris), 100):
                     batch = uris[batch_start:batch_start + 100]
                     resp = await client.post(
-                        f"https://api.spotify.com/v1/playlists/{params.playlist_id}/tracks",
+                        f"https://api.spotify.com/v1/playlists/{params.playlist_id}/items",
                         json={"uris": batch},
                     )
                     resp.raise_for_status()

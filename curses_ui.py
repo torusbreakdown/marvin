@@ -63,7 +63,7 @@ class CursesUI:
         _init_colors()
         curses.curs_set(1)
         stdscr.keypad(True)
-        stdscr.timeout(50)  # 50ms refresh for streaming
+        stdscr.nodelay(True)  # non-blocking getch
 
     @property
     def height(self):
@@ -407,126 +407,107 @@ async def curses_main(stdscr, app_module):
                 break
 
             key = stdscr.getch()
-            if key == -1:
-                # No key pressed — just refresh if streaming
-                if ui.is_streaming:
-                    ui.render()
-                await asyncio.sleep(0.02)
-                continue
 
-            if key == 4:  # Ctrl+D
+            if key == 4 or key == 27:  # Ctrl+D or ESC
                 break
 
-            submitted = ui.handle_key(key)
-            ui.render()
-
-            if submitted is None or busy:
-                continue
-
-            # Handle local commands
-            lower = submitted.lower()
-            if lower in ("quit", "exit"):
-                break
-            elif lower == "preferences":
-                ui.add_message("system",
-                    f"Preferences file: {_prefs_path()}\n"
-                    f"(Edit preferences from the regular terminal mode.)")
+            if key != -1 and not busy:
+                submitted = ui.handle_key(key)
                 ui.render()
-                continue
-            elif lower == "profiles":
-                ui.add_message("system",
-                    f"Active: {app_module._active_profile}\n"
-                    f"Available: {', '.join(_list_profiles())}")
-                ui.render()
-                continue
-            elif lower == "usage":
-                ui.add_message("system",
-                    f"{_usage.summary()}\n{_usage.lifetime_summary()}")
-                ui.render()
-                continue
-            elif lower == "saved":
-                places = _load_saved_places()
-                if not places:
-                    ui.add_message("system", "No saved places yet.")
-                else:
-                    lines = [f"Saved places ({len(places)}):"]
-                    for p in places:
-                        name = p.get("label", "?").upper()
-                        if p.get("name"):
-                            name += f" — {p['name']}"
-                        lines.append(name)
-                        if p.get("address"):
-                            lines.append(f"  📍 {p['address']}")
-                    ui.add_message("system", "\n".join(lines))
-                ui.render()
-                continue
 
-            # Check ntfy before sending
-            try:
-                notifs = await _check_all_subscriptions()
-                if notifs:
-                    ui.add_message("system", f"🔔 {notifs}")
-            except Exception:
-                pass
+                if submitted is not None:
+                    # Handle local commands
+                    lower = submitted.lower()
+                    if lower in ("quit", "exit"):
+                        break
+                    elif lower == "preferences":
+                        ui.add_message("system",
+                            f"Preferences file: {_prefs_path()}\n"
+                            f"(Edit preferences from the regular terminal mode.)")
+                        ui.render()
+                    elif lower == "profiles":
+                        ui.add_message("system",
+                            f"Active: {app_module._active_profile}\n"
+                            f"Available: {', '.join(_list_profiles())}")
+                        ui.render()
+                    elif lower == "usage":
+                        ui.add_message("system",
+                            f"{_usage.summary()}\n{_usage.lifetime_summary()}")
+                        ui.render()
+                    elif lower == "saved":
+                        places = _load_saved_places()
+                        if not places:
+                            ui.add_message("system", "No saved places yet.")
+                        else:
+                            lines = [f"Saved places ({len(places)}):"]
+                            for p in places:
+                                name = p.get("label", "?").upper()
+                                if p.get("name"):
+                                    name += f" — {p['name']}"
+                                lines.append(name)
+                                if p.get("address"):
+                                    lines.append(f"  📍 {p['address']}")
+                            ui.add_message("system", "\n".join(lines))
+                        ui.render()
+                    else:
+                        # Check ntfy before sending
+                        try:
+                            notifs = await _check_all_subscriptions()
+                            if notifs:
+                                ui.add_message("system", f"🔔 {notifs}")
+                        except Exception:
+                            pass
 
-            # Send to LLM
-            ui.add_message("you", submitted)
-            ui.begin_stream()
-            update_status()
-            ui.render()
+                        # Send to LLM
+                        ui.add_message("you", submitted)
+                        ui.begin_stream()
+                        update_status()
+                        ui.render()
 
-            done.clear()
-            busy = True
-            await session.send({"prompt": submitted})
+                        done.clear()
+                        busy = True
+                        await session.send({"prompt": submitted})
 
-            # Keep processing keys and rendering while waiting for response
-            while not done.is_set():
-                k = stdscr.getch()
-                if k == curses.KEY_PPAGE:
+            elif key != -1 and busy:
+                # Allow scrolling while waiting for response
+                if key == curses.KEY_PPAGE:
                     ui.scroll_offset = min(
                         ui.scroll_offset + (ui.height // 2),
                         max(0, len(ui.messages) * 4))
-                elif k == curses.KEY_NPAGE:
+                    ui.render()
+                elif key == curses.KEY_NPAGE:
                     ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
-                elif k == curses.KEY_UP:
-                    ui.scroll_offset = min(ui.scroll_offset + 1, max(0, len(ui.messages) * 4))
-                elif k == curses.KEY_DOWN:
-                    ui.scroll_offset = max(0, ui.scroll_offset - 1)
-                elif k == 4:  # Ctrl+D during response
+                    ui.render()
+                elif key == 4 or key == 27:
                     break
-                ui.render()
-                await asyncio.sleep(0.02)
 
-            # Handle profile switch
-            if _profile_switch_requested.is_set():
-                _profile_switch_requested.clear()
-                await session.destroy()
-                session = await client.create_session({
-                    "model": "gpt-5.2",
-                    "tools": all_tools,
-                    "system_message": {"content": _build_system_message()},
-                })
-                session.on(on_event)
-                ui.add_message("system",
-                    f"Session rebuilt for profile: {app_module._active_profile}")
+            # Check if response just finished
+            if done.is_set() and busy:
+                busy = False
+                # Handle profile switch
+                if _profile_switch_requested.is_set():
+                    _profile_switch_requested.clear()
+                    await session.destroy()
+                    session = await client.create_session({
+                        "model": "gpt-5.2",
+                        "tools": all_tools,
+                        "system_message": {"content": _build_system_message()},
+                    })
+                    session.on(on_event)
+                    ui.add_message("system",
+                        f"Session rebuilt for profile: {app_module._active_profile}")
+
+                    # Re-send prompt
+                    done.clear()
+                    busy = True
+                    ui.begin_stream()
+                    await session.send({"prompt": submitted})
+
                 update_status()
                 ui.render()
 
-                # Re-send prompt
-                done.clear()
-                busy = True
-                ui.begin_stream()
-                await session.send({"prompt": submitted})
-                while not done.is_set():
-                    k = stdscr.getch()
-                    if k == curses.KEY_PPAGE:
-                        ui.scroll_offset = min(
-                            ui.scroll_offset + (ui.height // 2),
-                            max(0, len(ui.messages) * 4))
-                    elif k == curses.KEY_NPAGE:
-                        ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
-                    ui.render()
-                    await asyncio.sleep(0.02)
+            # Yield to event loop — this is critical for SDK callbacks
+            await asyncio.sleep(0.03)
 
             update_status()
             ui.render()

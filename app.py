@@ -1237,6 +1237,231 @@ async def search_arxiv(params: SearchArxivParams) -> str:
     return header + "\n\n".join(lines)
 
 
+# ── Tool: Film/movie reviews (OMDB) ─────────────────────────────────────────
+
+OMDB_API_KEY = os.environ.get("OMDB_API_KEY", "")
+
+
+class SearchMoviesParams(BaseModel):
+    query: str = Field(description="Movie or TV show title to search for")
+    year: str = Field(default="", description="Optional year to narrow results")
+    type: str = Field(
+        default="",
+        description="Optional type filter: 'movie', 'series', or 'episode'",
+    )
+
+
+class GetMovieDetailsParams(BaseModel):
+    title: str = Field(default="", description="Movie title (use this or imdb_id)")
+    imdb_id: str = Field(default="", description="IMDb ID like 'tt1234567'")
+
+
+@define_tool(
+    description=(
+        "Search for movies and TV shows using OMDB. Returns titles, year, "
+        "IMDb/Rotten Tomatoes/Metacritic ratings, plot, and more. "
+        "Set OMDB_API_KEY env var (free at omdbapi.com/apikey.aspx). "
+        "Use this when users ask about film reviews, movie ratings, "
+        "or 'is X movie good'."
+    )
+)
+async def search_movies(params: SearchMoviesParams) -> str:
+    if not OMDB_API_KEY:
+        return (
+            "OMDB_API_KEY not set. Get a free key at https://www.omdbapi.com/apikey.aspx "
+            "and set it: export OMDB_API_KEY=your_key"
+        )
+
+    api_params = {"apikey": OMDB_API_KEY, "s": params.query}
+    if params.year:
+        api_params["y"] = params.year
+    if params.type:
+        api_params["type"] = params.type
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://www.omdbapi.com/", params=api_params)
+            data = resp.json()
+    except Exception as e:
+        return f"OMDB search failed: {e}"
+
+    if data.get("Response") == "False":
+        return f"No results: {data.get('Error', 'Unknown error')}"
+
+    results = data.get("Search", [])
+    lines = []
+    for i, m in enumerate(results[:10], 1):
+        lines.append(
+            f"{i}. {m.get('Title', '?')} ({m.get('Year', '?')}) "
+            f"[{m.get('Type', '?')}] — IMDb: {m.get('imdbID', '?')}"
+        )
+    return f"Found {len(results)} results for '{params.query}':\n" + "\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get detailed info and reviews for a specific movie/show from OMDB. "
+        "Returns plot, ratings (IMDb, Rotten Tomatoes, Metacritic), "
+        "director, actors, awards, and more. Use after search_movies."
+    )
+)
+async def get_movie_details(params: GetMovieDetailsParams) -> str:
+    if not OMDB_API_KEY:
+        return "OMDB_API_KEY not set. Get a free key at https://www.omdbapi.com/apikey.aspx"
+
+    api_params = {"apikey": OMDB_API_KEY, "plot": "full"}
+    if params.imdb_id:
+        api_params["i"] = params.imdb_id
+    elif params.title:
+        api_params["t"] = params.title
+    else:
+        return "Provide either a title or IMDb ID."
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://www.omdbapi.com/", params=api_params)
+            data = resp.json()
+    except Exception as e:
+        return f"OMDB lookup failed: {e}"
+
+    if data.get("Response") == "False":
+        return f"Not found: {data.get('Error', 'Unknown error')}"
+
+    lines = [
+        f"🎬 {data.get('Title', '?')} ({data.get('Year', '?')})",
+        f"   Rated: {data.get('Rated', 'N/A')} | {data.get('Runtime', 'N/A')} | {data.get('Genre', 'N/A')}",
+        f"   Director: {data.get('Director', 'N/A')}",
+        f"   Actors: {data.get('Actors', 'N/A')}",
+    ]
+    for r in data.get("Ratings", []):
+        lines.append(f"   ⭐ {r.get('Source', '?')}: {r.get('Value', '?')}")
+    lines.append(f"   Awards: {data.get('Awards', 'N/A')}")
+    lines.append(f"   Box Office: {data.get('BoxOffice', 'N/A')}")
+    lines.append(f"\n   Plot: {data.get('Plot', 'N/A')}")
+    lines.append(f"\n   IMDb: https://www.imdb.com/title/{data.get('imdbID', '')}/")
+    return "\n".join(lines)
+
+
+# ── Tool: Video game reviews (RAWG) ─────────────────────────────────────────
+
+RAWG_API_KEY = os.environ.get("RAWG_API_KEY", "")
+
+
+class SearchGamesParams(BaseModel):
+    query: str = Field(description="Game title to search for")
+    max_results: int = Field(default=5, description="Max results (1-10)")
+
+
+class GetGameDetailsParams(BaseModel):
+    game_id: int = Field(description="RAWG game ID (from search_games results)")
+
+
+@define_tool(
+    description=(
+        "Search for video games using RAWG. Returns titles, platforms, "
+        "ratings, Metacritic scores, and release dates. "
+        "Set RAWG_API_KEY env var (free at rawg.io/apidocs). "
+        "Use when users ask about game reviews or 'is X game good'."
+    )
+)
+async def search_games(params: SearchGamesParams) -> str:
+    if not RAWG_API_KEY:
+        return (
+            "RAWG_API_KEY not set. Get a free key at https://rawg.io/apidocs "
+            "and set it: export RAWG_API_KEY=your_key"
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.rawg.io/api/games",
+                params={
+                    "key": RAWG_API_KEY,
+                    "search": params.query,
+                    "page_size": min(params.max_results, 10),
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"RAWG search failed: {e}"
+
+    games = data.get("results", [])
+    if not games:
+        return f"No games found for '{params.query}'."
+
+    lines = []
+    for i, g in enumerate(games, 1):
+        name = g.get("name", "?")
+        released = g.get("released", "N/A")
+        rating = g.get("rating", 0)
+        metacritic = g.get("metacritic", "N/A")
+        platforms = ", ".join(
+            p.get("platform", {}).get("name", "") for p in (g.get("platforms") or [])[:4]
+        )
+        gid = g.get("id", 0)
+        lines.append(
+            f"{i}. {name} ({released})\n"
+            f"   Rating: {rating}/5 | Metacritic: {metacritic} | Platforms: {platforms}\n"
+            f"   RAWG ID: {gid} (use with get_game_details)"
+        )
+    return f"Found games for '{params.query}':\n\n" + "\n\n".join(lines)
+
+
+@define_tool(
+    description=(
+        "Get detailed info for a video game from RAWG by its ID. "
+        "Returns description, ratings breakdown, Metacritic score, "
+        "platforms, genres, developers, and more."
+    )
+)
+async def get_game_details(params: GetGameDetailsParams) -> str:
+    if not RAWG_API_KEY:
+        return "RAWG_API_KEY not set. Get a free key at https://rawg.io/apidocs"
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"https://api.rawg.io/api/games/{params.game_id}",
+                params={"key": RAWG_API_KEY},
+            )
+            resp.raise_for_status()
+            g = resp.json()
+    except Exception as e:
+        return f"RAWG lookup failed: {e}"
+
+    desc = (g.get("description_raw") or "")[:500]
+    if len(g.get("description_raw") or "") > 500:
+        desc += "..."
+
+    platforms = ", ".join(
+        p.get("platform", {}).get("name", "") for p in (g.get("platforms") or [])
+    )
+    genres = ", ".join(x.get("name", "") for x in (g.get("genres") or []))
+    devs = ", ".join(x.get("name", "") for x in (g.get("developers") or []))
+    pubs = ", ".join(x.get("name", "") for x in (g.get("publishers") or []))
+
+    lines = [
+        f"🎮 {g.get('name', '?')} ({g.get('released', 'N/A')})",
+        f"   Rating: {g.get('rating', 0)}/5 ({g.get('ratings_count', 0)} ratings)",
+        f"   Metacritic: {g.get('metacritic', 'N/A')}",
+        f"   Platforms: {platforms}",
+        f"   Genres: {genres}",
+        f"   Developers: {devs}",
+        f"   Publishers: {pubs}",
+        f"   Playtime: ~{g.get('playtime', 'N/A')} hours",
+        f"   Website: {g.get('website', 'N/A')}",
+    ]
+
+    # Ratings breakdown
+    for r in g.get("ratings", []):
+        lines.append(f"   {r.get('title', '?').capitalize()}: {r.get('percent', 0)}% ({r.get('count', 0)})")
+
+    lines.append(f"\n   {desc}")
+    lines.append(f"\n   RAWG: https://rawg.io/games/{g.get('slug', '')}")
+    return "\n".join(lines)
+
+
 # ── Tool: Selenium page scraper ──────────────────────────────────────────────
 
 import time as _time
@@ -2385,6 +2610,8 @@ async def main():
         estimate_travel_time, estimate_traffic_adjusted_time,
         web_search, get_usage,
         search_papers, search_arxiv,
+        search_movies, get_movie_details,
+        search_games, get_game_details,
         scrape_page, browse_web,
         save_place, remove_place, list_places,
         set_alarm, list_alarms, cancel_alarm,

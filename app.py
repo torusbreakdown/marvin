@@ -82,11 +82,22 @@ class UsageTracker:
         "bookmark_search": 0.0,
         "compact_history": 0.0,
         "search_history_backups": 0.0,
-        # Copilot SDK: GPT-4.1 = 1x multiplier, $0.04/premium request
-        # Each LLM turn = 1 premium request = $0.04 overage
+        # Copilot SDK base: $0.04/premium request
         "_llm_turn": 0.04,
     }
     REPORT_INTERVAL = 10
+
+    # Premium request multipliers per model (cost = base × multiplier)
+    MODEL_MULTIPLIERS = {
+        "gpt-5.2": 1,
+        "gpt-5.3-codex": 1,
+        "gpt-5.1-codex": 1,
+        "gpt-4.1": 1,
+        "claude-haiku-4.5": 1,
+        "claude-sonnet-4.5": 1,
+        "claude-opus-4.6": 3,
+        "claude-opus-4.5": 3,
+    }
 
     # Per-token costs ($ per 1M tokens) by provider
     PROVIDER_TOKEN_COSTS = {
@@ -105,6 +116,9 @@ class UsageTracker:
         self.provider_input_tokens: dict[str, int] = {}
         self.provider_output_tokens: dict[str, int] = {}
         self.provider_cost: dict[str, float] = {}
+        self.model_turns: dict[str, int] = {}
+        self.model_cost: dict[str, float] = {}
+        self._last_milestone = 0  # last $50 milestone notified
         self._log_path = os.path.expanduser("~/.config/local-finder/usage.json")
 
     def record(self, tool_name: str):
@@ -114,12 +128,60 @@ class UsageTracker:
         if cost > 0:
             self.total_paid_calls += 1
 
-    def record_llm_turn(self):
+    def record_llm_turn(self, model: str = "gpt-5.2"):
         self.llm_turns += 1
-        self.session_cost += self.COST_PER_CALL["_llm_turn"]
+        multiplier = self.MODEL_MULTIPLIERS.get(model, 1)
+        cost = self.COST_PER_CALL["_llm_turn"] * multiplier
+        self.session_cost += cost
+        self.model_turns[model] = self.model_turns.get(model, 0) + 1
+        self.model_cost[model] = self.model_cost.get(model, 0) + cost
+        self._check_milestone()
 
     def record_ollama_turn(self):
         self.ollama_turns += 1
+
+    def _check_milestone(self):
+        """Send ntfy notification when lifetime cost crosses a $50 boundary."""
+        try:
+            lifetime = self._get_lifetime_cost() + self.session_cost
+            milestone = int(lifetime // 50) * 50
+            if milestone > 0 and milestone > self._last_milestone:
+                self._last_milestone = milestone
+                self._send_cost_notification(milestone, lifetime)
+        except Exception:
+            pass
+
+    def _get_lifetime_cost(self) -> float:
+        try:
+            if os.path.exists(self._log_path):
+                with open(self._log_path) as f:
+                    return json.load(f).get("total_cost", 0)
+        except Exception:
+            pass
+        return 0.0
+
+    def _send_cost_notification(self, milestone: int, total: float):
+        """Fire-and-forget ntfy notification for cost milestone."""
+        import subprocess
+        topic = _ntfy_override_topic
+        if not topic:
+            try:
+                subs = _load_ntfy_subs()
+                if subs:
+                    topic = next(iter(subs))
+            except Exception:
+                pass
+        if not topic:
+            return
+        msg = f"💰 Cost milestone: ${milestone} reached (lifetime ~${total:.2f})"
+        try:
+            subprocess.Popen(
+                ["curl", "-s", "-d", msg, "-H", "Title: Marvin Cost Alert",
+                 "-H", "Tags: warning,moneybag", f"https://ntfy.sh/{topic}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
     def record_local_turn(self, provider: str = "ollama", usage: dict | None = None):
         """Record a turn handled by a non-Copilot provider, with optional token usage."""
@@ -140,14 +202,22 @@ class UsageTracker:
         return self.total_paid_calls > 0 and self.total_paid_calls % self.REPORT_INTERVAL == 0
 
     _LLM_MODEL = "gpt-5.2"
-    _LLM_MULTIPLIER = 1  # premium requests per LLM turn
+    _LLM_MULTIPLIER = 1  # default premium requests per LLM turn
     _OVERAGE_RATE = 0.04  # $ per premium request (overage)
 
     def summary(self) -> str:
-        premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
-        llm_cost = self.llm_turns * self.COST_PER_CALL["_llm_turn"]
         lines = [f"📊 Usage — ~${self.session_cost:.2f} this session"]
-        if self.llm_turns:
+        if self.model_turns:
+            for model, turns in sorted(self.model_turns.items()):
+                mult = self.MODEL_MULTIPLIERS.get(model, 1)
+                cost = self.model_cost.get(model, 0)
+                lines.append(
+                    f"   💲 {model}: {turns} turns × {mult}x = "
+                    f"{turns * mult} premium reqs (~${cost:.2f})"
+                )
+        elif self.llm_turns:
+            premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
+            llm_cost = self.llm_turns * self.COST_PER_CALL["_llm_turn"]
             lines.append(
                 f"   💲 Copilot ({self._LLM_MODEL}): {self.llm_turns} turns × "
                 f"{self._LLM_MULTIPLIER}x = {premium_reqs} premium reqs "
@@ -170,7 +240,8 @@ class UsageTracker:
                 else:
                     lines.append(f"   {prov_emoji} {prov}: {count} turns (free)")
         if self.total_paid_calls:
-            api_cost = self.session_cost - llm_cost
+            llm_total = sum(self.model_cost.values()) if self.model_cost else self.llm_turns * self.COST_PER_CALL["_llm_turn"]
+            api_cost = self.session_cost - llm_total
             lines.append(f"   Paid API calls: {self.total_paid_calls} (~${api_cost:.3f})")
         for name, count in sorted(self.calls.items()):
             if name.startswith("_provider:"):
@@ -203,14 +274,21 @@ class UsageTracker:
             for name, count in self.calls.items():
                 calls[name] = calls.get(name, 0) + count
             cumulative["total_calls"] = calls
+            # Persist per-model turn counts
+            mt = cumulative.get("total_model_turns", {})
+            for model, turns in self.model_turns.items():
+                mt[model] = mt.get(model, 0) + turns
+            cumulative["total_model_turns"] = mt
             with open(self._log_path, "w") as f:
                 json.dump(cumulative, f, indent=2)
         except Exception:
             pass
 
     def summary_oneline(self) -> str:
-        premium_reqs = self.llm_turns * self._LLM_MULTIPLIER
-        local = f" | {self.ollama_turns} local" if self.ollama_turns else ""
+        premium_reqs = sum(
+            turns * self.MODEL_MULTIPLIERS.get(m, 1)
+            for m, turns in self.model_turns.items()
+        ) if self.model_turns else self.llm_turns
         parts = [f"${self.session_cost:.2f}"]
         if self.llm_turns:
             parts.append(f"💲{self.llm_turns} paid ({premium_reqs} reqs)")
@@ -237,9 +315,22 @@ class UsageTracker:
             with open(self._log_path) as f:
                 data = json.load(f)
             total_turns = data.get("total_llm_turns", 0)
-            total_reqs = total_turns * self._LLM_MULTIPLIER
             lines = [f"📊 Lifetime usage — ~${data.get('total_cost', 0):.2f} total"]
-            lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
+            # Show per-model breakdown if available
+            model_turns = data.get("total_model_turns", {})
+            if model_turns:
+                total_reqs = sum(
+                    t * self.MODEL_MULTIPLIERS.get(m, 1)
+                    for m, t in model_turns.items()
+                )
+                lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
+                for model, turns in sorted(model_turns.items()):
+                    mult = self.MODEL_MULTIPLIERS.get(model, 1)
+                    cost = turns * mult * self.COST_PER_CALL["_llm_turn"]
+                    lines.append(f"   💲 {model}: {turns} turns × {mult}x (~${cost:.2f})")
+            else:
+                total_reqs = total_turns * self._LLM_MULTIPLIER
+                lines.append(f"   LLM turns: {total_turns} ({total_reqs} premium reqs)")
             ollama_total = data.get("total_ollama_turns", 0)
             if ollama_total:
                 lines.append(f"   Local turns: {ollama_total}")
@@ -8716,6 +8807,7 @@ class SessionManager:
         self._chunks: list[str] = []
         self._SESSION_TIMEOUT = 180
         self._conversation: list[dict] = []  # conversation history for non-SDK providers
+        self._sdk_model = "gpt-5.2"  # current SDK model for cost tracking
         # Callbacks for streaming (curses uses these; plain uses print)
         self._on_delta = on_delta
         self._on_message = on_message
@@ -8758,7 +8850,7 @@ class SessionManager:
             else:
                 print(delta, end="", flush=True)
         elif etype == "assistant.message":
-            _usage.record_llm_turn()
+            _usage.record_llm_turn(self._sdk_model)
             if not self._chunks:
                 text = event.data.content
                 if self._on_message:
@@ -9146,12 +9238,10 @@ async def _run_non_interactive():
         _coding_working_dir = os.path.abspath(working_dir)
 
     # Use model from env if specified
-    model_override = os.environ.get("MARVIN_MODEL")
+    model_override = os.environ.get("MARVIN_MODEL")  # e.g. "claude-opus-4.6"
 
     all_tools = _build_all_tools()
     system_msg = _build_system_message()
-
-    model_override = os.environ.get("MARVIN_MODEL")  # e.g. "claude-opus-4.6"
 
     # Route through Copilot SDK when available — it handles all model tiers.
     # Fall back to _run_tool_loop only for explicit non-SDK providers.
@@ -9177,6 +9267,8 @@ async def _run_non_interactive():
                     chunks.append(delta)
                     # Each delta on its own line so subprocess pipe can stream
                     print(delta, flush=True)
+                elif etype == "assistant.message":
+                    _usage.record_llm_turn(sdk_model)
                 elif etype == "session.idle":
                     done.set()
 

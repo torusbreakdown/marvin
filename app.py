@@ -5703,19 +5703,20 @@ async def _run_tool_loop(
     system_message: str,
     provider: str | None = None,
     max_rounds: int = 10,
-) -> str:
+    history: list[dict] | None = None,
+) -> tuple[str, list[dict]]:
     """Run a full tool-calling loop via any OpenAI-compatible provider.
-    Returns the final assistant response text."""
+    Returns (final_response_text, updated_messages) so caller can maintain history."""
     import inspect
     prov = provider or LLM_PROVIDER
     emoji = PROVIDER_EMOJI.get(prov, "?")
     tool_map = {(getattr(f, 'name', None) or f.__name__): f for f in tool_funcs}
     tools_schema = _tools_to_openai_format(tool_funcs)
 
-    messages = [
-        {"role": "system", "content": system_message},
-        {"role": "user", "content": prompt},
-    ]
+    messages = [{"role": "system", "content": system_message}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
 
     for _round in range(max_rounds):
         _usage.record_local_turn(prov)
@@ -5726,10 +5727,16 @@ async def _run_tool_loop(
             content = response.get("content", "")
             if content:
                 print(content, end="", flush=True)
-                return content
+                # Build clean history: user/assistant pairs only
+                conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
+                conv.append({"role": "assistant", "content": content})
+                return content, conv
             messages.append(response)
             response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
-            return response.get("content", "")
+            content = response.get("content", "")
+            conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
+            conv.append({"role": "assistant", "content": content})
+            return content, conv
 
         messages.append(response)
 
@@ -5780,7 +5787,10 @@ async def _run_tool_loop(
     # Max rounds — final summary
     _usage.record_local_turn(prov)
     response = await _provider_chat(messages, tools=None, stream=True, provider=prov)
-    return response.get("content", "")
+    content = response.get("content", "")
+    conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
+    conv.append({"role": "assistant", "content": content})
+    return content, conv
 
 
 # ── Speech-to-text via Groq Whisper ─────────────────────────────────────────
@@ -5902,6 +5912,7 @@ class SessionManager:
         self._done = asyncio.Event()
         self._chunks: list[str] = []
         self._SESSION_TIMEOUT = 120
+        self._conversation: list[dict] = []  # conversation history for non-SDK providers
         # Callbacks for streaming (curses uses these; plain uses print)
         self._on_delta = on_delta
         self._on_message = on_message
@@ -5922,6 +5933,17 @@ class SessionManager:
 
         self.emoji = PROVIDER_EMOJI.get(self.active_provider, "?")
         self.label = PROVIDER_LABEL.get(self.active_provider, self.active_provider)
+
+        # Seed conversation history from chat log for context continuity
+        if self.active_provider != "copilot":
+            chat_log = _load_chat_log()
+            for entry in chat_log[-20:]:  # last 20 entries for context
+                role = entry.get("role", "")
+                text = entry.get("text", "")
+                if role == "you":
+                    self._conversation.append({"role": "user", "content": text})
+                elif role == "assistant":
+                    self._conversation.append({"role": "assistant", "content": text})
 
     def _on_event(self, event):
         etype = event.type.value
@@ -6006,10 +6028,13 @@ class SessionManager:
         """
         if not force_sdk and self.active_provider != "copilot":
             try:
-                result = await _run_tool_loop(
+                result, conv = await _run_tool_loop(
                     user_prompt, self.all_tools, _build_system_message(),
                     provider=self.active_provider,
+                    history=self._conversation,
                 )
+                # Keep conversation history (cap to avoid unbounded growth)
+                self._conversation = conv[-40:]
                 _append_chat("assistant", result.strip() if result else "")
                 return result
             except Exception as e:

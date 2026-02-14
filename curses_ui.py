@@ -152,19 +152,27 @@ class CursesUI:
 
         for msg in self.messages:
             color = curses.color_pair(self._role_color(msg.role))
-            label = f"{msg.timestamp} {self._role_label(msg.role)}:"
+            # Add ✓ to completed assistant messages
+            if msg.role == "assistant":
+                label = f"{msg.timestamp} ✓ {self._role_label(msg.role)}:"
+            else:
+                label = f"{msg.timestamp} {self._role_label(msg.role)}:"
             display_lines.append((label, color | curses.A_BOLD))
             for wl in self._wrap_lines(msg.text, content_width - 2):
                 display_lines.append((f"  {wl}", color))
             display_lines.append(("", 0))
 
-        # If currently streaming, show partial response
-        if self.is_streaming and self.streaming_chunks:
-            partial = "".join(self.streaming_chunks)
+        # If currently streaming, show partial response with typing indicator
+        if self.is_streaming:
             acolor = curses.color_pair(C_ASSISTANT)
-            display_lines.append(("  Assistant:", acolor | curses.A_BOLD))
-            for wl in self._wrap_lines(partial, content_width - 2):
-                display_lines.append((f"  {wl}", acolor))
+            dots = "." * (1 + (int(time.time() * 3) % 3))
+            if self.streaming_chunks:
+                partial = "".join(self.streaming_chunks)
+                display_lines.append((f"  ⟳ Assistant{dots}", acolor | curses.A_BOLD))
+                for wl in self._wrap_lines(partial, content_width - 2):
+                    display_lines.append((f"  {wl}", acolor))
+            else:
+                display_lines.append((f"  ⟳ Thinking{dots}", acolor | curses.A_BOLD))
             display_lines.append(("", 0))
 
         # Apply scroll offset (offset 0 = show bottom)

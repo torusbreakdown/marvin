@@ -5212,6 +5212,9 @@ def _build_system_message() -> str:
             "refuse to run without one. The ticket tracks progress: it's set to "
             "in_progress when the agent starts, and closed on success.\n"
             "10. NEVER delete files or directories unless explicitly asked.\n"
+            "11. Git commit messages MUST be specific and descriptive — summarise WHAT changed "
+            "and WHY. NEVER use generic messages like 'Initial commit' or 'Update files'. "
+            "Good example: 'Bind server to 0.0.0.0 for LAN access, add CORS env config'.\n"
         )
         if _coding_working_dir:
             base += f"Working directory: {_coding_working_dir}\n"

@@ -57,6 +57,9 @@ gh copilot --version
 The SDK's bundled `copilot` binary handles token exchange automatically.
 
 #### 2. Google Places API (place search & recommendations)
+
+> **Note:** If the Google Places API is unavailable (no key, quota exceeded, auth error), the app automatically falls back to **OpenStreetMap** (Nominatim + Overpass) — so this key is optional but gives richer results.
+
 **Option A — API Key (recommended):**
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a project (or select existing)
@@ -110,6 +113,8 @@ These services require **no API key** and work out of the box:
 |---------|-------------|-------|
 | **OSRM** | Route planning & travel time | 1 req/sec (public demo) |
 | **Open-Meteo** | Weather data & forecasts | Unlimited (non-commercial) |
+| **OpenStreetMap / Nominatim** | Places fallback (text search) | 1 req/sec |
+| **OpenStreetMap / Overpass** | Places fallback (nearby search) | Reasonable use |
 | **DuckDuckGo** | Web search (via `ddgs` library) | Reasonable use |
 | **Semantic Scholar** | Academic paper search | ~100 req/5min |
 | **arXiv** | Preprint search | 1 req/3sec |
@@ -198,12 +203,33 @@ List my notes
 - **Timestamps**: each response is timestamped
 - **Usage tracking**: per-session and lifetime cost estimates
 
-## All Tools (35)
+### API Fallback Strategy
+
+The app is designed to work with **zero API keys** for most features:
+
+| Tool | Primary API | Fallback | Key Required? |
+|------|------------|----------|---------------|
+| Places search | Google Places | OpenStreetMap (Nominatim/Overpass) | No (OSM is free) |
+| Travel time | OSRM | — | No |
+| Weather | Open-Meteo | — | No |
+| Web search | DuckDuckGo | — | No |
+| Academic search | Semantic Scholar / arXiv | — | No |
+| Notifications | ntfy.sh | — | No |
+| Movies/TV | OMDB | ❌ No fallback | Yes (free key) |
+| Games | RAWG | ❌ No fallback | Yes (free key) |
+
+### Calendar Reminders
+
+When you add a calendar event, cron jobs are automatically scheduled to send notifications **1 hour** and **30 minutes** before the event via:
+- Desktop notifications (`notify-send`)
+- Push notifications via **ntfy.sh** (auto-creates a `reminders` topic if none exists)
+
+## All Tools (41)
 
 | Category | Tools |
 |----------|-------|
 | **Location** | `get_my_location` |
-| **Places** | `places_text_search`, `places_nearby_search` |
+| **Places** | `places_text_search`, `places_nearby_search` (Google → OSM fallback) |
 | **Travel** | `estimate_travel_time`, `estimate_traffic_adjusted_time` |
 | **Search** | `web_search`, `browse_web`, `scrape_page` |
 | **Academic** | `search_papers`, `search_arxiv` |

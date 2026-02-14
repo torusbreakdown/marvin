@@ -5,7 +5,7 @@ This document maps an architecture for a **text-based scene description** that i
 ## Goals / non-goals
 
 **Goals**
-- Authoring is primarily **procedural + parameterized**, not hand-placed gizmos.
+- Authoring is primarily **procedural + parameterized**, but we still support **manual (hand-authored) scene editing** for anchors, set dressing, and targeted overrides.
 - Source of truth is a **text scene description** (diffable, mergeable, reviewable).
 - A **compiler** expands procgen deterministically into a frozen scene **IR** and then into a runtime **cooked** format.
 - A **side-by-side preview** shows *text + diagnostics/logs* next to an in-engine viewport.
@@ -50,6 +50,7 @@ MCP surface (AI/tools):
 A human-authored DSL that supports:
 - *Declarations*: worlds, layers, entities, components.
 - *Procgen blocks*: generators with parameters.
+- *Hand-authored edits*: explicit entities/components/transforms, plus small targeted tweaks/overrides.
 - *Deterministic seeding*: explicit seeds + hierarchical seed derivation.
 - *Includes/modules*: reusable templates.
 - *Constraints*: validation rules, ranges, references.
@@ -269,7 +270,7 @@ Keep MCP outputs structured; avoid free-form logs as the primary channel.
 
 ## Minimal gizmo philosophy (still useful)
 
-Keep only what accelerates debugging:
+Keep only what accelerates debugging and manual text authoring:
 - Click select + outline
 - Frame selected
 - Toggle debug overlays (navmesh, generator partitions, spawn volumes)

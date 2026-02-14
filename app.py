@@ -13,6 +13,7 @@ import readline
 import shutil
 import subprocess
 import sys
+import time as _time
 
 import httpx
 from pydantic import BaseModel, Field
@@ -1466,8 +1467,6 @@ async def get_game_details(params: GetGameDetailsParams) -> str:
 
 
 # ── Tool: Selenium page scraper ──────────────────────────────────────────────
-
-import time as _time
 
 _SCRAPE_MIN_DELAY = 3.0  # seconds between requests
 _scrape_last_request: float = 0.0
@@ -2933,6 +2932,7 @@ async def main():
                 chunks.clear()
                 _exit_requested.clear()
                 _profile_switch_requested.clear()
+                print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                 print("Assistant: ", end="", flush=True)
                 await session.send({"prompt": prompt})
                 await done.wait()
@@ -2955,6 +2955,7 @@ async def main():
                     done.clear()
                     chunks.clear()
                     _profile_switch_requested.clear()
+                    print(f"[{_time.strftime('%a %b %d %H:%M:%S %Z %Y')}]")
                     print("Assistant: ", end="", flush=True)
                     await session.send({"prompt": prompt})
                     await done.wait()

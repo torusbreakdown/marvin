@@ -2677,7 +2677,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
             rc, out, err = await _run_sub(prompt, model, timeout_s=timeout_s, label=label)
-            if rc == 0 and out:
+            if rc == 0:
                 return rc, out, err
             combined = f"{out} {err}"
             if any(m in combined for m in _HARD_ERRORS):

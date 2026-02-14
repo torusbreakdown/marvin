@@ -8,7 +8,6 @@ Provides a richer terminal experience with:
 - Proper word wrapping
 """
 
-import asyncio
 import curses
 import os
 import textwrap
@@ -24,6 +23,7 @@ C_SYSTEM = 4
 C_INPUT = 5
 C_TOOL = 6
 C_BORDER = 7
+C_PURPLE = 8
 
 
 def _init_colors():
@@ -36,6 +36,7 @@ def _init_colors():
     curses.init_pair(C_INPUT, curses.COLOR_WHITE, -1)
     curses.init_pair(C_TOOL, curses.COLOR_MAGENTA, -1)
     curses.init_pair(C_BORDER, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_PURPLE, curses.COLOR_MAGENTA, -1)
 
 
 # ── Chat message model ──────────────────────────────────────────────────────
@@ -279,6 +280,39 @@ class CursesUI:
         self._render_input()
         self.stdscr.refresh()
 
+    def render_splash(self, art_path: str, duration: float = 2.0):
+        """Show ASCII art splash screen in purple, then fade out."""
+        try:
+            with open(art_path) as f:
+                lines = f.read().splitlines()
+        except Exception:
+            return
+
+        h, w = self.height, self.width
+        art_h = len(lines)
+        art_w = max((len(l) for l in lines), default=0)
+        y_off = max(0, (h - art_h) // 2)
+        x_off = max(0, (w - art_w) // 2)
+        color = curses.color_pair(C_PURPLE) | curses.A_BOLD
+
+        self.stdscr.erase()
+        for i, line in enumerate(lines):
+            row = y_off + i
+            if row >= h:
+                break
+            try:
+                self.stdscr.addnstr(row, x_off, line, w - x_off, color)
+            except curses.error:
+                pass
+        self.stdscr.refresh()
+
+        # Hold for duration (non-blocking drain of input)
+        self.stdscr.nodelay(True)
+        end = time.time() + duration
+        while time.time() < end:
+            self.stdscr.getch()  # drain keypresses
+            time.sleep(0.03)
+
     def handle_key(self, key: int) -> str | None:
         """Process a keypress. Returns the submitted text on Enter, else None."""
         if key == curses.KEY_RESIZE:
@@ -358,326 +392,4 @@ class CursesUI:
         return None
 
 
-# ── Main curses loop (called from app.py) ────────────────────────────────────
-
-async def curses_main(stdscr, app_module):
-    """Run the interactive loop inside curses."""
-    import sys as _sys
-
-    # Redirect stdout/stderr to a log file so library warnings
-    # don't corrupt the curses display
-    _log_path = os.path.join(
-        os.path.expanduser("~/.config/local-finder"), "curses.log"
-    )
-    os.makedirs(os.path.dirname(_log_path), exist_ok=True)
-    _log_file = open(_log_path, "a")
-    _orig_stdout = _sys.stdout
-    _orig_stderr = _sys.stderr
-    _sys.stdout = _log_file
-    _sys.stderr = _log_file
-
-    ui = CursesUI(stdscr)
-
-    # Load input history from profile
-    hp = app_module._history_path()
-    ui.load_history(hp)
-
-    # Import what we need from the app module
-    _active_profile = app_module._active_profile
-    _prefs_path = app_module._prefs_path
-    _build_system_message = app_module._build_system_message
-    _usage = app_module._usage
-    _save_history = app_module._save_history
-    _save_last_profile = app_module._save_last_profile
-    _check_all_subscriptions = app_module._check_all_subscriptions
-    _load_saved_places = app_module._load_saved_places
-    _list_profiles = app_module._list_profiles
-    _exit_requested = app_module._exit_requested
-    # Ensure the event exists (main() may not have initialized it)
-    if app_module._profile_switch_requested is None:
-        app_module._profile_switch_requested = asyncio.Event()
-    _profile_switch_requested = app_module._profile_switch_requested
-    if app_module._compact_session_requested is None:
-        app_module._compact_session_requested = asyncio.Event()
-    _compact_session_requested = app_module._compact_session_requested
-
-    from copilot import CopilotClient
-
-    all_tools = [
-        app_module.get_my_location, app_module.setup_google_auth,
-        app_module.places_text_search, app_module.places_nearby_search,
-        app_module.estimate_travel_time, app_module.estimate_traffic_adjusted_time,
-        app_module.get_directions,
-        app_module.web_search, app_module.search_news, app_module.get_usage,
-        app_module.search_papers, app_module.search_arxiv,
-        app_module.search_movies, app_module.get_movie_details,
-        app_module.search_games, app_module.get_game_details,
-        app_module.scrape_page, app_module.browse_web,
-        app_module.save_place, app_module.remove_place, app_module.list_places,
-        app_module.set_alarm, app_module.list_alarms, app_module.cancel_alarm,
-        app_module.generate_ntfy_topic, app_module.ntfy_subscribe,
-        app_module.ntfy_unsubscribe, app_module.ntfy_publish, app_module.ntfy_list,
-        app_module.switch_profile, app_module.update_preferences, app_module.exit_app,
-        app_module.write_note, app_module.read_note,
-        app_module.notes_mkdir, app_module.notes_ls,
-        app_module.yt_dlp_download,
-        app_module.calendar_add_event, app_module.calendar_delete_event,
-        app_module.calendar_view, app_module.calendar_list_upcoming,
-        app_module.file_read_lines, app_module.file_apply_patch,
-        app_module.github_search, app_module.github_clone,
-        app_module.github_read_file, app_module.github_grep,
-        app_module.create_ticket,
-        app_module.weather_forecast,
-        app_module.convert_units,
-        app_module.dictionary_lookup,
-        app_module.translate_text,
-        app_module.timer_start, app_module.timer_check, app_module.timer_stop,
-        app_module.system_info,
-        app_module.read_rss,
-        app_module.download_file,
-        app_module.bookmark_save, app_module.bookmark_list,
-        app_module.bookmark_search,
-        app_module.compact_history,
-        app_module.search_history_backups,
-    ]
-
-    def update_status():
-        profile = app_module._active_profile
-        n_msgs = len(ui.messages)
-        subs = len(app_module._load_ntfy_subs())
-        status = (
-            f" Local Finder │ Profile: {profile} │ "
-            f"Messages: {n_msgs} │ Subs: {subs} │ "
-            f"{_usage.summary_oneline()}"
-        )
-        ui.set_status(status)
-
-    # Ensure the bundled copilot binary is executable
-    try:
-        from copilot.client import _get_bundled_cli_path
-        cli_bin = _get_bundled_cli_path()
-        if cli_bin and not os.access(cli_bin, os.X_OK):
-            os.chmod(cli_bin, 0o755)
-    except Exception:
-        pass
-
-    client = CopilotClient()
-    await client.start()
-
-    session = await client.create_session({
-        "model": "gpt-5.2",
-        "tools": all_tools,
-        "system_message": {"content": _build_system_message()},
-    })
-
-    done = asyncio.Event()
-    busy = False
-
-    def on_event(event):
-        nonlocal busy
-        etype = event.type.value
-        if etype == "assistant.message_delta":
-            delta = event.data.delta_content or ""
-            ui.stream_delta(delta)
-            ui.render()
-        elif etype == "assistant.message":
-            _usage.record_llm_turn()
-            if not ui.streaming_chunks and hasattr(event.data, 'content') and event.data.content:
-                text = event.data.content
-                ui.add_message("assistant", text)
-                app_module._append_chat("assistant", text)
-            else:
-                text = "".join(ui.streaming_chunks).strip()
-                ui.end_stream()
-                if text:
-                    app_module._append_chat("assistant", text)
-            update_status()
-            ui.render()
-        elif etype == "session.idle":
-            if ui.is_streaming:
-                ui.end_stream()
-            busy = False
-            done.set()
-            ui.render()
-
-    session.on(on_event)
-
-    # Show history summary or welcome message
-    chat_log = app_module._load_chat_log()
-    if chat_log:
-        recent = chat_log[-20:]
-        lines = []
-        for entry in recent:
-            role = entry.get("role", "?")
-            text = entry.get("text", "")
-            if len(text) > 200:
-                text = text[:200] + "…"
-            prefix = "You" if role == "you" else "Assistant"
-            lines.append(f"  {prefix}: {text}")
-        summary = "\n".join(lines)
-        ui.add_message("system",
-            f"Welcome back! Profile: {app_module._active_profile}\n"
-            f"Recent conversation:\n{summary}\n\n"
-            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+Q to quit."
-        )
-    else:
-        ui.add_message("system",
-            f"Welcome to Local Finder!\n"
-            f"Profile: {app_module._active_profile}\n"
-            f"Type your message below. PgUp/PgDn to scroll. Ctrl+Q to quit."
-        )
-    update_status()
-    ui.render()
-
-    queued_prompt = None
-
-    try:
-        while True:
-            if _exit_requested.is_set():
-                break
-
-            key = stdscr.getch()
-
-            if key == 4 or key == 17:  # Ctrl+D or Ctrl+Q
-                break
-
-            if key != -1 and not busy:
-                submitted = ui.handle_key(key)
-                ui.render()
-
-                if submitted is not None:
-                    # Handle local commands
-                    lower = submitted.lower()
-                    if lower in ("quit", "exit"):
-                        break
-                    elif lower == "preferences":
-                        ui.add_message("system",
-                            f"Preferences file: {_prefs_path()}\n"
-                            f"(Edit preferences from the regular terminal mode.)")
-                        ui.render()
-                    elif lower == "profiles":
-                        ui.add_message("system",
-                            f"Active: {app_module._active_profile}\n"
-                            f"Available: {', '.join(_list_profiles())}")
-                        ui.render()
-                    elif lower == "usage":
-                        ui.add_message("system",
-                            f"{_usage.summary()}\n{_usage.lifetime_summary()}")
-                        ui.render()
-                    elif lower == "saved":
-                        places = _load_saved_places()
-                        if not places:
-                            ui.add_message("system", "No saved places yet.")
-                        else:
-                            lines = [f"Saved places ({len(places)}):"]
-                            for p in places:
-                                name = p.get("label", "?").upper()
-                                if p.get("name"):
-                                    name += f" — {p['name']}"
-                                lines.append(name)
-                                if p.get("address"):
-                                    lines.append(f"  📍 {p['address']}")
-                            ui.add_message("system", "\n".join(lines))
-                        ui.render()
-                    else:
-                        # Check ntfy before sending
-                        try:
-                            notifs = await _check_all_subscriptions()
-                            if notifs:
-                                ui.add_message("system", f"🔔 {notifs}")
-                        except Exception:
-                            pass
-
-                        # Send to LLM
-                        ui.add_message("you", submitted)
-                        app_module._append_chat("you", submitted)
-                        ui.begin_stream()
-                        update_status()
-                        ui.render()
-
-                        done.clear()
-                        busy = True
-                        await session.send({"prompt": submitted})
-
-            elif key != -1 and busy:
-                # Allow typing and scrolling while waiting for response
-                if key == 4 or key == 17:
-                    break
-                result = ui.handle_key(key)
-                if result is not None:
-                    queued_prompt = result  # queue for after response
-                ui.render()
-
-            # Check if response just finished
-            if done.is_set() and busy:
-                busy = False
-                # Handle profile switch
-                if _profile_switch_requested.is_set():
-                    _profile_switch_requested.clear()
-                    await session.destroy()
-                    session = await client.create_session({
-                        "model": "gpt-5.2",
-                        "tools": all_tools,
-                        "system_message": {"content": _build_system_message()},
-                    })
-                    session.on(on_event)
-                    ui.add_message("system",
-                        f"Session rebuilt for profile: {app_module._active_profile}")
-
-                    # Re-send prompt
-                    done.clear()
-                    busy = True
-                    ui.begin_stream()
-                    await session.send({"prompt": submitted})
-
-                # Handle history compaction
-                if _compact_session_requested.is_set():
-                    _compact_session_requested.clear()
-                    await session.destroy()
-                    session = await client.create_session({
-                        "model": "gpt-5.2",
-                        "tools": all_tools,
-                        "system_message": {"content": _build_system_message()},
-                    })
-                    session.on(on_event)
-                    ui.add_message("system", "Session rebuilt with compacted history")
-
-                update_status()
-                ui.render()
-
-                # Process queued prompt if any
-                if queued_prompt and not busy:
-                    submitted = queued_prompt
-                    queued_prompt = None
-                    ui.add_message("you", submitted)
-                    app_module._append_chat("you", submitted)
-                    ui.begin_stream()
-                    update_status()
-                    ui.render()
-                    done.clear()
-                    busy = True
-                    await session.send({"prompt": submitted})
-            await asyncio.sleep(0.03)
-
-            update_status()
-            ui.render()
-    finally:
-        # Save curses input history in readline-compatible format
-        try:
-            if ui.input_history:
-                os.makedirs(os.path.dirname(hp), exist_ok=True)
-                with open(hp, "w") as f:
-                    f.write("_HiStOrY_V2_\n")
-                    for line in ui.input_history[-1000:]:
-                        f.write(line + "\n")
-        except Exception:
-            pass
-        _save_last_profile()
-        _usage.save()
-        await session.destroy()
-        await client.stop()
-
-        # Restore stdout/stderr
-        _sys.stdout = _orig_stdout
-        _sys.stderr = _orig_stderr
-        _log_file.close()
+# ── (Session logic now lives in app._run_curses_interactive) ─────────────────

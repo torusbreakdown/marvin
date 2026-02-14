@@ -26,7 +26,9 @@ try:
         decorator = _orig_define_tool(description=description)
         def wrapper(fn):
             fn._tool_description = description
-            return decorator(fn)
+            tool = decorator(fn)
+            tool._original_fn = fn  # preserve for non-SDK providers
+            return tool
         return wrapper
 except ImportError:
     CopilotClient = None
@@ -2810,8 +2812,9 @@ def _build_system_message() -> str:
         "You are Marvin, a helpful local-business and general-purpose assistant. "
         "CRITICAL: You MUST use your available tools to answer questions. "
         "NEVER guess, fabricate, or answer from memory when a tool can provide "
-        "the information. For example, always call places_text_search for "
-        "restaurant/business queries, web_search for factual questions, "
+        "the information. For example, use places_text_search for finding "
+        "physical locations/addresses, web_search for delivery options, services, "
+        "reviews, factual questions, and anything requiring live/current info, "
         "weather_forecast for weather, etc. If in doubt, use a tool. "
         "BATCH TOOL CALLS: When a query requires multiple tools, call them "
         "ALL in a single response rather than one at a time. For example, "
@@ -2824,9 +2827,12 @@ def _build_system_message() -> str:
         "responses to match their dietary restrictions, budget, distance, and "
         "other constraints. "
         "When the user asks for nearby places or recommendations, use the "
-        "places_text_search or places_nearby_search tools to find options and "
-        "then summarize the results in a friendly way. Prefer places_text_search "
-        "for natural language queries. Use places_nearby_search when you have "
+        "places_text_search or places_nearby_search tools to find physical "
+        "locations, addresses, and hours. For delivery, online ordering, "
+        "service availability, or anything that needs live web data, use "
+        "web_search instead — places search only finds physical locations. "
+        "Prefer places_text_search "
+        "for natural language queries about physical places. Use places_nearby_search when you have "
         "exact coordinates and a specific place type. "
         "If the user says 'near me' or doesn't specify a location, use your "
         "cached location or call get_my_location. "
@@ -5357,12 +5363,13 @@ async def blender_screenshot(params: BlenderScreenshotParams) -> str:
 # ── LLM Provider Infrastructure ─────────────────────────────────────────────
 #
 # Providers (set via LLM_PROVIDER env var or --provider flag):
-#   "groq"     ⚡  — Groq cloud API (default, fast & cheap)
+#   "gemini"   ✨  — Google Gemini API (default, free tier, 1M context)
+#   "groq"     ⚡  — Groq cloud API (fast & cheap)
 #   "ollama"   🏠  — Local Ollama instance (free, slower)
 #   "openai"   🌐  — OpenAI-compatible endpoint (non-Chinese providers)
 #   "copilot"  💲  — Copilot SDK fallback (paid premium requests)
 
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "groq")
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "gemini")
 
 # ── Groq config ──
 _groq_key_path = os.path.expanduser("~/.ssh/GROQ_API_KEY")
@@ -5372,7 +5379,7 @@ if not os.environ.get("GROQ_API_KEY") and os.path.isfile(_groq_key_path):
         if _key:
             os.environ["GROQ_API_KEY"] = _key
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3-groq-70b-tool-use")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ── OpenAI-compatible config (e.g. OpenRouter, DeepInfra, Together) ──
@@ -5386,14 +5393,27 @@ OPENAI_URL = os.environ.get(
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3-coder:30b")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 
+# ── Gemini config ──
+_gemini_key_path = os.path.expanduser("~/.ssh/GEMINI_API_KEY")
+if not os.environ.get("GEMINI_API_KEY") and os.path.isfile(_gemini_key_path):
+    with open(_gemini_key_path) as _f:
+        _key = _f.read().strip()
+        if _key:
+            os.environ["GEMINI_API_KEY"] = _key
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+
 # ── Provider metadata ──
 PROVIDER_EMOJI = {
+    "gemini": "✨",
     "groq": "⚡",
     "ollama": "🏠",
     "openai": "🌐",
     "copilot": "💲",
 }
 PROVIDER_LABEL = {
+    "gemini": f"Gemini ({GEMINI_MODEL})",
     "groq": f"Groq ({GROQ_MODEL})",
     "ollama": f"Ollama ({OLLAMA_MODEL})",
     "openai": f"OpenAI-compat ({OPENAI_MODEL})",
@@ -5500,27 +5520,35 @@ def _tools_to_openai_format(tool_funcs: list) -> list[dict]:
     import inspect
     tools = []
     for func in tool_funcs:
-        sig = inspect.signature(func)
-        params_type = None
-        for p in sig.parameters.values():
-            if p.annotation and p.annotation is not inspect.Parameter.empty:
-                params_type = p.annotation
-                break
+        fname = getattr(func, "name", None) or func.__name__
 
-        properties = {}
-        required = []
-        if params_type and hasattr(params_type, "model_json_schema"):
-            schema = params_type.model_json_schema()
-            properties = schema.get("properties", {})
-            required = schema.get("required", [])
+        # SDK Tool objects already carry a parameters schema
+        if hasattr(func, "parameters") and isinstance(func.parameters, dict):
+            properties = {k: v for k, v in func.parameters.get("properties", {}).items()}
+            required = func.parameters.get("required", [])
             for prop in properties.values():
                 prop.pop("title", None)
+        else:
+            sig = inspect.signature(func)
+            params_type = None
+            for p in sig.parameters.values():
+                if p.annotation and p.annotation is not inspect.Parameter.empty:
+                    params_type = p.annotation
+                    break
+            properties = {}
+            required = []
+            if params_type and hasattr(params_type, "model_json_schema"):
+                schema = params_type.model_json_schema()
+                properties = schema.get("properties", {})
+                required = schema.get("required", [])
+                for prop in properties.values():
+                    prop.pop("title", None)
 
-        desc = getattr(func, "_tool_description", "") or func.__doc__ or ""
+        desc = getattr(func, "_tool_description", "") or getattr(func, "description", "") or getattr(func, "__doc__", "") or ""
         tools.append({
             "type": "function",
             "function": {
-                "name": func.__name__,
+                "name": fname,
                 "description": desc,
                 "parameters": {
                     "type": "object",
@@ -5648,7 +5676,12 @@ async def _provider_chat(
 ) -> dict:
     """Route chat to the active provider."""
     prov = provider or LLM_PROVIDER
-    if prov == "groq":
+    if prov == "gemini":
+        return await _openai_chat(
+            messages, tools, stream,
+            api_url=GEMINI_URL, api_key=GEMINI_API_KEY, model=GEMINI_MODEL,
+        )
+    elif prov == "groq":
         return await _openai_chat(
             messages, tools, stream,
             api_url=GROQ_URL, api_key=GROQ_API_KEY, model=GROQ_MODEL,
@@ -5661,7 +5694,7 @@ async def _provider_chat(
     elif prov == "ollama":
         return await _ollama_chat(messages, tools, stream)
     else:
-        raise ValueError(f"Unknown provider: {prov} (use groq/ollama/openai/copilot)")
+        raise ValueError(f"Unknown provider: {prov} (use gemini/groq/ollama/openai/copilot)")
 
 
 async def _run_tool_loop(
@@ -5676,7 +5709,7 @@ async def _run_tool_loop(
     import inspect
     prov = provider or LLM_PROVIDER
     emoji = PROVIDER_EMOJI.get(prov, "?")
-    tool_map = {f.__name__: f for f in tool_funcs}
+    tool_map = {(getattr(f, 'name', None) or f.__name__): f for f in tool_funcs}
     tools_schema = _tools_to_openai_format(tool_funcs)
 
     messages = [
@@ -5712,17 +5745,19 @@ async def _run_tool_loop(
             func = tool_map.get(fn_name)
             if not func:
                 return tc.get("id", ""), fn_name, f"Unknown tool: {fn_name}"
+            # Use original function for non-SDK providers
+            callable_fn = getattr(func, '_original_fn', func)
             try:
-                sig = inspect.signature(func)
+                sig = inspect.signature(callable_fn)
                 params_type = None
                 for p in sig.parameters.values():
                     if p.annotation and p.annotation is not inspect.Parameter.empty:
                         params_type = p.annotation
                         break
                 if params_type:
-                    result = await func(params_type(**fn_args))
+                    result = await callable_fn(params_type(**fn_args))
                 else:
-                    result = await func()
+                    result = await callable_fn()
             except Exception as e:
                 result = f"Error calling {fn_name}: {e}"
             return tc.get("id", ""), fn_name, result
@@ -5809,49 +5844,9 @@ async def _record_and_transcribe(duration: float = 5.0) -> str:
         os.unlink(tmp_path)
 
 
-class _CursesRequested(Exception):
-    def __init__(self, app_module):
-        self.app_module = app_module
-
-
-async def main():
-    global _profile_switch_requested, _compact_session_requested
-
-    # Curses is default; --plain disables it
-    use_plain = "--plain" in sys.argv
-    # Filter out flags from prompt args
-    skip_next = False
-    args = []
-    for a in sys.argv[1:]:
-        if skip_next:
-            skip_next = False
-            continue
-        if a in ("--plain", "--curses"):
-            continue
-        if a == "--provider":
-            skip_next = True
-            continue
-        if a.startswith("--provider="):
-            continue
-        args.append(a)
-
-    if not GOOGLE_API_KEY and not shutil.which("gcloud"):
-        pass  # Places will silently fall back to OpenStreetMap
-
-    _ensure_prefs_file()
-    _profile_switch_requested = asyncio.Event()
-    _compact_session_requested = asyncio.Event()
-
-    prompt = " ".join(args) if args else None
-    interactive = prompt is None
-
-    if not use_plain and interactive:
-        import curses as _curses
-        import curses_ui
-        import app as _self_module
-        raise _CursesRequested(_self_module)
-
-    all_tools = [
+def _build_all_tools():
+    """Single source of truth for the tool list used by all UI modes."""
+    return [
         get_my_location, setup_google_auth,
         places_text_search, places_nearby_search,
         estimate_travel_time, estimate_traffic_adjusted_time, get_directions,
@@ -5889,33 +5884,79 @@ async def main():
         blender_execute_code, blender_screenshot,
     ]
 
-    # ── Determine active provider ──────────────────────────────────────────
-    # CLI flag: --provider groq|ollama|openai|copilot
-    active_provider = LLM_PROVIDER
-    for a in sys.argv[1:]:
-        if a.startswith("--provider="):
-            active_provider = a.split("=", 1)[1]
-        elif a == "--provider" and sys.argv.index(a) + 1 < len(sys.argv):
-            active_provider = sys.argv[sys.argv.index(a) + 1]
 
-    if active_provider == "ollama":
-        ok = await _ensure_ollama()
-        if not ok:
-            print("⚠️  Ollama unavailable — falling back to groq")
-            active_provider = "groq" if GROQ_API_KEY else "copilot"
+class SessionManager:
+    """Manages provider selection, SDK sessions, and prompt dispatch.
 
-    emoji = PROVIDER_EMOJI.get(active_provider, "?")
-    label = PROVIDER_LABEL.get(active_provider, active_provider)
-    print(f"{emoji} Provider: {label}")
+    Used by both plain and curses UI paths so provider logic is not duplicated.
+    """
 
-    # Lazy-init Copilot SDK — only when needed
-    _sdk_client = None
-    _sdk_session = None
+    def __init__(self, all_tools: list, on_delta=None, on_message=None, on_idle=None):
+        self.all_tools = all_tools
+        self.active_provider = LLM_PROVIDER
+        self.emoji = ""
+        self.label = ""
+        self._sdk_client = None
+        self._sdk_session = None
+        self._done = asyncio.Event()
+        self._chunks: list[str] = []
+        self._SESSION_TIMEOUT = 120
+        # Callbacks for streaming (curses uses these; plain uses print)
+        self._on_delta = on_delta
+        self._on_message = on_message
+        self._on_idle = on_idle
 
-    async def _get_sdk_session():
-        nonlocal _sdk_client, _sdk_session
-        if _sdk_session is not None:
-            return _sdk_session
+    async def init_provider(self):
+        """Determine and initialize the active provider from CLI flags."""
+        for a in sys.argv[1:]:
+            if a.startswith("--provider="):
+                self.active_provider = a.split("=", 1)[1]
+            elif a == "--provider" and sys.argv.index(a) + 1 < len(sys.argv):
+                self.active_provider = sys.argv[sys.argv.index(a) + 1]
+
+        if self.active_provider == "ollama":
+            ok = await _ensure_ollama()
+            if not ok:
+                self.active_provider = "gemini" if GEMINI_API_KEY else ("groq" if GROQ_API_KEY else "copilot")
+
+        self.emoji = PROVIDER_EMOJI.get(self.active_provider, "?")
+        self.label = PROVIDER_LABEL.get(self.active_provider, self.active_provider)
+
+    def _on_event(self, event):
+        etype = event.type.value
+        if etype == "assistant.message_delta":
+            delta = event.data.delta_content or ""
+            self._chunks.append(delta)
+            if self._on_delta:
+                self._on_delta(delta)
+            else:
+                print(delta, end="", flush=True)
+        elif etype == "assistant.message":
+            _usage.record_llm_turn()
+            if not self._chunks:
+                text = event.data.content
+                if self._on_message:
+                    self._on_message(text)
+                else:
+                    print(text)
+                _append_chat("assistant", text)
+            else:
+                text = "".join(self._chunks).strip()
+                if self._on_message:
+                    self._on_message(text)
+                else:
+                    print()
+                _append_chat("assistant", text)
+            if not self._on_message and _usage.should_report():
+                print(f"\n{_usage.summary()}\n")
+        elif etype == "session.idle":
+            self._done.set()
+            if self._on_idle:
+                self._on_idle()
+
+    async def _get_sdk_session(self):
+        if self._sdk_session is not None:
+            return self._sdk_session
         if CopilotClient is None:
             raise RuntimeError("Copilot SDK not installed — cannot use paid fallback")
         try:
@@ -5925,78 +5966,350 @@ async def main():
                 os.chmod(cli_bin, 0o755)
         except Exception:
             pass
-        _sdk_client = CopilotClient()
-        await _sdk_client.start()
-        _sdk_session = await _sdk_client.create_session({
+        self._sdk_client = CopilotClient()
+        await self._sdk_client.start()
+        self._sdk_session = await self._sdk_client.create_session({
             "model": "gpt-4.1",
-            "tools": all_tools,
+            "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
-        return _sdk_session
+        return self._sdk_session
 
-    async def _rebuild_sdk_session():
-        nonlocal _sdk_session
-        if _sdk_session:
-            await _sdk_session.destroy()
-        _sdk_session = await _sdk_client.create_session({
+    async def rebuild_sdk_session(self):
+        if self._sdk_session:
+            await self._sdk_session.destroy()
+        self._sdk_session = await self._sdk_client.create_session({
             "model": "gpt-4.1",
-            "tools": all_tools,
+            "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
-        return _sdk_session
-    # ── SDK fallback helpers ───────────────────────────────────────────────
-    _SESSION_TIMEOUT = 120
-    done = asyncio.Event()
-    chunks: list[str] = []
+        return self._sdk_session
 
-    async def _wait_for_done():
-        try:
-            await asyncio.wait_for(done.wait(), timeout=_SESSION_TIMEOUT)
-        except asyncio.TimeoutError:
-            print(f"\n⚠️  Response timed out after {_SESSION_TIMEOUT}s. Try again.")
-
-    def on_event(event):
-        etype = event.type.value
-        if etype == "assistant.message_delta":
-            delta = event.data.delta_content or ""
-            print(delta, end="", flush=True)
-            chunks.append(delta)
-        elif etype == "assistant.message":
-            _usage.record_llm_turn()
-            if not chunks:
-                text = event.data.content
-                print(text)
-                _append_chat("assistant", text)
-            else:
-                print()
-                _append_chat("assistant", "".join(chunks).strip())
-            if _usage.should_report():
-                print(f"\n{_usage.summary()}\n")
-        elif etype == "session.idle":
-            done.set()
-
-    async def _send_sdk(user_prompt: str):
-        """Send a prompt via Copilot SDK (paid fallback)."""
-        session = await _get_sdk_session()
-        session.on(on_event)
-        done.clear()
-        chunks.clear()
+    async def _send_sdk(self, user_prompt: str):
+        session = await self._get_sdk_session()
+        session.on(self._on_event)
+        self._done.clear()
+        self._chunks.clear()
         await session.send({"prompt": user_prompt})
-        await _wait_for_done()
+        try:
+            await asyncio.wait_for(self._done.wait(), timeout=self._SESSION_TIMEOUT)
+        except asyncio.TimeoutError:
+            if not self._on_message:
+                print(f"\n⚠️  Response timed out after {self._SESSION_TIMEOUT}s. Try again.")
 
-    async def _send_prompt(user_prompt: str, force_sdk: bool = False):
-        """Send a prompt via active provider, with Copilot SDK as fallback."""
-        if not force_sdk and active_provider != "copilot":
+    async def send_prompt(self, user_prompt: str, force_sdk: bool = False) -> str | None:
+        """Send a prompt via active provider, with Copilot SDK as fallback.
+
+        Returns the response text when using the tool loop provider,
+        or None when the SDK path handles output via callbacks.
+        """
+        if not force_sdk and self.active_provider != "copilot":
             try:
                 result = await _run_tool_loop(
-                    user_prompt, all_tools, _build_system_message(),
-                    provider=active_provider,
+                    user_prompt, self.all_tools, _build_system_message(),
+                    provider=self.active_provider,
                 )
                 _append_chat("assistant", result.strip() if result else "")
-                return
+                return result
             except Exception as e:
-                print(f"\n⚠️  {emoji} error: {e} — falling back to 💲 Copilot SDK")
-        await _send_sdk(user_prompt)
+                msg = f"\n⚠️  {self.emoji} error: {e} — falling back to 💲 Copilot SDK"
+                if self._on_message:
+                    self._on_message(msg)
+                else:
+                    print(msg)
+        await self._send_sdk(user_prompt)
+        return None
+
+    async def cleanup(self):
+        if self._sdk_session:
+            await self._sdk_session.destroy()
+        if self._sdk_client:
+            await self._sdk_client.stop()
+
+
+async def _run_curses_interactive(stdscr):
+    """Run the curses UI as a thin display wrapper around the core app logic."""
+    global _profile_switch_requested, _compact_session_requested
+    import sys as _sys
+    import curses_ui
+
+    # Re-initialize events for this event loop
+    _profile_switch_requested = asyncio.Event()
+    _compact_session_requested = asyncio.Event()
+    _ensure_prefs_file()
+
+    all_tools = _build_all_tools()
+
+    # Redirect stdout/stderr so library warnings don't corrupt curses
+    _log_path = os.path.join(
+        os.path.expanduser("~/.config/local-finder"), "curses.log"
+    )
+    os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+    _log_file = open(_log_path, "a")
+    _orig_stdout = _sys.stdout
+    _orig_stderr = _sys.stderr
+    _sys.stdout = _log_file
+    _sys.stderr = _log_file
+
+    ui = curses_ui.CursesUI(stdscr)
+
+    hp = _history_path()
+    ui.load_history(hp)
+
+    def update_status():
+        n_msgs = len(ui.messages)
+        subs = len(_load_ntfy_subs())
+        status = (
+            f" {mgr.emoji} {mgr.label} │ Profile: {_active_profile} │ "
+            f"Messages: {n_msgs} │ Subs: {subs} │ "
+            f"{_usage.summary_oneline()}"
+        )
+        ui.set_status(status)
+
+    # Wire up SessionManager with curses display callbacks
+    done = asyncio.Event()
+
+    def _on_delta(delta):
+        ui.stream_delta(delta)
+        ui.render()
+
+    def _on_message(text):
+        if ui.is_streaming:
+            ui.end_stream()
+        else:
+            ui.add_message("assistant", text)
+        update_status()
+        ui.render()
+
+    def _on_idle():
+        if ui.is_streaming:
+            ui.end_stream()
+        done.set()
+        ui.render()
+
+    mgr = SessionManager(all_tools, on_delta=_on_delta, on_message=_on_message, on_idle=_on_idle)
+    await mgr.init_provider()
+
+    # Show ASCII art splash
+    _art_path = os.path.join(os.path.dirname(__file__), "marvin.txt")
+    ui.render_splash(_art_path)
+
+    # Show history summary or welcome message
+    chat_log = _load_chat_log()
+    if chat_log:
+        recent = chat_log[-20:]
+        lines = []
+        for entry in recent:
+            role = entry.get("role", "?")
+            text = entry.get("text", "")
+            if len(text) > 200:
+                text = text[:200] + "…"
+            prefix = "You" if role == "you" else "Assistant"
+            lines.append(f"  {prefix}: {text}")
+        summary = "\n".join(lines)
+        ui.add_message("system",
+            f"Welcome back! Profile: {_active_profile}\n"
+            f"{mgr.emoji} Provider: {mgr.label}\n"
+            f"Recent conversation:\n{summary}\n\n"
+            f"PgUp/PgDn to scroll. ↑↓ for input history. Ctrl+Q to quit."
+        )
+    else:
+        ui.add_message("system",
+            f"Welcome to Local Finder!\n"
+            f"Profile: {_active_profile} │ {mgr.emoji} Provider: {mgr.label}\n"
+            f"Type your message below. PgUp/PgDn to scroll. Ctrl+Q to quit."
+        )
+    update_status()
+    ui.render()
+
+    queued_prompt = None
+    submitted = None
+    busy = False
+
+    async def _do_send(prompt_text: str):
+        nonlocal busy
+        ui.begin_stream()
+        update_status()
+        ui.render()
+        done.clear()
+        busy = True
+
+        result = await mgr.send_prompt(prompt_text)
+        # _run_tool_loop returns text directly (non-SDK path)
+        if result is not None:
+            if ui.is_streaming:
+                ui.end_stream()
+            ui.add_message("assistant", result.strip())
+            update_status()
+            ui.render()
+            busy = False
+            done.set()
+
+    try:
+        while True:
+            if _exit_requested.is_set():
+                break
+
+            key = stdscr.getch()
+
+            if key == 4 or key == 17:  # Ctrl+D or Ctrl+Q
+                break
+
+            if key != -1 and not busy:
+                result = ui.handle_key(key)
+                ui.render()
+
+                if result is not None:
+                    submitted = result
+                    lower = submitted.lower()
+                    if lower in ("quit", "exit"):
+                        break
+                    elif lower == "preferences":
+                        ui.add_message("system",
+                            f"Preferences file: {_prefs_path()}\n"
+                            f"(Edit preferences from the regular terminal mode.)")
+                        ui.render()
+                    elif lower == "profiles":
+                        ui.add_message("system",
+                            f"Active: {_active_profile}\n"
+                            f"Available: {', '.join(_list_profiles())}")
+                        ui.render()
+                    elif lower == "usage":
+                        ui.add_message("system",
+                            f"{_usage.summary()}\n{_usage.lifetime_summary()}")
+                        ui.render()
+                    elif lower == "saved":
+                        places = _load_saved_places()
+                        if not places:
+                            ui.add_message("system", "No saved places yet.")
+                        else:
+                            lines = [f"Saved places ({len(places)}):"]
+                            for p in places:
+                                name = p.get("label", "?").upper()
+                                if p.get("name"):
+                                    name += f" — {p['name']}"
+                                lines.append(name)
+                                if p.get("address"):
+                                    lines.append(f"  📍 {p['address']}")
+                            ui.add_message("system", "\n".join(lines))
+                        ui.render()
+                    else:
+                        try:
+                            notifs = await _check_all_subscriptions()
+                            if notifs:
+                                ui.add_message("system", f"🔔 {notifs}")
+                        except Exception:
+                            pass
+
+                        ui.add_message("you", submitted)
+                        _append_chat("you", submitted)
+                        await _do_send(submitted)
+
+            elif key != -1 and busy:
+                if key == 4 or key == 17:
+                    break
+                result = ui.handle_key(key)
+                if result is not None:
+                    queued_prompt = result
+                ui.render()
+
+            # Check if response just finished
+            if done.is_set() and busy:
+                busy = False
+
+                if _profile_switch_requested.is_set():
+                    _profile_switch_requested.clear()
+                    await mgr.rebuild_sdk_session()
+                    ui.add_message("system",
+                        f"Session rebuilt for profile: {_active_profile}")
+                    await _do_send(submitted)
+
+                if _compact_session_requested.is_set():
+                    _compact_session_requested.clear()
+                    await mgr.rebuild_sdk_session()
+                    ui.add_message("system", "Session rebuilt with compacted history")
+
+                update_status()
+                ui.render()
+
+                if queued_prompt and not busy:
+                    submitted = queued_prompt
+                    queued_prompt = None
+                    ui.add_message("you", submitted)
+                    _append_chat("you", submitted)
+                    await _do_send(submitted)
+            await asyncio.sleep(0.03)
+
+            update_status()
+            ui.render()
+    finally:
+        try:
+            if ui.input_history:
+                os.makedirs(os.path.dirname(hp), exist_ok=True)
+                with open(hp, "w") as f:
+                    f.write("_HiStOrY_V2_\n")
+                    for line in ui.input_history[-1000:]:
+                        f.write(line + "\n")
+        except Exception:
+            pass
+        _save_last_profile()
+        _usage.save()
+        await mgr.cleanup()
+
+        _sys.stdout = _orig_stdout
+        _sys.stderr = _orig_stderr
+        _log_file.close()
+
+
+class _CursesRequested(Exception):
+    pass
+
+
+async def main():
+    global _profile_switch_requested, _compact_session_requested
+
+    # Curses is default; --plain disables it
+    use_plain = "--plain" in sys.argv
+    # Filter out flags from prompt args
+    skip_next = False
+    args = []
+    for a in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("--plain", "--curses"):
+            continue
+        if a == "--provider":
+            skip_next = True
+            continue
+        if a.startswith("--provider="):
+            continue
+        args.append(a)
+
+    if not GOOGLE_API_KEY and not shutil.which("gcloud"):
+        pass  # Places will silently fall back to OpenStreetMap
+
+    _ensure_prefs_file()
+    _profile_switch_requested = asyncio.Event()
+    _compact_session_requested = asyncio.Event()
+
+    prompt = " ".join(args) if args else None
+    interactive = prompt is None
+
+    if not use_plain and interactive:
+        raise _CursesRequested()
+
+    all_tools = _build_all_tools()
+
+    mgr = SessionManager(all_tools)
+    await mgr.init_provider()
+
+    emoji = mgr.emoji
+    label = mgr.label
+    print(f"{emoji} Provider: {label}")
+
+    async def _send_prompt(user_prompt: str, force_sdk: bool = False):
+        await mgr.send_prompt(user_prompt, force_sdk=force_sdk)
 
     # Schedule calendar reminders on startup
     _schedule_calendar_reminders()
@@ -6172,8 +6485,7 @@ async def main():
                 # If profile was switched, rebuild SDK session if active
                 if _profile_switch_requested.is_set():
                     _profile_switch_requested.clear()
-                    if _sdk_session:
-                        await _rebuild_sdk_session()
+                    await mgr.rebuild_sdk_session()
                     print(f"[Profile switched: {_active_profile}]\n")
 
                     _append_chat("you", prompt)
@@ -6184,8 +6496,7 @@ async def main():
 
                 if _compact_session_requested.is_set():
                     _compact_session_requested.clear()
-                    if _sdk_session:
-                        await _rebuild_sdk_session()
+                    await mgr.rebuild_sdk_session()
                     print("[Session rebuilt with compacted history]\n")
         finally:
             _save_history()
@@ -6198,22 +6509,19 @@ async def main():
         print()
         _usage.save()
 
-    if _sdk_session:
-        await _sdk_session.destroy()
-    if _sdk_client:
-        await _sdk_client.stop()
+    await mgr.cleanup()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except _CursesRequested as req:
+    except _CursesRequested:
         import curses as _curses
-        import curses_ui
+        import app as _app
         import traceback as _tb
         def _run(stdscr):
             try:
-                asyncio.run(curses_ui.curses_main(stdscr, req.app_module))
+                asyncio.run(_app._run_curses_interactive(stdscr))
             except Exception:
                 # Curses swallows errors — save to file and re-raise
                 err = _tb.format_exc()

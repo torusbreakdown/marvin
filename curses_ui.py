@@ -477,7 +477,24 @@ async def curses_main(stdscr, app_module):
             done.clear()
             busy = True
             await session.send({"prompt": submitted})
-            await done.wait()
+
+            # Keep processing keys and rendering while waiting for response
+            while not done.is_set():
+                k = stdscr.getch()
+                if k == curses.KEY_PPAGE:
+                    ui.scroll_offset = min(
+                        ui.scroll_offset + (ui.height // 2),
+                        max(0, len(ui.messages) * 4))
+                elif k == curses.KEY_NPAGE:
+                    ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
+                elif k == curses.KEY_UP:
+                    ui.scroll_offset = min(ui.scroll_offset + 1, max(0, len(ui.messages) * 4))
+                elif k == curses.KEY_DOWN:
+                    ui.scroll_offset = max(0, ui.scroll_offset - 1)
+                elif k == 3:  # Ctrl+C during response
+                    break
+                ui.render()
+                await asyncio.sleep(0.02)
 
             # Handle profile switch
             if _profile_switch_requested.is_set():
@@ -499,7 +516,16 @@ async def curses_main(stdscr, app_module):
                 busy = True
                 ui.begin_stream()
                 await session.send({"prompt": submitted})
-                await done.wait()
+                while not done.is_set():
+                    k = stdscr.getch()
+                    if k == curses.KEY_PPAGE:
+                        ui.scroll_offset = min(
+                            ui.scroll_offset + (ui.height // 2),
+                            max(0, len(ui.messages) * 4))
+                    elif k == curses.KEY_NPAGE:
+                        ui.scroll_offset = max(0, ui.scroll_offset - (ui.height // 2))
+                    ui.render()
+                    await asyncio.sleep(0.02)
 
             update_status()
             ui.render()

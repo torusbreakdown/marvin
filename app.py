@@ -2631,6 +2631,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "") -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
+        sub_env.pop("VIRTUAL_ENV", None)
+        sub_env.pop("CONDA_PREFIX", None)
         sub_env["MARVIN_DEPTH"] = str(depth + 1)
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id

@@ -2933,61 +2933,112 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Code review helper ────────────────────────────────────────────
     async def _code_review(phase_label: str, focus: str = "all") -> None:
-        """Run a critical code review after a phase completes.
+        """Run parallel code reviews split by concern area.
 
-        Reads all project files, reviews for bugs/security/logic issues,
-        then launches a fix agent to address findings.
+        Splits project files into backend, frontend, and tests/config buckets,
+        then launches parallel review agents for each non-empty bucket.
+        Each reviewer focuses only on its files, keeping context small and fast.
         """
-        # Build file listing for the reviewer
-        file_list = []
+        # Build file listing and split by concern
+        backend_files = []
+        frontend_files = []
+        test_config_files = []
         for root, dirs, files in os.walk(wd):
             dirs[:] = [d for d in dirs if d not in (".venv", ".git", "__pycache__", ".pytest_cache", "node_modules", ".marvin")]
             for f in files:
-                if f.endswith((".py", ".js", ".html", ".css", ".toml", ".yaml", ".yml", ".json", ".md")):
-                    file_list.append(os.path.relpath(os.path.join(root, f), wd))
+                if not f.endswith((".py", ".js", ".html", ".css", ".toml", ".yaml", ".yml", ".json", ".md")):
+                    continue
+                rel = os.path.relpath(os.path.join(root, f), wd)
+                if rel.startswith("tests/") or rel.startswith("test_") or rel in ("conftest.py", "pyproject.toml", "uv.lock"):
+                    test_config_files.append(rel)
+                elif rel.startswith("static/") or rel.endswith((".html", ".css", ".js")):
+                    frontend_files.append(rel)
+                elif rel.endswith(".py"):
+                    backend_files.append(rel)
+                else:
+                    test_config_files.append(rel)
 
-        # Get app.py bridge interface context
         app_interface_hint = _marvin_interface_context()
 
-        review_prompt = _project_context() + "\n\n"
-        review_prompt += (
-            f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase output.\n\n"
-            "Read EVERY source file in the project with read_file. "
-            "Also read .marvin/spec.md and .marvin/design.md to understand intended behavior.\n\n"
-            "IMPORTANT: Do NOT review files in .marvin/upstream/ — those are the upstream Marvin "
-            "source code provided for REFERENCE ONLY. Use them to understand the CLI interface "
-            "(how bridge.py should call app.py) but do not flag issues in them.\n\n"
-            f"Project files to review:\n{chr(10).join('  - ' + f for f in sorted(file_list))}\n"
-            f"{app_interface_hint}\n"
-            "REVIEW CRITERIA — flag ONLY genuine issues:\n"
-            "1. **Security** — XSS, injection, unsafe HTML rendering, missing sanitization\n"
-            "2. **Logic bugs** — wrong conditions, off-by-one, race conditions, data not flowing correctly\n"
-            "3. **Integration bugs** — frontend calling wrong endpoints, wrong request/response shapes, "
-            "SSE parsing issues, subprocess interface mismatches\n"
-            "4. **Missing error handling** — unhandled exceptions, missing null checks, timeout issues\n"
-            "5. **Spec violations** — features described in spec.md that are missing or wrong\n\n"
-            "Do NOT flag: style issues, naming conventions, missing comments, or minor refactors.\n\n"
-            "For EACH issue found, write it as:\n"
-            "  FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION — SUGGESTED FIX\n\n"
-            "After listing all issues, fix EVERY critical and major issue yourself:\n"
-            "- Edit the files directly with edit_file or create_file\n"
-            "- Run 'pytest -v' after fixing to make sure you didn't break anything\n"
-            "- Commit fixes with message 'Code review fix: <summary>'\n"
-            "If no critical/major issues found, respond with 'REVIEW_CLEAN'."
-        )
+        def _build_review_prompt(area: str, files: list[str]) -> str:
+            ctx = _project_context() + "\n\n"
+            ctx += (
+                f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase — "
+                f"**{area}** files only.\n\n"
+                "Read EVERY file listed below with read_file. Also read .marvin/spec.md and "
+                ".marvin/design.md for intended behavior.\n\n"
+                "IMPORTANT: Do NOT review files in .marvin/upstream/ — those are upstream "
+                "reference code. Do NOT review files outside your assigned list.\n\n"
+                f"YOUR FILES TO REVIEW:\n{chr(10).join('  - ' + f for f in sorted(files))}\n"
+            )
+            if area == "Backend":
+                ctx += (
+                    f"{app_interface_hint}\n"
+                    "Focus on: bridge↔CLI integration, database correctness, API contract "
+                    "matching spec, error handling, SQL injection, subprocess safety.\n\n"
+                )
+            elif area == "Frontend":
+                ctx += (
+                    "\nFocus on: XSS via innerHTML/renderMarkdown, SSE parsing correctness, "
+                    "fetch error handling, accessibility, keyboard navigation, theme switching, "
+                    "responsive breakpoints matching spec.\n\n"
+                )
+            else:
+                ctx += (
+                    "\nFocus on: test coverage gaps, mocking correctness (only external services "
+                    "should be mocked), fixture setup, assertion specificity, config correctness.\n\n"
+                )
+            ctx += (
+                "REVIEW CRITERIA — flag ONLY genuine issues:\n"
+                "1. **Security** — XSS, injection, unsafe HTML, missing sanitization\n"
+                "2. **Logic bugs** — wrong conditions, off-by-one, race conditions\n"
+                "3. **Integration bugs** — wrong endpoints, wrong shapes, SSE issues\n"
+                "4. **Missing error handling** — unhandled exceptions, missing null checks\n"
+                "5. **Spec violations** — features in spec.md that are missing or wrong\n\n"
+                "Do NOT flag: style, naming, missing comments, minor refactors.\n\n"
+                "For EACH issue: FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION\n\n"
+                "Fix EVERY critical and major issue yourself:\n"
+                "- Edit files with edit_file\n"
+                "- Run 'pytest -v' after fixing to verify no regressions\n"
+                "- Commit fixes with message 'Code review fix ({area.lower()}): <summary>'\n"
+                "If no critical/major issues, respond with 'REVIEW_CLEAN'."
+            )
+            return ctx
 
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Code review: {phase_label}"], timeout=5, cwd=wd)
-        await _notify_pipeline(f"🔍 Code review: {phase_label}")
+        # Launch reviews in parallel for non-empty buckets
+        review_tasks = []
+        review_labels = []
+        for area, files in [("Backend", backend_files), ("Frontend", frontend_files), ("Tests/Config", test_config_files)]:
+            if not files:
+                continue
+            prompt = _build_review_prompt(area, files)
+            review_labels.append(area)
+            review_tasks.append(_run_sub_with_retry(
+                prompt, "claude-opus-4.6", base_timeout=900, label=f"Review {area}: {phase_label}"))
 
-        rc, rev_out, rev_err = await _run_sub_with_retry(
-            review_prompt, "claude-opus-4.6", base_timeout=600, label=f"Review: {phase_label}")
+        _run_cmd(["tk", "add-note", params.ticket_id,
+                  f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
+        await _notify_pipeline(f"🔍 Code review: {phase_label} ({len(review_tasks)} reviewers)")
 
-        if "REVIEW_CLEAN" in (rev_out or ""):
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Review clean: {phase_label} — no critical issues"], timeout=5, cwd=wd)
-            await _notify_pipeline(f"✅ Review clean: {phase_label}")
+        results = await asyncio.gather(*review_tasks)
+
+        clean_count = 0
+        fix_count = 0
+        for (rc, rev_out, rev_err), area in zip(results, review_labels):
+            if "REVIEW_CLEAN" in (rev_out or ""):
+                clean_count += 1
+            else:
+                fix_count += 1
+
+        summary = f"{clean_count} clean, {fix_count} with fixes"
+        if fix_count == 0:
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Review clean: {phase_label} — all {clean_count} reviewers passed"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"✅ Review clean: {phase_label} ({summary})")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Review complete: {phase_label} — fixes applied"], timeout=5, cwd=wd)
-            await _notify_pipeline(f"🔧 Review complete: {phase_label} — fixes applied")
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Review complete: {phase_label} — {summary}"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"🔧 Review complete: {phase_label} ({summary})")
 
     # ── Pipeline state for resume ────────────────────────────────────────
     state_file = os.path.join(wd, ".marvin", "pipeline_state")
@@ -3106,7 +3157,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
-            rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
+            rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=1200, label="Spec/UX pass")
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
                 spec_size = os.path.getsize(spec_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -3173,7 +3224,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "agents can write a complete test suite with full coverage from it alone."
             )
 
-            rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
+            rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=1200, label="Architecture pass")
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
                 design_size = os.path.getsize(design_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -3263,7 +3314,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
                 test_prompt = _project_context() + "\n\n" + test_prompt
                 test_tasks.append(_run_sub_with_retry(
-                    test_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Test agent {i+1}"))
+                    test_prompt, "gpt-5.3-codex", base_timeout=1200, label=f"Test agent {i+1}"))
 
             test_results = await asyncio.gather(*test_tasks)
             failures = []
@@ -3325,7 +3376,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             integ_prompt = _project_context() + "\n\n" + integ_prompt
 
             rc, out, err = await _run_sub_with_retry(
-                integ_prompt, "gpt-5.3-codex", base_timeout=300, label="Integration test agent")
+                integ_prompt, "gpt-5.3-codex", base_timeout=1200, label="Integration test agent")
             if rc != 0:
                 _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
@@ -3390,7 +3441,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "by reading the spec/design docs."
         )
 
-        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
+        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=1200, label="Implementation")
         if rc != 0:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
@@ -3453,7 +3504,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
-                    debug_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Debug round {debug_round}")
+                    debug_prompt, "gpt-5.3-codex", base_timeout=1800, label=f"Debug round {debug_round}")
 
                 if "ALL_TESTS_PASS" in (dbg_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5, cwd=wd)
@@ -3517,7 +3568,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
 
                 rc, e2e_out, e2e_err = await _run_sub_with_retry(
-                    e2e_prompt, "gpt-5.3-codex", base_timeout=300, label=f"E2E round {e2e_round}")
+                    e2e_prompt, "gpt-5.3-codex", base_timeout=1800, label=f"E2E round {e2e_round}")
 
                 if "E2E_SMOKE_PASS" in (e2e_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5, cwd=wd)

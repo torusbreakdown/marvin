@@ -3006,35 +3006,22 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Marvin CLI interface context for sub-agents ─────────────────────
     def _marvin_interface_context() -> str:
-        """Extract the --non-interactive CLI interface from app.py so sub-agents
-        know how bridge.py should invoke Marvin."""
-        try:
-            with open(app_path) as _af:
-                _app_src = _af.read()
-            _ni_start = _app_src.find("async def _run_non_interactive")
-            if _ni_start >= 0:
-                # Find the end of the function signature + arg parsing block only
-                # Stop at the first blank line after "sys.exit(1)" (end of arg parsing)
-                _ni_end = _app_src.find("# Set up coding mode", _ni_start)
-                if _ni_end < 0:
-                    _ni_end = _ni_start + 800
-                snippet = _app_src[_ni_start:_ni_end].strip()
-                # Cap at 800 chars to avoid leaking unrelated source
-                snippet = snippet[:800]
-                return (
-                    "\n\nMARVIN CLI INTERFACE — this is how the web UI must communicate with Marvin:\n"
-                    "The backend's bridge module spawns app.py as a subprocess. Key facts:\n"
-                    "  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt\n"
-                    "  - Marvin streams its response to stdout (the bridge reads this via async pipe)\n"
-                    "  - For CONVERSATION CONTEXT, the bridge must include prior messages in the prompt\n"
-                    "    (e.g. format as 'Previous messages:\\nUser: ...\\nAssistant: ...\\n\\nNew message: ...')\n"
-                    "    because each --non-interactive invocation is stateless — there is NO session persistence\n"
-                    "  - The --prompt flag accepts the full conversation context as a single string\n"
-                    "  - stderr contains cost/debug info, NOT the response\n\n"
-                    "```python\n" + snippet + "\n```\n"
-                )
-        except Exception:
-            pass
+        """Point sub-agents to the API spec for how bridge.py should invoke Marvin."""
+        spec_path = os.path.join(wd, ".marvin", "upstream", "MARVIN_API_SPEC.md")
+        if os.path.isfile(spec_path):
+            return (
+                "\n\nMARVIN CLI INTERFACE — READ .marvin/upstream/MARVIN_API_SPEC.md for the full contract.\n"
+                "Key facts for the bridge:\n"
+                "  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt\n"
+                "  - Marvin streams its response to stdout (the bridge reads via async pipe)\n"
+                "  - IMPORTANT: Each invocation is stateless — the bridge MUST include conversation\n"
+                "    history in the prompt (last 20 messages, formatted as 'User: ... / Marvin: ...')\n"
+                "  - stdout chunks have trailing \\n — ALWAYS strip with .rstrip('\\n')\n"
+                "  - stderr has cost data as MARVIN_COST:{json} on the last line\n"
+                "  - Marvin handles preferences, tools, and profile state internally\n"
+                "  - The bridge only manages: conversation storage, history in prompts, SSE to browser\n"
+                "See Sections 3 and 14 of MARVIN_API_SPEC.md for code examples and architecture.\n"
+            )
         return ""
 
     def _project_context() -> str:
@@ -3100,17 +3087,18 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         pass
         if upstream_files:
             parts.append(
-                "MARVIN UPSTREAM SOURCE (REFERENCE ONLY — do not modify or review these):\n"
-                "These files are the source code of the Marvin AI assistant that this web UI wraps.\n"
-                "Use them to understand how bridge.py should invoke the CLI, but do NOT treat them\n"
-                "as part of this project's codebase:\n"
+                "MARVIN UPSTREAM REFERENCE (do not modify these files):\n"
                 + "\n".join(upstream_files) + "\n\n"
-                "KEY SECTIONS TO READ in .marvin/upstream/app.py:\n"
-                "  - Search for '_run_non_interactive' to see the --non-interactive --prompt interface\n"
-                "  - Understand: Marvin streams its response to stdout, stderr has debug/cost info\n"
-                "  - Each invocation is STATELESS — conversation history must go in the prompt\n"
-                "Read .marvin/upstream/README.md and .marvin/upstream/REFERENCE.md for\n"
-                "user-facing documentation and CLI reference.\n"
+                "READ .marvin/upstream/MARVIN_API_SPEC.md FIRST — it is the authoritative\n"
+                "reference for how to integrate with Marvin. It documents:\n"
+                "  - The non-interactive CLI contract (input/output/streaming/cost)\n"
+                "  - What state the bridge must manage (conversation history) vs what Marvin handles\n"
+                "  - The subprocess invocation pattern with code examples\n"
+                "  - The stdout streaming format (raw text, strip trailing \\n from each chunk)\n"
+                "  - The stderr cost data format (MARVIN_COST:{json})\n"
+                "  - All 70+ tools (for reference only — Marvin handles tool calling internally)\n"
+                "  - The recommended bridge architecture\n"
+                "README.md and REFERENCE.md provide user-facing docs and CLI reference.\n"
             )
 
         # Mandatory testing policy — injected into EVERY sub-agent prompt
@@ -3307,7 +3295,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # Copy Marvin source + docs into .marvin/upstream/ so sub-agents can read them
     upstream_dir = os.path.join(wd, ".marvin", "upstream")
     os.makedirs(upstream_dir, exist_ok=True)
-    for src_file in ["app.py", "README.md", "REFERENCE.md"]:
+    for src_file in ["MARVIN_API_SPEC.md", "README.md", "REFERENCE.md"]:
         src_path = os.path.join(os.path.dirname(app_path), src_file)
         dst_path = os.path.join(upstream_dir, src_file)
         if os.path.isfile(src_path) and (

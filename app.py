@@ -2041,6 +2041,18 @@ def _resolve_coding_path(rel_path: str) -> str:
     # Ensure resolved path is within working dir
     if not resolved.startswith(os.path.normpath(_coding_working_dir) + os.sep) and resolved != os.path.normpath(_coding_working_dir):
         raise ValueError(f"Path '{rel_path}' resolves outside the working directory.")
+    # Block direct edits to .tickets/ — use the tk tool instead
+    rel_resolved = os.path.relpath(resolved, _coding_working_dir)
+    if rel_resolved == ".tickets" or rel_resolved.startswith(".tickets" + os.sep):
+        raise ValueError(
+            f"Cannot edit .tickets/ files directly. Use the tk tool instead:\n"
+            f"  tk(args='create \"Title\" -t task --parent PARENT_ID')  # create ticket\n"
+            f"  tk(args='start ID')       # mark in-progress\n"
+            f"  tk(args='close ID')       # mark done\n"
+            f"  tk(args='add-note ID \"text\"')  # add a note\n"
+            f"  tk(args='show ID')        # view ticket\n"
+            f"  tk(args='ls')             # list tickets"
+        )
     return resolved
 
 
@@ -2623,6 +2635,19 @@ async def run_command(params: RunCommandParams) -> str:
     if not _coding_working_dir:
         return "No working directory set. Use set_working_dir first."
 
+    # Block tk via run_command — force use of the tk tool instead
+    cmd_stripped = params.command.strip()
+    if cmd_stripped.startswith("tk ") or cmd_stripped == "tk":
+        return (
+            "❌ Do not run tk via run_command. Use the dedicated tk tool instead.\n"
+            "The tk tool provides structured ticket management. Example:\n"
+            "  tk(args='create \"Title\" -t task -d \"Description with acceptance criteria\" --parent PARENT_ID')\n"
+            "  tk(args='start ID')\n"
+            "  tk(args='close ID')\n"
+            "  tk(args='add-note ID \"note\"')\n"
+            "  tk(args='ls')"
+        )
+
     # Sub-agents auto-approve; interactive mode prompts user
     if _auto_approve_commands:
         pass  # skip confirmation
@@ -2706,6 +2731,28 @@ async def tk(params: TkParams) -> str:
     wd = _coding_working_dir or os.getcwd()
     import shlex
     args = shlex.split(params.args)
+
+    # For 'create' commands, always reject the first attempt to force the agent
+    # to reconsider and include a thorough description, acceptance criteria,
+    # and proper dependency/parent structure before creating the ticket.
+    if args and args[0] == "create":
+        cache_key = f"tk_create_retry:{params.args}"
+        if not hasattr(tk, "_retry_cache"):
+            tk._retry_cache = set()
+        if cache_key not in tk._retry_cache:
+            tk._retry_cache.add(cache_key)
+            return (
+                "⚠️ REJECTED — review your ticket before creating it.\n"
+                "Before retrying, verify:\n"
+                "1. Does the title clearly describe the deliverable?\n"
+                "2. Did you include -d with a detailed description AND acceptance criteria?\n"
+                "3. Did you set --parent to the correct parent epic/ticket?\n"
+                "4. Did you set -t to the right type (epic for phases, task for work items)?\n"
+                "5. Did you add --tags for categorization?\n"
+                "6. Should this ticket depend on another? Use tk dep after creating.\n\n"
+                "If you're confident this is correct, call tk again with the same or improved args."
+            )
+
     ok, output = _run_cmd(["tk"] + args, timeout=10, cwd=wd)
     return output if output else ("✅ Done" if ok else "❌ tk command failed")
 
@@ -2994,8 +3041,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 questions_text = out[q_start + len("QUESTIONS_FOR_PARENT:"):].strip()
                 if questions_text:
                     questions_asked += 1
-                    _run_cmd(["tk", "add-note", params.ticket_id,
-                              f"{label}: sub-agent asked questions (round {questions_asked}/{allow_questions})"], timeout=5)
                     await _notify_pipeline(f"❓ {label}: answering sub-agent questions ({questions_asked}/{allow_questions})")
 
                     # Build parent context to answer questions
@@ -3039,15 +3084,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return rc, out, err
             combined = f"{out} {err}"
             if any(m in combined for m in _HARD_ERRORS):
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"{label}: hard error (attempt {attempt}) — {(err or out)[:200]}"], timeout=5)
                 return rc, out, err  # non-retryable
             if attempt < _MAX_RETRIES:
                 next_timeout = base_timeout * (attempt + 1)
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"{label}: attempt {attempt}/{_MAX_RETRIES} failed (exit {rc}) — retrying ({next_timeout}s timeout)"], timeout=5)
-        _run_cmd(["tk", "add-note", params.ticket_id,
-                  f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
     # ── Marvin CLI interface context for sub-agents ─────────────────────
@@ -3171,14 +3210,30 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         # Ticket tracking instructions
         ticket_id = params.ticket_id
         parts.append(
-            "TICKET TRACKING (use the tk tool):\n"
-            f"- Parent pipeline ticket: {ticket_id}\n"
-            "- Create an epic for each major phase of work: tk(args='create \"Phase name\" -t epic --parent {parent_id}')\n"
-            "- Create a task for each unit of work: tk(args='create \"Task description\" -t task --parent {epic_id}')\n"
-            "- Start tasks when you begin: tk(args='start {task_id}')\n"
-            "- Close tasks when done: tk(args='close {task_id}')\n"
-            "- Add notes for important findings: tk(args='add-note {task_id} \"note text\"')\n"
-            "- List tickets: tk(args='ls') or tk(args='show {id}')\n"
+            "TICKET TRACKING — use the tk tool (DO NOT edit .tickets/ files directly):\n"
+            f"Parent pipeline ticket: {ticket_id}\n\n"
+            "tk CLI usage:\n"
+            "  create [title] [options]  Create ticket, prints ID\n"
+            "    -d, --description       Description text\n"
+            "    -t, --type              Type: bug|feature|task|epic|chore [default: task]\n"
+            "    -p, --priority          Priority 0-4, 0=highest [default: 2]\n"
+            "    --parent                Parent ticket ID\n"
+            "    --tags                  Comma-separated tags\n"
+            "  start <id>               Set status to in_progress\n"
+            "  close <id>               Set status to closed\n"
+            "  status <id> <status>     Update status (open|in_progress|closed)\n"
+            "  dep <id> <dep-id>        Add dependency\n"
+            "  link <id> <id>           Link tickets together\n"
+            "  ls [--status=X]          List tickets\n"
+            "  show <id>                Display ticket\n"
+            "  add-note <id> [text]     Append timestamped note\n\n"
+            "How to use tickets in this pipeline:\n"
+            f"1. Create an EPIC for your phase: tk(args='create \"Phase: X\" -t epic --parent {ticket_id}')\n"
+            "2. Create TASKs under the epic for each unit of work: tk(args='create \"Write tests for API\" -t task --parent EPIC_ID')\n"
+            "3. Start tasks when you begin: tk(args='start TASK_ID')\n"
+            "4. Add notes for findings/decisions: tk(args='add-note TASK_ID \"Found 3 issues\"')\n"
+            "5. Close tasks when done: tk(args='close TASK_ID')\n"
+            "6. Close the epic when all tasks are done: tk(args='close EPIC_ID')\n"
         )
 
         # Mandatory testing policy — injected into EVERY sub-agent prompt
@@ -3256,8 +3311,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         _MAX_SPEC_REVIEW_ROUNDS = 2
         for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Spec review: {doc_label} (round {review_round})"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
 
             rc, rev_out, rev_err = await _run_sub_with_retry(
@@ -3265,8 +3318,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 label=f"Spec review: {doc_label} R{review_round}", readonly=True)
 
             if "SPEC_VERIFIED" in (rev_out or ""):
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Spec review clean: {doc_label} (round {review_round})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
                 break
 
@@ -3418,8 +3469,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             review_tasks.append(_run_sub_with_retry(
                 spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}", readonly=True))
 
-        _run_cmd(["tk", "add-note", params.ticket_id,
-                  f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔍 Code review: {phase_label} ({len(review_tasks)} reviewers)")
 
         _MAX_REVIEW_ROUNDS = 3
@@ -3437,8 +3486,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             if not all_findings:
                 summary = f"all {clean_count} reviewers passed"
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Review clean: {phase_label} (round {review_round}) — {summary}"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"✅ Review clean: {phase_label} (round {review_round}, {summary})")
                 break
 
@@ -3457,16 +3504,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
                 "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
             )
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Review round {review_round}: {len(all_findings)} reviewers found issues — dispatching fixer"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
 
             fix_rc, fix_out, fix_err = await _run_sub_with_retry(
                 fix_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
 
             if review_round >= _MAX_REVIEW_ROUNDS:
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Review complete: {phase_label} — {_MAX_REVIEW_ROUNDS} rounds exhausted"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Review: {phase_label} — max rounds reached")
                 break
 
@@ -3537,11 +3580,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _ntfy_override_topic = "-".join(_rng.sample(_words, 5))
         except Exception:
             _ntfy_override_topic = f"marvin-pipeline-{_rng.randint(10000, 99999)}"
-    _run_cmd(["tk", "add-note", params.ticket_id, f"ntfy topic: {_ntfy_override_topic}"], timeout=5, cwd=wd)
+
     await _notify_pipeline(f"📡 Pipeline notifications on: {_ntfy_override_topic}")
 
     if completed_phase:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Resuming pipeline from after phase {completed_phase}"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔄 Resuming pipeline from after phase {completed_phase}")
 
     # ── Phase 1a: Spec & UX Design ──────────────────────────────────────
@@ -3569,10 +3611,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         if _phase_done("1a") or (os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000):
             spec_size = os.path.getsize(spec_path) if os.path.isfile(spec_path) else 0
             ux_size = os.path.getsize(ux_path) if os.path.isfile(ux_path) else 0
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md ({spec_size}B) ux.md ({ux_size}B)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md ({spec_size}B) ux.md ({ux_size}B)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec + UX (2 parallel agents, {_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
             await _notify_pipeline("🎨 Phase 1a: Spec + UX design (2 parallel agents)")
 
             # Shared upstream injection
@@ -3666,7 +3706,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     f.write(sout)
                 await _notify_pipeline(f"✅ spec.md ready ({len(sout)} chars from stdout)")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: product spec failed (exit {spec_rc})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: product spec failed (exit {spec_rc})")
                 return f"🚫 Product spec failed (exit {spec_rc}, ticket {params.ticket_id}):\n{serr or sout}"
 
@@ -3679,7 +3718,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     f.write(ux_out)
                 await _notify_pipeline(f"✅ ux.md ready ({len(ux_out)} chars from stdout)")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: UX design failed (exit {ux_rc})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: UX design failed (exit {ux_rc})")
                 return f"🚫 UX design failed (exit {ux_rc}, ticket {params.ticket_id}):\n{ux_err or ux_out}"
 
@@ -3696,10 +3734,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         design_path = os.path.join(design_dir, "design.md")
         if _phase_done("1b") or (os.path.isfile(design_path) and os.path.getsize(design_path) > 1000):
             design_size = os.path.getsize(design_path) if os.path.isfile(design_path) else 0
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: SKIPPED — design.md exists ({design_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1b skipped — design.md exists ({design_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: Architecture & test plan ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
             await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
 
             try:
@@ -3771,17 +3807,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Architecture pass")
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
                 design_size = os.path.getsize(design_path)
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
             elif rc == 0 and dout:
                 with open(design_path, "w") as f:
                     f.write(dout)
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
                 return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
         _save_state("1b")
@@ -3794,12 +3825,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     design_path = os.path.join(wd, ".marvin", "design.md")
     if params.tdd:
         if _phase_done("2a"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 2a skipped — functional tests already written")
         elif not os.path.isfile(design_path):
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: Writing failing functional tests (parallel agents)"], timeout=5, cwd=wd)
             await _notify_pipeline("🧪 Phase 2a: Writing failing functional tests (parallel agents)")
 
             try:
@@ -3880,16 +3909,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 if rc != 0:
                     failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
             if len(failures) == len(test_results):
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
                 return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
             if failures:
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Functional test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
-
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Functional test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+                await _notify_pipeline(f"⚠️ {len(failures)}/{len(test_results)} test agents failed, continuing with partial results")
             await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
 
             # Code review of test quality
@@ -3900,10 +3923,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 2b: Integration tests (TDD, optional) ──────────────────────
     if params.tdd:
         if _phase_done("2b"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 2b skipped — integration tests already written")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: Writing failing integration tests"], timeout=5, cwd=wd)
             await _notify_pipeline("🧪 Phase 2b: Writing failing integration tests")
 
             integ_prompt = (
@@ -3942,10 +3963,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, out, err = await _run_sub_with_retry(
                 integ_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Integration test agent")
             if rc != 0:
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
-            else:
-                _run_cmd(["tk", "add-note", params.ticket_id, "Integration tests written"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"⚠️ Integration test agent failed (exit {rc})")
             await _notify_pipeline(f"✅ Phase 2b complete — integration tests written")
 
             # Code review of integration tests
@@ -3955,11 +3973,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     if _phase_done("3"):
-        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 3: SKIPPED — already completed"], timeout=5, cwd=wd)
         await _notify_pipeline("⏭️ Phase 3 skipped — implementation already done")
         impl_out = "(resumed — implementation was already complete)"
     else:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({_AGENT_MODELS['codex']})"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔨 Phase 3: Implementation started ({_AGENT_MODELS['codex']})")
 
         impl_prompt = params.prompt
@@ -4010,11 +4026,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Implementation")
         if rc != 0:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
             return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
-        _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5, cwd=wd)
         await _notify_pipeline("✅ Phase 3 complete — implementation finished")
 
         # Code review after implementation
@@ -4025,10 +4039,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 4a: Debug loop — unit + integration tests (TDD green) ─────
     if params.tdd:
         if _phase_done("4a"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 4a skipped — debug loop already done")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: Debug loop — running tests until green"], timeout=5, cwd=wd)
             await _notify_pipeline("🐛 Phase 4a: Debug loop — running tests until green")
 
             max_debug_rounds = int(os.environ.get("MARVIN_DEBUG_ROUNDS", "50"))
@@ -4051,7 +4063,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     _pt_text = ""
 
                 if _pt_rc == 0 and "passed" in _pt_text:
-                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass (pytest exit 0) after {debug_round} debug round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
                     break
 
@@ -4080,13 +4091,11 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     debug_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"Debug round {debug_round}")
 
                 if "ALL_TESTS_PASS" in (dbg_out or ""):
-                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
                     break
                 if rc != 0:
-                    _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5, cwd=wd)
+                    await _notify_pipeline(f"⚠️ Debug round {debug_round} failed (exit {rc})")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 4a: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
 
             # Code review after debug loop
@@ -4097,10 +4106,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 4b: End-to-end smoke test ──────────────────────────────────
     if params.tdd:
         if _phase_done("4b"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 4b skipped — e2e testing already done")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: End-to-end smoke test — verifying real app works"], timeout=5, cwd=wd)
             await _notify_pipeline("🔍 Phase 4b: End-to-end smoke test")
 
             max_e2e_rounds = int(os.environ.get("MARVIN_E2E_ROUNDS", "10"))
@@ -4144,23 +4151,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     e2e_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"E2E round {e2e_round}")
 
                 if "E2E_SMOKE_PASS" in (e2e_out or ""):
-                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 E2E smoke test passed after {e2e_round} round(s)!")
                     break
                 if rc != 0:
-                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E round {e2e_round} failed (exit {rc})"], timeout=5, cwd=wd)
+                    await _notify_pipeline(f"⚠️ E2E round {e2e_round} failed (exit {rc})")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test exhausted ({max_e2e_rounds} rounds)"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 4b: E2E smoke test exhausted ({max_e2e_rounds} rounds)")
         _save_state("4b")
 
     # ── Phase 5: Adversarial QA ──────────────────────────────────────────
     if params.tdd:
         if _phase_done("5"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 5 skipped — adversarial QA already done")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: Adversarial QA — battle-testing every feature"], timeout=5, cwd=wd)
             await _notify_pipeline("⚔️ Phase 5: Adversarial QA — battle-testing every feature")
 
             # Read spec to build QA areas
@@ -4286,13 +4289,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         all_findings.append(f"=== {qa['area']} ===\n{qa_text}")
 
                 summary = f"{len(clean_areas)} clean, {len(all_findings)} with issues"
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"QA round {qa_round}: {summary}"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚔️ QA round {qa_round} results: {summary}")
 
                 if not all_findings:
-                    _run_cmd(["tk", "add-note", params.ticket_id,
-                              f"QA passed — all {len(qa_areas)} areas clean after round {qa_round}"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"✅ Phase 5: All QA areas clean after round {qa_round}!")
                     break
 
@@ -4312,18 +4311,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     fix_prompt, _AGENT_MODELS["plan"], base_timeout=1800,
                     label=f"QA-fix-round-{qa_round}")
 
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"QA fix round {qa_round} complete (exit {rc})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"🔧 QA fix round {qa_round} complete")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"QA exhausted ({max_qa_rounds} rounds) — some issues may remain"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 5: QA exhausted ({max_qa_rounds} rounds)")
 
         _save_state("5")
 
     # ── Done ─────────────────────────────────────────────────────────────
-    _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5, cwd=wd)
     _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=wd)
 
     phases = ["Implementation"]
@@ -8345,7 +8339,6 @@ class TicketNoteParams(BaseModel):
     "blockers, or any important information about the task."
 )
 async def ticket_add_note(params: TicketNoteParams) -> str:
-    ok, out = _run_cmd(["tk", "add-note", params.ticket_id, params.note], timeout=5, cwd=wd)
     return out.strip() if ok else f"Failed: {out}"
 
 

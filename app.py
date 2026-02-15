@@ -10720,7 +10720,7 @@ async def _run_non_interactive():
 
     # --design-first: bypass LLM orchestration, call launch_agent directly
     if design_first:
-        ok, out = _run_cmd(["tk", "create", prompt_text[:80]], timeout=5, cwd=_coding_working_dir)
+        ok, out = _run_cmd(["tk", "create", prompt_text], timeout=5, cwd=_coding_working_dir)
         ticket_id = out.strip().split()[-1] if ok and out else "no-ticket"
         params = LaunchAgentParams(
             ticket_id=ticket_id,

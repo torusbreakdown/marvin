@@ -2115,9 +2115,8 @@ class LaunchAgentParams(BaseModel):
     model: str = Field(
         default="auto",
         description=(
-            "Model to use: 'auto' (assess task), 'codex' (gpt-5.3-codex, cheap local edits), "
-            "'opus' (claude-opus-4.6, complex multi-file), 'sonnet' (claude-sonnet-4.5, docs), "
-            "'haiku' (claude-haiku-4.5, summaries/formatting)"
+            "Model to use: 'auto' (assess task), 'codex' (gpt-5.3-codex, general coding), "
+            "'opus' (claude-opus-4.6, complex multi-file / architecture)"
         )
     )
     working_dir: str | None = Field(default=None, description="Working directory (defaults to current coding dir)")
@@ -2538,24 +2537,16 @@ async def run_command(params: RunCommandParams) -> str:
 _AGENT_MODELS = {
     "codex": "gpt-5.3-codex",
     "opus": "claude-opus-4.6",
-    "sonnet": "claude-sonnet-4.5",
-    "haiku": "claude-haiku-4.5",
 }
 
 
 def _auto_select_model(prompt: str) -> str:
-    """Heuristic model selection based on task description."""
+    """Binary model selection: opus for complex/multi-file work, codex for everything else."""
     p = prompt.lower()
-    # Summaries, formatting, simple tasks
-    if any(w in p for w in ("summarize", "summary", "format", "lint", "rename variable", "fix typo", "fix whitespace")):
-        return "haiku"
-    # Documentation
-    if any(w in p for w in ("document", "readme", "docstring", "jsdoc", "comment")):
-        return "sonnet"
-    # Complex multi-file operations
+    # Complex multi-file operations get opus
     if any(w in p for w in ("refactor", "architect", "redesign", "multi-file", "across files", "migrate")):
         return "opus"
-    # Default: cheap local edits
+    # Everything else gets codex (no haiku/sonnet — sub-agents touching code need at least codex)
     return "codex"
 
 
@@ -2567,7 +2558,7 @@ def _auto_select_model(prompt: str) -> str:
         "The sub-agent runs as a separate process with its own context. "
         "Recursion depth is limited to 1 (sub-agents cannot launch further sub-agents). "
         "Model is auto-selected based on task complexity, or specify manually: "
-        "codex (cheap edits), opus (complex multi-file), sonnet (docs), haiku (summaries)."
+        "codex (general coding), opus (complex multi-file / architecture)."
     )
 )
 async def launch_agent(params: LaunchAgentParams) -> str:
@@ -2602,7 +2593,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         tier = params.model
     model_name = _AGENT_MODELS.get(tier)
     if not model_name:
-        return f"Unknown model tier '{tier}'. Use: codex, opus, sonnet, haiku, or auto."
+        return f"Unknown model tier '{tier}'. Use: codex, opus, or auto."
 
     wd = params.working_dir or _coding_working_dir
     if not wd:
@@ -2851,7 +2842,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             spec_prompt += (
                 "Save the spec as .marvin/spec.md using create_file. "
                 "Be exhaustive — every screen, every interaction, every edge case. "
-                "The architecture pass will read this spec to design the technical solution."
+                "The architecture pass will read this spec to design the technical solution.\n\n"
+                "VISUAL DESIGN QUALITY: The style guide must produce a POLISHED, modern UI — not "
+                "just functional. Specify exact CSS values: subtle gradients, box-shadows with "
+                "multiple layers, smooth transitions (200-300ms ease), hover/focus micro-interactions, "
+                "proper whitespace rhythm, and typographic hierarchy. Think Linear, Vercel, or Raycast "
+                "level polish — clean, spacious, with purposeful color accents. Avoid flat/brutalist "
+                "defaults that look like unstyled HTML. Include specific border-radius values, "
+                "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
             rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
@@ -3104,7 +3102,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             impl_prompt += (
                 "  - .marvin/design.md (architecture & implementation plan)\n\n"
                 "Follow the architecture, file structure, and UX design specified in those "
-                "documents exactly. Do not deviate unless you encounter a technical impossibility."
+                "documents exactly. Do not deviate unless you encounter a technical impossibility.\n\n"
+                "VISUAL POLISH IS CRITICAL: The CSS must look professional and modern — not like "
+                "unstyled HTML with colors slapped on. Follow the spec's style guide exactly: "
+                "use the specified box-shadows, border-radius, transitions, hover states, and "
+                "spacing scale. Every interactive element needs a visible hover/focus transition. "
+                "Typography must have clear hierarchy. Whitespace should feel intentional and "
+                "spacious. If the spec defines gradients, backdrop-filters, or animations, "
+                "implement them. The bar is Linear/Vercel/Raycast-level fit and finish."
             )
         if params.tdd:
             impl_prompt += (
@@ -5986,7 +5991,8 @@ def _build_system_message() -> str:
             "use launch_agent with design_first=true and tdd=true. This runs a 5-phase pipeline: "
             "(1a) Spec & UX design pass, (1b) Architecture & test plan pass, (2) parallel test-writing "
             "agents, (3) implementation, (4) debug loop until tests pass. All in claude-opus-4.6 for "
-            "design, gpt-5.3-codex for tests and debug.\n"
+            "design, gpt-5.3-codex for tests/implementation/debug. Model tiers: opus (complex "
+            "multi-file) or codex (everything else) — no haiku/sonnet for code-touching agents.\n"
         )
         if _coding_working_dir:
             base += f"Working directory: {_coding_working_dir}\n"

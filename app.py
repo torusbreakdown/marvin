@@ -2717,6 +2717,7 @@ async def install_packages(params: InstallPackagesParams) -> str:
 _AGENT_MODELS = {
     "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),
     "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),
+    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6")),
 }
 
 
@@ -3361,7 +3362,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md exists ({spec_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md exists ({spec_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec & UX design ({_AGENT_MODELS['opus']})"], timeout=5, cwd=wd)
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec & UX design ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
             await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
             spec_prompt = (
                 "You are a senior product designer. Your job is to produce a detailed "
@@ -3394,7 +3395,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
-            rc, sout, serr = await _run_sub_with_retry(spec_prompt, _AGENT_MODELS["opus"], base_timeout=1200, label="Spec/UX pass")
+            rc, sout, serr = await _run_sub_with_retry(spec_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Spec/UX pass")
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
                 spec_size = os.path.getsize(spec_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -3419,7 +3420,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: SKIPPED — design.md exists ({design_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1b skipped — design.md exists ({design_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: Architecture & test plan ({_AGENT_MODELS['opus']})"], timeout=5, cwd=wd)
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: Architecture & test plan ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
             await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
 
             try:
@@ -3481,7 +3482,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "agents can write a complete test suite with full coverage from it alone."
             )
 
-            rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["opus"], base_timeout=1200, label="Architecture pass")
+            rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Architecture pass")
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
                 design_size = os.path.getsize(design_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,

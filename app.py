@@ -3007,24 +3007,57 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         return rc, out, err
 
     # ── Marvin CLI interface context for sub-agents ─────────────────────
+    def _upstream_summary() -> str:
+        """Build an inline summary of all upstream reference docs.
+        Read each file in .marvin/upstream/ and produce a condensed summary
+        so sub-agents get the critical facts without having to read the full files."""
+        upstream_dir = os.path.join(wd, ".marvin", "upstream")
+        if not os.path.isdir(upstream_dir):
+            return ""
+        summaries = []
+        for f in sorted(os.listdir(upstream_dir)):
+            fp = os.path.join(upstream_dir, f)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                content = open(fp).read()
+                # Include first 3000 chars of each upstream doc inline
+                summaries.append(
+                    f"--- .marvin/upstream/{f} ({len(content)} bytes) ---\n"
+                    + content[:3000]
+                    + ("\n[... truncated — read full file for complete details]\n" if len(content) > 3000 else "\n")
+                )
+            except Exception:
+                pass
+        if not summaries:
+            return ""
+        return (
+            "UPSTREAM REFERENCE DOCUMENTS (do not modify these files):\n"
+            "These are the authoritative integration specs provided by the upstream project.\n"
+            "Your generated spec/design MUST be consistent with these documents.\n"
+            "If there is a conflict, the UPSTREAM documents win.\n\n"
+            + "\n".join(summaries)
+        )
+
     def _marvin_interface_context() -> str:
-        """Point sub-agents to the API spec for how bridge.py should invoke Marvin."""
-        spec_path = os.path.join(wd, ".marvin", "upstream", "MARVIN_API_SPEC.md")
-        if os.path.isfile(spec_path):
-            return (
-                "\n\nMARVIN CLI INTERFACE — READ .marvin/upstream/MARVIN_API_SPEC.md for the full contract.\n"
-                "Key facts for the bridge:\n"
-                "  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt\n"
-                "  - Marvin streams its response to stdout (the bridge reads via async pipe)\n"
-                "  - IMPORTANT: Each invocation is stateless — the bridge MUST include conversation\n"
-                "    history in the prompt (last 20 messages, formatted as 'User: ... / Marvin: ...')\n"
-                "  - stdout chunks have trailing \\n — ALWAYS strip with .rstrip('\\n')\n"
-                "  - stderr has cost data as MARVIN_COST:{json} on the last line\n"
-                "  - Marvin handles preferences, tools, and profile state internally\n"
-                "  - The bridge only manages: conversation storage, history in prompts, SSE to browser\n"
-                "See Sections 3 and 14 of MARVIN_API_SPEC.md for code examples and architecture.\n"
-            )
-        return ""
+        """Point sub-agents to upstream specs for integration details."""
+        upstream_dir = os.path.join(wd, ".marvin", "upstream")
+        if not os.path.isdir(upstream_dir):
+            return ""
+        # List upstream files and remind agents to read them
+        upstream_files = []
+        for f in sorted(os.listdir(upstream_dir)):
+            fp = os.path.join(upstream_dir, f)
+            if os.path.isfile(fp):
+                upstream_files.append(f"  .marvin/upstream/{f} ({os.path.getsize(fp)} bytes)")
+        if not upstream_files:
+            return ""
+        return (
+            "\n\nUPSTREAM INTEGRATION CONTRACT — read ALL files in .marvin/upstream/ for the "
+            "full integration spec. These are the authoritative reference for how to integrate "
+            "with the upstream system. Your implementation MUST match these specs exactly.\n"
+            "Files:\n" + "\n".join(upstream_files) + "\n"
+        )
 
     def _project_context() -> str:
         """Build a rich project context block from spec/design docs and file listing.
@@ -3076,41 +3109,18 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         else:
             parts.append("PROJECT FILES: (none yet — you are creating the project from scratch)\n")
 
-        # Marvin upstream source — the AI assistant this project integrates with
-        upstream_dir = os.path.join(wd, ".marvin", "upstream")
-        upstream_files = []
-        if os.path.isdir(upstream_dir):
-            for f in sorted(os.listdir(upstream_dir)):
-                fp = os.path.join(upstream_dir, f)
-                if os.path.isfile(fp):
-                    try:
-                        upstream_files.append(f"  .marvin/upstream/{f} ({os.path.getsize(fp)} bytes)")
-                    except Exception:
-                        pass
-        if upstream_files:
-            parts.append(
-                "MARVIN UPSTREAM REFERENCE (do not modify these files):\n"
-                + "\n".join(upstream_files) + "\n\n"
-                "READ .marvin/upstream/MARVIN_API_SPEC.md FIRST — it is the authoritative\n"
-                "reference for how to integrate with Marvin. It documents:\n"
-                "  - The non-interactive CLI contract (input/output/streaming/cost)\n"
-                "  - What state the bridge must manage (conversation history) vs what Marvin handles\n"
-                "  - The subprocess invocation pattern with code examples\n"
-                "  - The stdout streaming format (raw text, strip trailing \\n from each chunk)\n"
-                "  - The stderr cost data format (MARVIN_COST:{json})\n"
-                "  - All 70+ tools (for reference only — Marvin handles tool calling internally)\n"
-                "  - The recommended bridge architecture\n"
-                "README.md and REFERENCE.md provide user-facing docs and CLI reference.\n"
-            )
+        # Upstream reference docs — inline summaries so agents get critical facts
+        upstream_summary = _upstream_summary()
+        if upstream_summary:
+            parts.append(upstream_summary)
 
         # Mandatory testing policy — injected into EVERY sub-agent prompt
         parts.append(
             "MANDATORY TESTING POLICY (applies to ALL agents, ALL phases):\n"
             "- DO NOT mock, stub, fake, or substitute ANYTHING that exists on this system.\n"
-            "- The Marvin CLI is installed locally at /home/kmd/copilot-assistant-thing/app.py. "
-            "It runs as a local subprocess. Tests MUST call the REAL Marvin CLI via the bridge. "
-            "Do NOT substitute it with echo commands, fake scripts, or test harnesses.\n"
-            "- Do NOT create echo_bridge, fake_bridge, test_bridge, or mock_bridge fixtures.\n"
+            "- If the upstream system is installed locally, tests MUST call the REAL binary/CLI "
+            "via the bridge. Do NOT substitute it with echo commands, fake scripts, or test harnesses.\n"
+            "- Do NOT create fake/mock/echo bridge fixtures.\n"
             "- Do NOT add a 'command' parameter to the bridge for test substitution.\n"
             "- Use REAL databases, REAL HTTP clients, REAL file I/O, REAL subprocesses.\n"
             "- The ONLY thing you may mock is interactive user input (keyboard/mouse).\n"
@@ -3118,6 +3128,103 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         )
 
         return "\n".join(parts)
+
+    # ── Spec/design review helper ────────────────────────────────────
+    async def _spec_design_review(doc_path: str, doc_label: str) -> None:
+        """Review a generated spec or design doc against upstream references.
+
+        Runs a readonly reviewer (opus tier) that checks the generated document
+        for consistency with upstream reference docs. If issues are found,
+        dispatches a fixer (plan tier) to update the document, then re-reviews.
+        Up to 2 rounds of review/fix.
+        """
+        if not os.path.isfile(doc_path):
+            return
+
+        upstream_dir = os.path.join(wd, ".marvin", "upstream")
+        upstream_files = []
+        if os.path.isdir(upstream_dir):
+            for f in sorted(os.listdir(upstream_dir)):
+                fp = os.path.join(upstream_dir, f)
+                if os.path.isfile(fp):
+                    upstream_files.append(f".marvin/upstream/{f}")
+        if not upstream_files:
+            return  # nothing to verify against
+
+        rel_doc = os.path.relpath(doc_path, wd)
+        # When reviewing design.md, also verify it against spec.md
+        spec_path = os.path.join(wd, ".marvin", "spec.md")
+        also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
+        review_prompt = (
+            f"You are a SPEC VERIFICATION REVIEWER. Your job is to verify that the "
+            f"generated document '{rel_doc}' is consistent with the upstream reference "
+            f"documents"
+            + (" and the product spec (.marvin/spec.md)" if also_check_spec else "")
+            + ".\n\n"
+            "STEPS:\n"
+            f"1. Read {rel_doc} completely with read_file.\n"
+            "2. Read ALL upstream reference documents:\n"
+            + "\n".join(f"   - {f}" for f in upstream_files) + "\n"
+            + (f"3. Read .marvin/spec.md — the generated product spec.\n" if also_check_spec else "")
+            + f"{'4' if also_check_spec else '3'}. Cross-check EVERY claim in the generated document against the upstream "
+            "   references"
+            + (" and the spec" if also_check_spec else "")
+            + ". Look for:\n"
+            "   - **Contradictions** — the generated doc says X but upstream says Y\n"
+            "   - **Wrong labels/names** — e.g. using 'Assistant:' when upstream says 'Marvin:'\n"
+            "   - **Missing critical details** — upstream specifies something important that "
+            "     the generated doc ignores or gets wrong\n"
+            "   - **Format mismatches** — streaming formats, event names, field names, etc.\n"
+            "   - **Invented behavior** — the generated doc describes behavior not in upstream\n"
+            "   - **Missing newline/whitespace handling** — upstream often specifies exact "
+            "     string processing rules\n"
+            + ("   - **Spec inconsistency** — the design contradicts or omits requirements from spec.md\n" if also_check_spec else "")
+            + "\n"
+            "OUTPUT FORMAT — for each finding:\n"
+            "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
+            "SEVERITY: critical/major/minor\n\n"
+            "Do NOT edit any files. Do NOT run commands. Report only.\n"
+            "If everything is consistent, respond with 'SPEC_VERIFIED'.\n"
+        )
+
+        _MAX_SPEC_REVIEW_ROUNDS = 2
+        for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Spec review: {doc_label} (round {review_round})"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
+
+            rc, rev_out, rev_err = await _run_sub_with_retry(
+                review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
+                label=f"Spec review: {doc_label} R{review_round}", readonly=True)
+
+            if "SPEC_VERIFIED" in (rev_out or ""):
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Spec review clean: {doc_label} (round {review_round})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
+                break
+
+            # Dispatch a fixer agent (plan tier) to update the document
+            fix_prompt = (
+                _project_context() + "\n\n"
+                f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
+                "The following inconsistencies were found between the generated document "
+                "and the upstream reference specs. Fix ALL critical and major issues by "
+                "updating the generated document.\n\n"
+                f"{rev_out or '(no output)'}\n\n"
+                "INSTRUCTIONS:\n"
+                f"1. Read {rel_doc} and ALL upstream files in .marvin/upstream/\n"
+                "2. Fix each SPEC_MISMATCH by updating the generated document to match upstream\n"
+                "3. Use apply_patch or edit the file to make corrections\n"
+                "4. Do NOT change upstream reference files — only update the generated document\n"
+                "5. Preserve the overall structure and completeness of the document\n"
+            )
+            await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
+            await _run_sub_with_retry(
+                fix_prompt, _AGENT_MODELS["plan"], base_timeout=900,
+                label=f"Spec fixer: {doc_label} R{review_round}")
+
+            if review_round >= _MAX_SPEC_REVIEW_ROUNDS:
+                await _notify_pipeline(f"⚠️ Spec review: {doc_label} — max rounds reached")
 
     # ── Code review helper ────────────────────────────────────────────
     async def _code_review(phase_label: str, focus: str = "all") -> None:
@@ -3412,6 +3519,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "relationships from the user's perspective.\n\n"
                 f"TASK:\n{params.prompt}\n\n"
             )
+            # Inject upstream reference summaries so the spec agent has the integration contract
+            upstream_summary = _upstream_summary()
+            if upstream_summary:
+                spec_prompt += (
+                    "UPSTREAM INTEGRATION SPECS:\n"
+                    "The following upstream reference documents define the integration contract "
+                    "for this project. READ THEM CAREFULLY with read_file before writing the spec. "
+                    "Your spec MUST be consistent with these documents — use the exact formats, "
+                    "field names, labels, and patterns they specify. If the upstream spec says to "
+                    "use specific labels (e.g. 'User:' / 'Marvin:'), your spec must use those exact "
+                    "labels. If it specifies a streaming format, your spec must match it.\n\n"
+                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the spec.\n\n"
+                )
             if instructions_ctx:
                 spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
             spec_prompt += (
@@ -3444,6 +3564,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
                 return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
         _save_state("1a")
+
+        # Phase 1a review: verify spec against upstream references
+        if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
+            await _spec_design_review(spec_path, "spec.md")
 
         # Phase 1b: Architecture & Test Plan — skip if design.md already exists
         design_path = os.path.join(design_dir, "design.md")
@@ -3488,22 +3612,28 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "(SQLite temp files), REAL HTTP clients (httpx.AsyncClient), REAL file I/O, "
                 "REAL subprocess calls. The ONLY things that should be mocked are: user keyboard "
                 "input.\n"
-                "   - The Marvin CLI (app.py) is installed LOCALLY at "
-                "/home/kmd/copilot-assistant-thing/app.py. It runs "
-                "locally and streams to stdout. Tests MUST call the real Marvin subprocess "
-                "via the bridge. Do NOT substitute it with echo, do NOT create fake bridge "
-                "commands, do NOT use 'echo_bridge' fixtures. Test the REAL bridge with the "
-                "REAL Marvin CLI.\n"
+                "   - If there is a locally installed upstream CLI/binary, tests MUST call the "
+                "REAL subprocess via the bridge. Do NOT substitute with echo commands, fake scripts, "
+                "or test harnesses.\n"
                 "   - NEVER plan to mock internal modules, the database layer, route handlers, "
                 "the bridge, or anything in .marvin/upstream/.\n"
                 "   - Do NOT use the word 'mock' in test descriptions.\n"
-                "   - Do NOT create 'echo_bridge', 'fake_bridge', or 'test_bridge' fixtures.\n"
-                "   - Do NOT design the bridge with a 'command' parameter for substitution. "
-                "The bridge calls Marvin. Period.\n"
+                "   - Do NOT create fake/mock/echo bridge fixtures.\n"
+                "   - Do NOT design the bridge with a 'command' parameter for substitution.\n"
                 "   - Tests must verify OBSERVABLE BEHAVIOR (HTTP responses, database state, "
                 "rendered output) — not internal implementation details.\n"
                 "   - Integration tests should test real cross-module interactions.\n\n"
             )
+            # Inject upstream reference summaries for the architect
+            upstream_summary = _upstream_summary()
+            if upstream_summary:
+                arch_prompt += (
+                    "UPSTREAM INTEGRATION SPECS:\n"
+                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the design. "
+                    "Your architecture MUST be consistent with the upstream integration contract. "
+                    "Pay special attention to: subprocess invocation patterns, streaming formats, "
+                    "data formats, labels, and string processing rules.\n\n"
+                )
             if instructions_ctx:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
             arch_prompt += (
@@ -3531,6 +3661,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
                 return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
         _save_state("1b")
+
+        # Phase 1b review: verify design against upstream references AND spec
+        if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
+            await _spec_design_review(design_path, "design.md")
 
     # ── Phase 2a: Functional tests (TDD, optional) ───────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")

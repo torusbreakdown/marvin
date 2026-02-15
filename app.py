@@ -2718,6 +2718,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         except ValueError:
             return False
 
+    # Auto-generate an ntfy topic for this pipeline run if none was provided
+    if not _ntfy_override_topic:
+        import random as _rng
+        _dict_path = "/usr/share/dict/words"
+        try:
+            with open(_dict_path) as _f:
+                _words = [w.strip().lower() for w in _f if w.strip().isalpha() and 4 <= len(w.strip()) <= 10]
+            _ntfy_override_topic = "-".join(_rng.sample(_words, 5))
+        except Exception:
+            _ntfy_override_topic = f"marvin-pipeline-{_rng.randint(10000, 99999)}"
+    _run_cmd(["tk", "add-note", params.ticket_id, f"ntfy topic: {_ntfy_override_topic}"], timeout=5)
+    await _notify_pipeline(f"📡 Pipeline notifications on: {_ntfy_override_topic}")
+
     if completed_phase:
         _run_cmd(["tk", "add-note", params.ticket_id, f"Resuming pipeline from after phase {completed_phase}"], timeout=5)
         await _notify_pipeline(f"🔄 Resuming pipeline from after phase {completed_phase}")

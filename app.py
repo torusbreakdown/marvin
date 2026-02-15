@@ -9399,8 +9399,9 @@ async def _run_non_interactive():
                 "tools": all_tools,
                 "system_message": {"content": system_msg},
             }
-            # Only set reasoning_effort for models that support it
-            if "codex" not in sdk_model:
+            # Only set reasoning_effort for models that support it (GPT family)
+            _supports_effort = sdk_model.startswith("gpt-") and "codex" not in sdk_model
+            if _supports_effort:
                 session_opts["reasoning_effort"] = "high" if _coding_mode else "low"
             session = await client.create_session(session_opts)
             session.on(_on_event)

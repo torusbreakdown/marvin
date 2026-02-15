@@ -69,6 +69,7 @@ interactive experience must either (a) let Marvin manage its own state files, or
 python app.py              # curses TUI (default)
 python app.py --plain      # readline-based plain text
 python app.py --curses     # explicitly curses
+python app.py --provider gemini   # use specific LLM provider
 ```
 
 Full-featured mode. Loads chat history, preferences, saved places. Maintains
@@ -114,14 +115,23 @@ This is the most important section for web UI / bridge integrators.
 | `--working-dir PATH` | No | Sets coding working directory |
 | `--design-first` | No | Triggers TDD pipeline instead of chat |
 | `--ntfy TOPIC` | No | Push notification topic for alerts |
+| `--provider NAME` | No | LLM provider: `copilot`, `gemini`, `groq`, `ollama`, `openai` |
 
 ### 3.2 What Non-Interactive Mode Does NOT Do
 
-- ❌ Does NOT load conversation history from `chat_log.json`
+- ❌ Does NOT seed conversation history into the LLM message array (the way
+  interactive mode does with the last 20 entries as user/assistant messages)
 - ❌ Does NOT persist the conversation to `chat_log.json`
 - ❌ Does NOT display usage summaries
 - ❌ Does NOT handle slash commands (`!code`, `!shell`, etc.)
 - ❌ Does NOT support multi-turn conversation within a single invocation
+
+> **Note**: Non-interactive mode DOES load compact conversation history into the
+> *system message* (via `_compact_history()` — last 20 entries, truncated to 200
+> chars each). This provides some background context about what the user has been
+> asking about recently, but it is NOT the same as full conversation seeding. The
+> bridge should still include full recent messages in the prompt for proper
+> conversational continuity.
 
 ### 3.3 What Non-Interactive Mode DOES Do
 
@@ -136,9 +146,12 @@ This is the most important section for web UI / bridge integrators.
 
 ### 3.4 The Bridge's Responsibility
 
-**Because non-interactive mode is stateless, the bridge MUST provide conversation
-context in the prompt itself.** Marvin's interactive mode loads the last 20 chat
-log entries into the conversation. The bridge must do the equivalent:
+**Because non-interactive mode only has compact history in the system message
+(truncated to 200 chars per entry), the bridge SHOULD provide full conversation
+context in the prompt for best results.** The compact history gives Marvin
+background awareness of recent topics, but for proper conversational flow — 
+follow-ups, corrections, multi-step tasks — the bridge should include the full
+last 20 messages:
 
 ```python
 # Bridge builds the prompt with history context
@@ -152,11 +165,11 @@ if conversation_history:
 prompt += user_message
 ```
 
-**Why not just pass the raw message?** Without history, Marvin has no context
-about what was discussed previously. It can't follow up on earlier topics,
-remember user corrections, or maintain conversational coherence. The interactive
-mode seeds 20 messages of history into each LLM call — the bridge must replicate
-this.
+**Why include history in the prompt?** While Marvin embeds compact history in
+the system message, those entries are truncated to 200 chars each — too short
+for follow-up questions like "tell me more about that second option" or "use
+the recipe from earlier." Full history in the prompt gives Marvin the detail
+needed for natural conversation.
 
 ### 3.5 Subprocess Invocation Pattern
 
@@ -330,11 +343,11 @@ Here             ← chunk 1
 - There is NO structured framing (no JSON, no SSE, no length prefixes)
 - The stream ends when the process exits
 
-**Tool call output**: When Marvin calls tools internally, only the final
-synthesized response appears on stdout. The tool call details (names, arguments,
-results) are NOT emitted to stdout — they're internal to the LLM conversation.
-The bridge will see tools firing as a pause in token output (the LLM stops
-streaming while tools execute, then resumes with the response).
+**Tool call output**: When Marvin calls tools internally, tool names are printed
+to stdout as `  🔧 tool1, tool2, tool3` before each tool execution round. The
+final synthesized response also streams to stdout. The bridge will see these
+tool-call lines interleaved with response text — they can be detected by the
+`🔧` prefix and optionally converted to "thinking" indicators for the UI.
 
 ---
 
@@ -403,12 +416,13 @@ as prompts.
 
 | Command | Description |
 |---------|-------------|
-| `!shell` | Toggle shell mode (commands execute as bash, not sent to LLM) |
+| `!shell` / `!sh` | Toggle shell mode (commands execute as bash, not sent to LLM) |
 | `!code` | Toggle coding mode (more tool rounds, higher context cap) |
 | `!voice` | Toggle continuous voice input mode |
 | `!v [N]` | One-shot voice recording (N seconds, default 5) |
 | `!blender` | Check Blender MCP connection status |
 | `!pro PROMPT` | Force Copilot SDK for one query |
+| `!COMMAND` | Execute COMMAND as a shell command (any `!` prefix except `!pro`) |
 | `preferences` | Open preferences.yaml in editor |
 | `profiles` | List available profiles |
 | `usage` | Show cost summary |
@@ -470,6 +484,8 @@ as prompts.
 | `MARVIN_E2E_ROUNDS` | `10` | Max end-to-end test iterations |
 | `MARVIN_QA_ROUNDS` | `3` | Max QA fix iterations |
 | `MARVIN_SUBAGENT_LOG` | (none) | Path for JSONL tool call logging |
+| `WHISPER_MODEL` | `whisper-large-v3` | Groq Whisper model for speech-to-text |
+| `EDITOR` | `nano` | Editor for opening preferences |
 
 ### External Service Keys
 
@@ -611,8 +627,16 @@ reference only.
 - `blender_get_scene/get_object/create_object/modify_object/delete_object`
 - `blender_set_material/execute_code/screenshot`
 
-### Agent Dispatch
+### Agent Dispatch & Tickets
 - `launch_agent(ticket_id, prompt, model?, working_dir?, design_first?, tdd?)` — Spawn sub-agent
+- `create_ticket(title)` — Create a task ticket
+- `ticket_add_dep(ticket_id, depends_on)` — Add dependency between tickets
+- `ticket_start(ticket_id)` — Mark ticket in-progress
+- `ticket_close(ticket_id)` — Close a ticket
+- `ticket_add_note(ticket_id, note)` — Add note to ticket
+- `ticket_show(ticket_id)` — Show ticket details
+- `ticket_list()` — List all tickets
+- `ticket_dep_tree()` — Show ticket dependency tree
 
 ---
 
@@ -754,17 +778,23 @@ Every prompt — interactive or non-interactive — includes this context automa
 3. **Active profile name** (always): "Active profile: main"
 4. **Saved places** (always): All bookmarked locations with labels, addresses,
    and coordinates — so the LLM can resolve references like "near home"
-5. **Coding mode instructions** (when coding): Working directory, tool rules,
+5. **Compact conversation history** (always): Last 20 chat log entries
+   (truncated to 200 chars each) embedded in the system message. This gives
+   background context about recent topics. Present in BOTH interactive and
+   non-interactive modes.
+6. **Coding mode instructions** (when coding): Working directory, tool rules,
    auto-notes behavior
-6. **Project instructions** (when working-dir has `.marvin-instructions` or
-   `.marvin/instructions.md`): Project-specific rules
-7. **Spec & design docs** (when working-dir has `.marvin/spec.md` or
+7. **Project instructions** (when working-dir has `.marvin-instructions`,
+   `.marvin/instructions.md`, or `~/.marvin/instructions/<path>.md`):
+   Project-specific rules
+8. **Spec & design docs** (when working-dir has `.marvin/spec.md` or
    `.marvin/design.md`): Full product spec and architecture
 
-**Note on conversation history seeding**: In interactive mode (non-Copilot
-providers), the last 20 chat log entries are loaded into the LLM conversation
-for context continuity. This does NOT happen in non-interactive mode or when
-using the Copilot SDK provider — the bridge must supply its own history.
+**Note on conversation history**: In addition to the compact history in the
+system message (#5), interactive mode (non-Copilot providers) also seeds the
+last 20 chat log entries as full user/assistant messages in the LLM conversation.
+This does NOT happen in non-interactive mode. The bridge should include full
+recent messages in the prompt for proper conversational flow.
 
 The bridge does NOT need to provide any of the above context — Marvin builds it
 internally. The bridge only needs to provide conversation history and the current

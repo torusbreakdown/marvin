@@ -10525,6 +10525,12 @@ async def _run_non_interactive():
                     sys.stdout.flush()
                 elif etype == "assistant.message":
                     _usage.record_llm_turn(sdk_model)
+                    # Some models (e.g. Gemini) don't stream deltas — full content arrives here
+                    msg_content = getattr(getattr(event, "data", None), "content", "") or ""
+                    if msg_content and msg_content not in ("", None):
+                        chunks.append(msg_content)
+                        sys.stdout.write(msg_content)
+                        sys.stdout.flush()
                 elif etype == "session.idle":
                     done.set()
 

@@ -3200,6 +3200,45 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             review_tasks.append(_run_sub_with_retry(
                 prompt, "claude-opus-4.6", base_timeout=900, label=f"Review {area}: {phase_label}"))
 
+        # Spec-conformance reviewer: dedicated agent that checks ALL code against spec + architecture
+        all_project_files = backend_files + frontend_files + test_config_files
+        if all_project_files:
+            spec_review_ctx = _project_context() + "\n\n"
+            spec_review_ctx += (
+                f"You are a SPEC-CONFORMANCE AUDITOR for the '{phase_label}' phase.\n\n"
+                "Your SOLE job is to verify that the implementation matches the spec and "
+                "architecture documents EXACTLY. You are not reviewing code quality — only "
+                "checking that every requirement is implemented correctly.\n\n"
+                "STEPS:\n"
+                "1. Read .marvin/spec.md completely — note every user story, acceptance criterion, "
+                "endpoint, behavior, constraint, and UX requirement.\n"
+                "2. Read .marvin/design.md completely — note every architecture decision, file "
+                "structure, API shape, database schema, and module responsibility.\n"
+                "3. Read all implementation files and verify:\n"
+                "   - Every user story's acceptance criteria are implemented\n"
+                "   - Every API endpoint matches the specified request/response shapes\n"
+                "   - Every database table/column matches the schema\n"
+                "   - Every keyboard shortcut, theme rule, and UX behavior exists\n"
+                "   - Error handling matches what the spec requires\n"
+                "   - File structure matches the architecture\n"
+                "4. Read all test files and verify:\n"
+                "   - Tests cover every spec requirement (not just implementation details)\n"
+                "   - Tests do NOT mock things that should be tested for real\n"
+                "   - Tests verify OBSERVABLE BEHAVIOR matching the spec\n"
+                "   - Tests do NOT assert buggy behavior that contradicts the spec\n\n"
+                f"PROJECT FILES:\n{chr(10).join('  - ' + f for f in sorted(all_project_files))}\n\n"
+                "OUTPUT FORMAT — for each finding:\n"
+                "SPEC_GAP: <spec section> — <what's missing or wrong> — SEVERITY: critical/major/minor\n\n"
+                "Fix EVERY critical and major spec gap yourself:\n"
+                "- Edit files with edit_file\n"
+                "- Run 'pytest -v' after fixing to verify no regressions\n"
+                "- Commit fixes with message 'Spec conformance fix: <summary>'\n"
+                "If everything matches the spec, respond with 'SPEC_CONFORMANT'."
+            )
+            review_labels.append("Spec-Conformance")
+            review_tasks.append(_run_sub_with_retry(
+                spec_review_ctx, "claude-opus-4.6", base_timeout=900, label=f"Review Spec-Conformance: {phase_label}"))
+
         _run_cmd(["tk", "add-note", params.ticket_id,
                   f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔍 Code review: {phase_label} ({len(review_tasks)} reviewers)")
@@ -3397,6 +3436,17 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "   - Every error handler MUST be tested\n"
                 "   - Aim for 100%% functional coverage\n"
                 "   - Group tests by module with clear descriptions\n\n"
+                "CRITICAL TEST PHILOSOPHY — NO MOCKING:\n"
+                "   - DO NOT plan to mock anything that exists on the system. Use REAL databases "
+                "(SQLite temp files), REAL HTTP clients (httpx.AsyncClient), REAL file I/O, "
+                "REAL subprocess calls. The ONLY things that should be mocked are: user keyboard "
+                "input and paid external APIs with usage limits.\n"
+                "   - NEVER plan to mock internal modules, the database layer, route handlers, "
+                "or anything in .marvin/upstream/.\n"
+                "   - Do NOT use the word 'mock' in test descriptions except for user input.\n"
+                "   - Tests must verify OBSERVABLE BEHAVIOR (HTTP responses, database state, "
+                "rendered output) — not internal implementation details.\n"
+                "   - Integration tests should test real cross-module interactions, not mocked ones.\n\n"
             )
             if instructions_ctx:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
@@ -3693,7 +3743,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "3. Fix the implementation code (NOT the tests unless a test has a genuine bug)\n"
                     "4. Run tests again to verify your fix\n"
                     "5. If all tests pass, respond with exactly 'ALL_TESTS_PASS' and commit\n\n"
-                    "Read .marvin/design.md if you need to understand the intended behavior. "
+                    "Read .marvin/spec.md and .marvin/design.md if you need to understand the "
+                    "intended behavior. The SPEC is the source of truth — if a test passes but "
+                    "the behavior doesn't match the spec, the test OR the implementation is wrong.\n\n"
+                    "MOCK POLICY: Tests must NOT mock anything that exists on the system. "
+                    "If you find tests that mock internal modules, the database, the filesystem, "
+                    "or anything in .marvin/upstream/, fix the test to use real implementations. "
+                    "Only mock user keyboard input and paid external APIs.\n\n"
                     "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
                     "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
                 ).format(round=debug_round, max=max_debug_rounds)

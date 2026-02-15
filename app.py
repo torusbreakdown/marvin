@@ -3082,6 +3082,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             except Exception:
                 pass
 
+        # UX design summary
+        ux_path = os.path.join(wd, ".marvin", "ux.md")
+        if os.path.isfile(ux_path):
+            try:
+                ux_text = open(ux_path).read()
+                parts.append(f"UX DESIGN SUMMARY (from .marvin/ux.md, {len(ux_text)} bytes total — read full file for details):\n"
+                             + ux_text[:2000] + "\n[... truncated — read .marvin/ux.md for full UX design]\n")
+            except Exception:
+                pass
+
         # Architecture summary (first ~2000 chars — covers file structure + key decisions)
         design_path = os.path.join(wd, ".marvin", "design.md")
         if os.path.isfile(design_path):
@@ -3260,8 +3270,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             ctx += (
                 f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase — "
                 f"**{area}** files only.\n\n"
-                "Read EVERY file listed below with read_file. Also read .marvin/spec.md and "
-                ".marvin/design.md for intended behavior.\n\n"
+                "Read EVERY file listed below with read_file. Also read .marvin/spec.md, "
+                ".marvin/ux.md, and .marvin/design.md for intended behavior.\n\n"
                 "IMPORTANT: Do NOT review files in .marvin/upstream/ — those are upstream "
                 "reference code. Do NOT review files outside your assigned list.\n\n"
                 f"YOUR FILES TO REVIEW:\n{chr(10).join('  - ' + f for f in sorted(files))}\n"
@@ -3322,17 +3332,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "checking that every requirement is implemented correctly.\n\n"
                 "STEPS:\n"
                 "1. Read .marvin/spec.md completely — note every user story, acceptance criterion, "
-                "endpoint, behavior, constraint, and UX requirement.\n"
-                "2. Read .marvin/design.md completely — note every architecture decision, file "
+                "endpoint, behavior, constraint, and feature requirement.\n"
+                "2. Read .marvin/ux.md completely — note every screen, component, interaction, "
+                "state, style rule, and accessibility requirement.\n"
+                "3. Read .marvin/design.md completely — note every architecture decision, file "
                 "structure, API shape, database schema, and module responsibility.\n"
-                "3. Read all implementation files and verify:\n"
+                "4. Read all implementation files and verify:\n"
                 "   - Every user story's acceptance criteria are implemented\n"
                 "   - Every API endpoint matches the specified request/response shapes\n"
                 "   - Every database table/column matches the schema\n"
                 "   - Every keyboard shortcut, theme rule, and UX behavior exists\n"
                 "   - Error handling matches what the spec requires\n"
                 "   - File structure matches the architecture\n"
-                "4. Read all test files and verify:\n"
+                "5. Read all test files and verify:\n"
                 "   - Tests cover every spec requirement (not just implementation details)\n"
                 "   - Tests do NOT mock things that should be tested for real\n"
                 "   - Tests verify OBSERVABLE BEHAVIOR matching the spec\n"
@@ -3386,7 +3398,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "2. Fix each critical/major issue with the smallest possible change\n"
                 "3. Run 'pytest -v' after fixing to verify no regressions\n"
                 "4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
-                "Read .marvin/spec.md and .marvin/design.md for the intended behavior."
+                "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
             )
             _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Review round {review_round}: {len(all_findings)} reviewers found issues — dispatching fixer"], timeout=5, cwd=wd)
@@ -3496,48 +3508,84 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # Phase 1a: Spec & UX — skip if spec.md already exists and is substantial
         spec_path = os.path.join(design_dir, "spec.md")
+        ux_path = os.path.join(design_dir, "ux.md")
         if _phase_done("1a") or (os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000):
             spec_size = os.path.getsize(spec_path) if os.path.isfile(spec_path) else 0
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md exists ({spec_size} bytes)"], timeout=5, cwd=wd)
-            await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md exists ({spec_size} bytes)")
+            ux_size = os.path.getsize(ux_path) if os.path.isfile(ux_path) else 0
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md ({spec_size}B) ux.md ({ux_size}B)"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md ({spec_size}B) ux.md ({ux_size}B)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec & UX design ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
-            await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
-            spec_prompt = (
-                "You are a senior product designer. Your job is to produce a detailed "
-                "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
-                "and do NOT describe architecture or file structure. Focus ONLY on:\n\n"
-                "1. **Product Spec** — what the product does, who it's for, core user stories, "
-                "acceptance criteria for each feature, constraints and non-functional requirements.\n"
-                "2. **UX Design Schema** — describe every screen/view, its components, layout, "
-                "interactions, states, transitions, and responsive breakpoints. Use a structured "
-                "format. Cover every user flow end-to-end: happy path, error states, empty states, "
-                "loading states.\n"
-                "3. **Style Guide** — colors, typography, spacing, component naming conventions, "
-                "accessibility requirements (ARIA, keyboard nav, contrast ratios).\n"
-                "4. **Information Architecture** — navigation structure, URL scheme, data "
-                "relationships from the user's perspective.\n\n"
-                f"TASK:\n{params.prompt}\n\n"
-            )
-            # Inject upstream reference summaries so the spec agent has the integration contract
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec + UX (2 parallel agents, {_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
+            await _notify_pipeline("🎨 Phase 1a: Spec + UX design (2 parallel agents)")
+
+            # Shared upstream injection
+            upstream_injection = ""
             upstream_summary = _upstream_summary()
             if upstream_summary:
-                spec_prompt += (
+                upstream_injection = (
                     "UPSTREAM INTEGRATION SPECS:\n"
                     "The following upstream reference documents define the integration contract "
-                    "for this project. READ THEM CAREFULLY with read_file before writing the spec. "
-                    "Your spec MUST be consistent with these documents — use the exact formats, "
+                    "for this project. READ THEM CAREFULLY with read_file before writing. "
+                    "Your output MUST be consistent with these documents — use the exact formats, "
                     "field names, labels, and patterns they specify. If the upstream spec says to "
-                    "use specific labels (e.g. 'User:' / 'Marvin:'), your spec must use those exact "
-                    "labels. If it specifies a streaming format, your spec must match it.\n\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the spec.\n\n"
+                    "use specific labels (e.g. 'User:' / 'Marvin:'), use those exact labels. "
+                    "If it specifies a streaming format, match it exactly.\n\n"
+                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing.\n\n"
                 )
-            if instructions_ctx:
-                spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
-            spec_prompt += (
+            instructions_injection = f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n" if instructions_ctx else ""
+
+            # Agent 1: Product spec — features, user stories, API contract, constraints
+            product_prompt = (
+                "You are a senior product manager. Your job is to produce a detailed "
+                "PRODUCT SPECIFICATION for the following task. Do NOT write any code, "
+                "do NOT describe architecture/file structure, and do NOT design visual UX "
+                "(a separate agent handles UX). Focus ONLY on:\n\n"
+                "1. **Product Overview** — what the product does, who it's for, core value proposition.\n"
+                "2. **User Stories & Acceptance Criteria** — every user story with numbered acceptance "
+                "criteria. Be exhaustive: cover happy path, error cases, edge cases.\n"
+                "3. **Feature Requirements** — every feature with detailed behavior specification. "
+                "Include API endpoint contract (routes, methods, request/response shapes, status codes) "
+                "if the product has an API.\n"
+                "4. **Integration Contract** — how the product integrates with upstream systems. "
+                "Include exact subprocess invocation, streaming format, data formats, labels. "
+                "Copy critical details VERBATIM from upstream specs — do not paraphrase.\n"
+                "5. **Constraints & Non-Functional Requirements** — performance, security, "
+                "accessibility mandates, technology constraints.\n"
+                "6. **Information Architecture** — navigation structure, URL scheme, data "
+                "relationships from the user's perspective.\n\n"
+                f"TASK:\n{params.prompt}\n\n"
+                + upstream_injection + instructions_injection +
                 "Save the spec as .marvin/spec.md using create_file. "
-                "Be exhaustive — every screen, every interaction, every edge case. "
-                "The architecture pass will read this spec to design the technical solution.\n\n"
+                "Be exhaustive — every feature, every endpoint, every edge case. "
+                "A separate UX agent is writing the visual design in parallel. "
+                "The architecture pass will read BOTH documents.\n"
+            )
+
+            # Agent 2: UX design — screens, components, style guide, visual polish
+            ux_prompt = (
+                "You are a senior UX designer. Your job is to produce a detailed "
+                "UX DESIGN DOCUMENT for the following task. Do NOT write any code, "
+                "do NOT describe architecture/file structure, and do NOT write the product spec "
+                "(a separate agent handles features/requirements). Focus ONLY on:\n\n"
+                "1. **UX Design Schema** — describe every screen/view, its components, layout, "
+                "interactions, states (loading, empty, error, streaming, success), transitions, "
+                "and responsive breakpoints. Use a structured format. Cover every user flow "
+                "end-to-end.\n"
+                "2. **Component Library** — every UI component with its states, variants, "
+                "dimensions, and behavior. Name components consistently.\n"
+                "3. **Style Guide** — colors (exact hex/rgba for both light and dark themes), "
+                "typography (font families, sizes, weights, line-heights), spacing scale, "
+                "border-radius values, shadow definitions, transition timing.\n"
+                "4. **Interaction Patterns** — hover/focus/active states, keyboard shortcuts, "
+                "micro-interactions, animation timing, toast/notification behavior.\n"
+                "5. **Responsive Design** — exact breakpoints, layout changes per breakpoint, "
+                "mobile-specific interactions (swipe, drawer behavior).\n"
+                "6. **Accessibility** — ARIA roles/labels, keyboard navigation flow, focus "
+                "management, screen reader announcements, contrast ratios.\n\n"
+                f"TASK:\n{params.prompt}\n\n"
+                + upstream_injection + instructions_injection +
+                "Save the UX design as .marvin/ux.md using create_file. "
+                "Be exhaustive — every screen, every component, every state.\n\n"
                 "VISUAL DESIGN QUALITY: The style guide must produce a POLISHED, modern UI — not "
                 "just functional. Specify exact CSS values: subtle gradients, box-shadows with "
                 "multiple layers, smooth transitions (200-300ms ease), hover/focus micro-interactions, "
@@ -3547,27 +3595,45 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
-            rc, sout, serr = await _run_sub_with_retry(spec_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Spec/UX pass")
+            # Run both in parallel
+            spec_task = _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Product spec")
+            ux_task = _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="UX design")
+            (spec_rc, sout, serr), (ux_rc, ux_out, ux_err) = await asyncio.gather(spec_task, ux_task)
+
+            # Handle spec.md
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
                 spec_size = os.path.getsize(spec_path)
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
-                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
-            elif rc == 0 and sout:
+                await _notify_pipeline(f"✅ spec.md ready ({spec_size} bytes)")
+            elif spec_rc == 0 and sout:
                 with open(spec_path, "w") as f:
                     f.write(sout)
-                _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
-                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
+                await _notify_pipeline(f"✅ spec.md ready ({len(sout)} chars from stdout)")
             else:
-                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5, cwd=wd)
-                await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
-                return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: product spec failed (exit {spec_rc})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: product spec failed (exit {spec_rc})")
+                return f"🚫 Product spec failed (exit {spec_rc}, ticket {params.ticket_id}):\n{serr or sout}"
+
+            # Handle ux.md
+            if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 100:
+                ux_size = os.path.getsize(ux_path)
+                await _notify_pipeline(f"✅ ux.md ready ({ux_size} bytes)")
+            elif ux_rc == 0 and ux_out:
+                with open(ux_path, "w") as f:
+                    f.write(ux_out)
+                await _notify_pipeline(f"✅ ux.md ready ({len(ux_out)} chars from stdout)")
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: UX design failed (exit {ux_rc})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: UX design failed (exit {ux_rc})")
+                return f"🚫 UX design failed (exit {ux_rc}, ticket {params.ticket_id}):\n{ux_err or ux_out}"
+
+            await _notify_pipeline("✅ Phase 1a complete — spec.md + ux.md")
         _save_state("1a")
 
-        # Phase 1a review: verify spec against upstream references
+        # Phase 1a review: verify spec and UX against upstream references
         if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
             await _spec_design_review(spec_path, "spec.md")
+        if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 100:
+            await _spec_design_review(ux_path, "ux.md")
 
         # Phase 1b: Architecture & Test Plan — skip if design.md already exists
         design_path = os.path.join(design_dir, "design.md")
@@ -3585,9 +3651,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"Failed to read spec: {e}"
 
             arch_prompt = (
-                "You are a senior software architect. A product spec and UX design has already "
-                "been created at .marvin/spec.md. Read it first with read_file, then produce "
-                "a detailed ARCHITECTURE and TEST PLAN. Do NOT write any code. Produce:\n\n"
+                "You are a senior software architect. A product spec has been created at "
+                ".marvin/spec.md and a UX design at .marvin/ux.md. Read BOTH with read_file "
+                "first, then produce a detailed ARCHITECTURE and TEST PLAN. Do NOT write any "
+                "code. Produce:\n\n"
                 "1. **Architecture** — file structure, modules, data flow, API endpoints "
                 "(with request/response shapes and status codes), database schema, error handling "
                 "strategy, technology choices with rationale. Every decision must trace back to "
@@ -3638,8 +3705,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
             arch_prompt += (
                 "Save the architecture document as .marvin/design.md using create_file. "
-                "Be thorough and specific — this document and the spec together will be "
-                "the sole reference for the test-writing and implementation agents. "
+                "Be thorough and specific — this document, the spec, and the UX design together "
+                "will be the sole reference for the test-writing and implementation agents. "
                 "The test plan section is CRITICAL — it must be exhaustive enough that "
                 "agents can write a complete test suite with full coverage from it alone."
             )
@@ -3716,9 +3783,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 test_prompt = (
                     "You are writing FUNCTIONAL TESTS (not unit tests) for a TDD workflow. "
                     "These tests use REAL implementations — real databases, real HTTP clients, "
-                    "real subprocesses. No mocking. Read BOTH the spec at "
-                    ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
-                    "write ONLY the test files described below.\n\n"
+                    "real subprocesses. No mocking. Read the spec at .marvin/spec.md, the UX "
+                    "design at .marvin/ux.md, AND the architecture doc at .marvin/design.md, "
+                    "then write ONLY the test files described below.\n\n"
                     "REQUIREMENTS:\n"
                     "- Tests MUST fail (the implementation doesn't exist yet)\n"
                     "- Write EVERY test listed in the Test Plan section — do not skip any\n"
@@ -3783,8 +3850,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline("🧪 Phase 2b: Writing failing integration tests")
 
             integ_prompt = (
-                "You are writing INTEGRATION tests for a TDD workflow. Read BOTH the spec at "
-                ".marvin/spec.md AND the architecture doc at .marvin/design.md.\n\n"
+                "You are writing INTEGRATION tests for a TDD workflow. Read the spec at "
+                ".marvin/spec.md, the UX design at .marvin/ux.md, AND the architecture doc "
+                "at .marvin/design.md.\n\n"
                 "You are writing tests that verify the REAL system works end-to-end. "
                 "These tests complement the functional tests that already exist (or will exist).\n\n"
                 "CRITICAL RULES — READ CAREFULLY:\n"
@@ -3845,13 +3913,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "IMPORTANT: Read these documents with read_file BEFORE writing any code:\n"
             )
             if os.path.isfile(spec_path):
-                impl_prompt += "  - .marvin/spec.md (product spec & UX design)\n"
+                impl_prompt += "  - .marvin/spec.md (product spec & feature requirements)\n"
+            ux_path = os.path.join(wd, ".marvin", "ux.md")
+            if os.path.isfile(ux_path):
+                impl_prompt += "  - .marvin/ux.md (UX design, components, style guide)\n"
             impl_prompt += (
                 "  - .marvin/design.md (architecture & implementation plan)\n\n"
                 "Follow the architecture, file structure, and UX design specified in those "
                 "documents exactly. Do not deviate unless you encounter a technical impossibility.\n\n"
                 "VISUAL POLISH IS CRITICAL: The CSS must look professional and modern — not like "
-                "unstyled HTML with colors slapped on. Follow the spec's style guide exactly: "
+                "unstyled HTML with colors slapped on. Follow the UX design in .marvin/ux.md exactly: "
                 "use the specified box-shadows, border-radius, transitions, hover states, and "
                 "spacing scale. Every interactive element needs a visible hover/focus transition. "
                 "Typography must have clear hierarchy. Whitespace should feel intentional and "

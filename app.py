@@ -2678,6 +2678,38 @@ async def run_command(params: RunCommandParams) -> str:
     return "\n".join(result) + f"\n{exit_str}"
 
 
+class TkParams(BaseModel):
+    args: str = Field(
+        description=(
+            "Arguments to pass to the tk CLI. Examples:\n"
+            "  'create \"Phase 1a: Spec\" -t epic --parent PARENT_ID'\n"
+            "  'create \"Write product spec\" -t task --parent EPIC_ID'\n"
+            "  'start TICKET_ID'\n"
+            "  'close TICKET_ID'\n"
+            "  'add-note TICKET_ID \"some note\"'\n"
+            "  'show TICKET_ID'\n"
+            "  'ls --status=open'"
+        )
+    )
+
+
+@define_tool(
+    description=(
+        "Run the tk ticket CLI. Use to create epics for pipeline stages, "
+        "tasks for individual agent work items, track status, and add notes. "
+        "Tickets are stored as markdown in .tickets/. Supports: create, start, "
+        "close, status, add-note, show, ls, dep, link. Use -t epic for phases, "
+        "-t task for individual work items, --parent to set hierarchy."
+    )
+)
+async def tk(params: TkParams) -> str:
+    wd = _coding_working_dir or os.getcwd()
+    import shlex
+    args = shlex.split(params.args)
+    ok, output = _run_cmd(["tk"] + args, timeout=10, cwd=wd)
+    return output if output else ("✅ Done" if ok else "❌ tk command failed")
+
+
 @define_tool(
     description=(
         "Install Python packages into the project's virtual environment using uv. "
@@ -3135,6 +3167,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         upstream_summary = _upstream_summary()
         if upstream_summary:
             parts.append(upstream_summary)
+
+        # Ticket tracking instructions
+        ticket_id = params.ticket_id
+        parts.append(
+            "TICKET TRACKING (use the tk tool):\n"
+            f"- Parent pipeline ticket: {ticket_id}\n"
+            "- Create an epic for each major phase of work: tk(args='create \"Phase name\" -t epic --parent {parent_id}')\n"
+            "- Create a task for each unit of work: tk(args='create \"Task description\" -t task --parent {epic_id}')\n"
+            "- Start tasks when you begin: tk(args='start {task_id}')\n"
+            "- Close tasks when done: tk(args='close {task_id}')\n"
+            "- Add notes for important findings: tk(args='add-note {task_id} \"note text\"')\n"
+            "- List tickets: tk(args='ls') or tk(args='show {id}')\n"
+        )
 
         # Mandatory testing policy — injected into EVERY sub-agent prompt
         parts.append(
@@ -10188,7 +10233,7 @@ def _build_all_tools():
         set_working_dir, get_working_dir,
         create_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
-        run_command, install_packages, launch_agent,
+        run_command, install_packages, launch_agent, tk,
         # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,

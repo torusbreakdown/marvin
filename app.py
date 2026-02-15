@@ -2715,8 +2715,8 @@ async def install_packages(params: InstallPackagesParams) -> str:
 # ── Sub-agent dispatch ───────────────────────────────────────────────────────
 
 _AGENT_MODELS = {
-    "codex": "gpt-5.3-codex",
-    "opus": "claude-opus-4.6",
+    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),
+    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),
 }
 
 
@@ -2973,7 +2973,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     )
                     # Run a quick opus call to answer
                     a_rc, answers, _ = await _run_sub(
-                        answer_prompt, "claude-opus-4.6", timeout_s=120, label=f"{label} Q&A")
+                        answer_prompt, _AGENT_MODELS["opus"], timeout_s=120, label=f"{label} Q&A")
 
                     if a_rc == 0 and answers:
                         qa_context += (
@@ -3212,7 +3212,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             prompt = _build_review_prompt(area, files)
             review_labels.append(area)
             review_tasks.append(_run_sub_with_retry(
-                prompt, "claude-opus-4.6", base_timeout=900, label=f"Review {area}: {phase_label}"))
+                prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label}"))
 
         # Spec-conformance reviewer: dedicated agent that checks ALL code against spec + architecture
         all_project_files = backend_files + frontend_files + test_config_files
@@ -3251,7 +3251,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             )
             review_labels.append("Spec-Conformance")
             review_tasks.append(_run_sub_with_retry(
-                spec_review_ctx, "claude-opus-4.6", base_timeout=900, label=f"Review Spec-Conformance: {phase_label}"))
+                spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}"))
 
         _run_cmd(["tk", "add-note", params.ticket_id,
                   f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
@@ -3361,7 +3361,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md exists ({spec_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md exists ({spec_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1a: Spec & UX design (claude-opus-4.6)"], timeout=5, cwd=wd)
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec & UX design ({_AGENT_MODELS['opus']})"], timeout=5, cwd=wd)
             await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
             spec_prompt = (
                 "You are a senior product designer. Your job is to produce a detailed "
@@ -3394,7 +3394,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
-            rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=1200, label="Spec/UX pass")
+            rc, sout, serr = await _run_sub_with_retry(spec_prompt, _AGENT_MODELS["opus"], base_timeout=1200, label="Spec/UX pass")
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
                 spec_size = os.path.getsize(spec_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -3419,7 +3419,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: SKIPPED — design.md exists ({design_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1b skipped — design.md exists ({design_size} bytes)")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 1b: Architecture & test plan (claude-opus-4.6)"], timeout=5, cwd=wd)
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: Architecture & test plan ({_AGENT_MODELS['opus']})"], timeout=5, cwd=wd)
             await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
 
             try:
@@ -3481,7 +3481,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "agents can write a complete test suite with full coverage from it alone."
             )
 
-            rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=1200, label="Architecture pass")
+            rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["opus"], base_timeout=1200, label="Architecture pass")
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
                 design_size = os.path.getsize(design_path)
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -3581,7 +3581,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
                 test_prompt = _project_context() + "\n\n" + test_prompt
                 test_tasks.append(_run_sub_with_retry(
-                    test_prompt, "gpt-5.3-codex", base_timeout=1200, label=f"Test agent {i+1}"))
+                    test_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Test agent {i+1}"))
 
             test_results = await asyncio.gather(*test_tasks)
             failures = []
@@ -3648,7 +3648,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             integ_prompt = _project_context() + "\n\n" + integ_prompt
 
             rc, out, err = await _run_sub_with_retry(
-                integ_prompt, "gpt-5.3-codex", base_timeout=1200, label="Integration test agent")
+                integ_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Integration test agent")
             if rc != 0:
                 _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
@@ -3782,7 +3782,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
-                    debug_prompt, "gpt-5.3-codex", base_timeout=1800, label=f"Debug round {debug_round}")
+                    debug_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"Debug round {debug_round}")
 
                 if "ALL_TESTS_PASS" in (dbg_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5, cwd=wd)
@@ -3846,7 +3846,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
 
                 rc, e2e_out, e2e_err = await _run_sub_with_retry(
-                    e2e_prompt, "gpt-5.3-codex", base_timeout=1800, label=f"E2E round {e2e_round}")
+                    e2e_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"E2E round {e2e_round}")
 
                 if "E2E_SMOKE_PASS" in (e2e_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5, cwd=wd)
@@ -3975,7 +3975,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     qa_prompt += _marvin_interface_context()
 
                     qa_tasks.append(_run_sub_with_retry(
-                        qa_prompt, "claude-opus-4.6", base_timeout=1200,
+                        qa_prompt, _AGENT_MODELS["opus"], base_timeout=1200,
                         label=f"QA-{qa['area'].replace(' ', '-')}-r{qa_round}"))
 
                 qa_results = await asyncio.gather(*qa_tasks)
@@ -4014,7 +4014,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt += _marvin_interface_context()
 
                 rc, fix_out, fix_err = await _run_sub_with_retry(
-                    fix_prompt, "gpt-5.3-codex", base_timeout=1800,
+                    fix_prompt, _AGENT_MODELS["codex"], base_timeout=1800,
                     label=f"QA-fix-round-{qa_round}")
 
                 _run_cmd(["tk", "add-note", params.ticket_id,
@@ -9621,18 +9621,19 @@ async def _openai_chat(
     }
     if not stream:
         body.pop("stream_options")
-    # Gemini thinking config
-    if "gemini-3" in model:
-        body["google"] = {
-            "thinking_config": {"thinking_level": "low"}
-        }
-    elif "gemini-2.5" in model:
-        body["google"] = {
-            "thinking_config": {
-                "thinking_budget": 2048,
-                "include_thoughts": False,
+    # Gemini thinking config — only when NOT using tools (incompatible)
+    if not tools:
+        if "gemini-3" in model:
+            body["google"] = {
+                "thinking_config": {"thinking_level": "low"}
             }
-        }
+        elif "gemini-2.5" in model:
+            body["google"] = {
+                "thinking_config": {
+                    "thinking_budget": 2048,
+                    "include_thoughts": False,
+                }
+            }
     if tools:
         body["tools"] = tools
         body["stream"] = False
@@ -9643,6 +9644,8 @@ async def _openai_chat(
     if not stream:
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(api_url, headers=headers, json=body)
+            if r.status_code >= 400:
+                print(f"API error {r.status_code}: {r.text[:500]}", file=sys.stderr)
             r.raise_for_status()
             rjson = r.json()
             choice = rjson["choices"][0]
@@ -10507,12 +10510,12 @@ async def _run_non_interactive():
             await client.stop()
         else:
             prov = model_override or LLM_PROVIDER
+            # _run_tool_loop already prints content as it streams
             result, _ = await _run_tool_loop(
                 prompt_text, all_tools, system_msg,
                 provider=prov,
                 max_rounds=50,
             )
-            print(result or "(no output)")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)

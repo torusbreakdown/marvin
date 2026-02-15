@@ -2709,7 +2709,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         return ""
 
     completed_phase = _load_state()
-    _phase_order = ["1a", "1b", "2", "3", "4"]
+    _phase_order = ["1a", "1b", "2a", "2b", "3", "4a", "4b"]
     def _phase_done(phase: str) -> bool:
         if not completed_phase:
             return False
@@ -2859,17 +2859,17 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
         _save_state("1b")
 
-    # ── Phase 2: Test-first pass (TDD, optional) ─────────────────────────
+    # ── Phase 2a: Unit tests (TDD, optional) ───────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")
     if params.tdd:
-        if _phase_done("2"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: SKIPPED — already completed"], timeout=5)
-            await _notify_pipeline("⏭️ Phase 2 skipped — tests already written")
+        if _phase_done("2a"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 2a skipped — unit tests already written")
         elif not os.path.isfile(design_path):
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2: Writing failing tests (parallel agents)"], timeout=5)
-            await _notify_pipeline("🧪 Phase 2: Writing failing tests (parallel agents)")
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: Writing failing unit tests (parallel agents)"], timeout=5)
+            await _notify_pipeline("🧪 Phase 2a: Writing failing unit tests (parallel agents)")
 
             try:
                 design_doc = open(design_path).read()
@@ -2907,7 +2907,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             for i, batch in enumerate(batches):
                 batch_text = "\n\n---\n\n".join(batch)
                 test_prompt = (
-                    "You are writing tests for a TDD workflow. Read BOTH the spec at "
+                    "You are writing UNIT tests for a TDD workflow. Read BOTH the spec at "
                     ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
                     "write ONLY the test files described below.\n\n"
                     "REQUIREMENTS:\n"
@@ -2920,7 +2920,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "empty inputs, boundary values, concurrent access where relevant\n"
                     "- Use pytest fixtures for shared setup (database, test client, etc)\n"
                     "- Use pytest.mark.parametrize for testing multiple inputs\n"
-                    "- Mock external dependencies (subprocess calls, file I/O) appropriately\n"
+                    "- Mock ONLY truly external services (subprocess calls to external CLIs, "
+                    "third-party HTTP APIs). Do NOT mock internal modules, database calls, "
+                    "or inter-module interactions — those should use real implementations\n"
                     "- Do NOT write any implementation code — only tests\n"
                     "- Do NOT try to run the tests — they are expected to fail\n\n"
                     f"TEST SECTIONS TO WRITE:\n{batch_text}\n\n"
@@ -2942,12 +2944,56 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
             if failures:
                 _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Test-first pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
+                          f"Unit test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
 
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Test-first pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
-            await _notify_pipeline(f"✅ Phase 2 complete — {len(test_results)} test agents, {len(failures)} failures")
-        _save_state("2")
+                      f"Unit test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
+        _save_state("2a")
+
+    # ── Phase 2b: Integration tests (TDD, optional) ──────────────────────
+    if params.tdd:
+        if _phase_done("2b"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 2b skipped — integration tests already written")
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: Writing failing integration tests"], timeout=5)
+            await _notify_pipeline("🧪 Phase 2b: Writing failing integration tests")
+
+            integ_prompt = (
+                "You are writing INTEGRATION tests for a TDD workflow. Read BOTH the spec at "
+                ".marvin/spec.md AND the architecture doc at .marvin/design.md.\n\n"
+                "You are writing tests that verify the REAL system works end-to-end. "
+                "These tests complement the unit tests that already exist (or will exist).\n\n"
+                "CRITICAL RULES — READ CAREFULLY:\n"
+                "- Put integration tests in tests/test_integration.py\n"
+                "- Do NOT mock internal modules, database layer, routes, or models\n"
+                "- Use a REAL database (temp file), REAL app instance, REAL HTTP client\n"
+                "- Only mock truly external services (subprocess calls to external CLIs, "
+                "third-party HTTP APIs that cost money or are unreliable)\n"
+                "- Test full request→response flows through the actual FastAPI app:\n"
+                "  • Create a conversation via the API, send a message, verify the SSE stream\n"
+                "  • Create, list, get, delete conversations — verify DB state matches\n"
+                "  • Verify settings updates persist and affect subsequent requests\n"
+                "  • Verify error responses have correct status codes and shapes\n"
+                "  • Verify the database actually contains the expected rows after operations\n"
+                "  • Verify static file serving works (index.html, CSS, JS)\n"
+                "- Use httpx.AsyncClient with ASGITransport for real HTTP testing\n"
+                "- Tests MUST fail (the implementation doesn't exist yet)\n"
+                "- Do NOT write any implementation code — only tests\n"
+                "- Do NOT try to run the tests — they are expected to fail\n\n"
+                "Commit the test file with message 'Add failing integration tests (TDD red phase)'."
+            )
+
+            rc, out, err = await _run_sub_with_retry(
+                integ_prompt, "gpt-5.3-codex", base_timeout=300, label="Integration test agent")
+            if rc != 0:
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, "Integration tests written"], timeout=5)
+            await _notify_pipeline(f"✅ Phase 2b complete — integration tests written")
+        _save_state("2b")
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     if _phase_done("3"):
@@ -2990,24 +3036,47 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         await _notify_pipeline("✅ Phase 3 complete — implementation finished")
     _save_state("3")
 
-    # ── Phase 4: Debug loop (TDD green phase) ────────────────────────────
+    # ── Phase 4a: Debug loop — unit + integration tests (TDD green) ─────
     if params.tdd:
-        if _phase_done("4"):
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: SKIPPED — already completed"], timeout=5)
-            await _notify_pipeline("⏭️ Phase 4 skipped — debug loop already done")
+        if _phase_done("4a"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 4a skipped — debug loop already done")
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4: Debug loop — running tests until green"], timeout=5)
-            await _notify_pipeline("🐛 Phase 4: Debug loop — running tests until green")
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: Debug loop — running tests until green"], timeout=5)
+            await _notify_pipeline("🐛 Phase 4a: Debug loop — running tests until green")
 
-            max_debug_rounds = 5
+            max_debug_rounds = int(os.environ.get("MARVIN_DEBUG_ROUNDS", "50"))
             for debug_round in range(1, max_debug_rounds + 1):
+                # Run pytest directly (no LLM needed) to check current test state
+                # Use the project's venv python, not the parent's
+                _project_python = os.path.join(wd, ".venv", "bin", "python")
+                if not os.path.isfile(_project_python):
+                    _project_python = _sys.executable
+                try:
+                    _pytest_proc = await asyncio.create_subprocess_exec(
+                        _project_python, "-m", "pytest", "-v", "--tb=short",
+                        cwd=wd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    _pt_out, _pt_err = await asyncio.wait_for(_pytest_proc.communicate(), timeout=120)
+                    _pt_rc = _pytest_proc.returncode
+                    _pt_text = (_pt_out or b"").decode(errors="replace")
+                except Exception:
+                    _pt_rc = -1
+                    _pt_text = ""
+
+                if _pt_rc == 0 and "passed" in _pt_text:
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass (pytest exit 0) after {debug_round} debug round(s)"], timeout=5)
+                    await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
+                    break
+
+                # Tests failed — launch a fix round
                 debug_prompt = (
-                    "You are in the TDD debug loop (round {round}/{max}). Your ONLY job:\n"
-                    "1. Run ALL tests with run_command (e.g. 'pytest -v' or the project's test runner)\n"
-                    "2. If all tests pass → respond with exactly 'ALL_TESTS_PASS' and commit\n"
-                    "3. If tests fail → read the failure output carefully, fix the code "
-                    "(NOT the tests unless a test has a genuine bug), and run tests again\n"
-                    "4. Repeat until all tests pass or you've made 3 fix attempts this round\n\n"
+                    "You are in the TDD debug loop (round {round}/{max}). Tests are FAILING.\n"
+                    "1. Run ALL tests with run_command: 'pytest -v'\n"
+                    "2. Read the failure output carefully\n"
+                    "3. Fix the implementation code (NOT the tests unless a test has a genuine bug)\n"
+                    "4. Run tests again to verify your fix\n"
+                    "5. If all tests pass, respond with exactly 'ALL_TESTS_PASS' and commit\n\n"
                     "Read .marvin/design.md if you need to understand the intended behavior. "
                     "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
                     "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
@@ -3024,8 +3093,59 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5)
             else:
                 _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
-                await _notify_pipeline(f"⚠️ Phase 4: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
-        _save_state("4")
+                await _notify_pipeline(f"⚠️ Phase 4a: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
+        _save_state("4a")
+
+    # ── Phase 4b: End-to-end smoke test ──────────────────────────────────
+    if params.tdd:
+        if _phase_done("4b"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: SKIPPED — already completed"], timeout=5)
+            await _notify_pipeline("⏭️ Phase 4b skipped — e2e testing already done")
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: End-to-end smoke test — verifying real app works"], timeout=5)
+            await _notify_pipeline("🔍 Phase 4b: End-to-end smoke test")
+
+            max_e2e_rounds = int(os.environ.get("MARVIN_E2E_ROUNDS", "10"))
+            for e2e_round in range(1, max_e2e_rounds + 1):
+                e2e_prompt = (
+                    "You are doing an END-TO-END smoke test (round {round}/{max}). "
+                    "Your job is to verify the ACTUAL APPLICATION works, not just the tests.\n\n"
+                    "STEPS:\n"
+                    "1. Read .marvin/spec.md and .marvin/design.md to understand what the app should do\n"
+                    "2. Start the application server in the background with run_command\n"
+                    "   (e.g. 'uvicorn server:create_app --factory --host 127.0.0.1 --port 18199 &' "
+                    "   or whatever the project uses). Use a high port to avoid conflicts.\n"
+                    "3. Wait a few seconds for it to start, then test it with real HTTP requests:\n"
+                    "   - curl the health/status endpoint\n"
+                    "   - curl the root URL — verify HTML is served\n"
+                    "   - curl static assets (CSS, JS) — verify they load\n"
+                    "   - Create a conversation via the API (POST)\n"
+                    "   - List conversations (GET) — verify it appears\n"
+                    "   - Get the conversation detail (GET) — verify shape\n"
+                    "   - Send a chat message (POST) — verify SSE stream starts "
+                    "(the bridge/LLM may fail but the endpoint should respond, not 500)\n"
+                    "   - Delete the conversation (DELETE) — verify 204\n"
+                    "   - Try invalid requests — verify proper error codes (404, 422)\n"
+                    "4. Kill the server process when done\n"
+                    "5. If everything works, respond with exactly 'E2E_SMOKE_PASS'\n"
+                    "6. If something is broken, fix the code and try again\n\n"
+                    "Make MINIMAL fixes. Commit each fix with a descriptive message. "
+                    "After fixing, re-run 'pytest -v' to make sure you didn't break tests."
+                ).format(round=e2e_round, max=max_e2e_rounds)
+
+                rc, e2e_out, e2e_err = await _run_sub_with_retry(
+                    e2e_prompt, "gpt-5.3-codex", base_timeout=300, label=f"E2E round {e2e_round}")
+
+                if "E2E_SMOKE_PASS" in (e2e_out or ""):
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5)
+                    await _notify_pipeline(f"🎉 E2E smoke test passed after {e2e_round} round(s)!")
+                    break
+                if rc != 0:
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E round {e2e_round} failed (exit {rc})"], timeout=5)
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test exhausted ({max_e2e_rounds} rounds)"], timeout=5)
+                await _notify_pipeline(f"⚠️ Phase 4b: E2E smoke test exhausted ({max_e2e_rounds} rounds)")
+        _save_state("4b")
 
     # ── Done ─────────────────────────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5)
@@ -3035,8 +3155,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     if params.design_first:
         phases.insert(0, "Design")
     if params.tdd:
-        phases.insert(-1, "Test-first")
+        phases.insert(-1, "Unit tests")
+        phases.insert(-1, "Integration tests")
         phases.append("Debug loop")
+        phases.append("E2E smoke test")
 
     await _notify_pipeline(f"✅ Pipeline complete ({' → '.join(phases)})\nTicket: {params.ticket_id}")
     return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
@@ -9383,11 +9505,13 @@ async def _run_non_interactive():
                     if not delta and isinstance(event, dict):
                         delta = event.get("delta", "")
                     chunks.append(delta)
-                    print(delta, end="", flush=True)
+                    sys.stdout.write(delta)
+                    sys.stdout.flush()
                 elif etype == "content.delta":
                     delta = event.get("delta", "") if isinstance(event, dict) else ""
                     chunks.append(delta)
-                    print(delta, end="", flush=True)
+                    sys.stdout.write(delta)
+                    sys.stdout.flush()
                 elif etype == "assistant.message":
                     _usage.record_llm_turn(sdk_model)
                 elif etype == "session.idle":

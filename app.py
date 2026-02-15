@@ -3444,7 +3444,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "   - Every individual test function name and exactly what it verifies\n"
                 "   - Cover ALL of: happy path, error cases, edge cases, boundary conditions, "
                 "invalid input, missing data, concurrent access, empty states\n"
-                "   - Include unit tests, integration tests, and API endpoint tests\n"
+                "   - Include functional tests, integration tests, and API endpoint tests\n"
                 "   - Every public function MUST have at least one test\n"
                 "   - Every API route MUST have tests for success, validation error, and not-found\n"
                 "   - Every error handler MUST be tested\n"
@@ -3499,17 +3499,17 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
         _save_state("1b")
 
-    # ── Phase 2a: Unit tests (TDD, optional) ───────────────────────────
+    # ── Phase 2a: Functional tests (TDD, optional) ───────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")
     if params.tdd:
         if _phase_done("2a"):
             _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: SKIPPED — already completed"], timeout=5, cwd=wd)
-            await _notify_pipeline("⏭️ Phase 2a skipped — unit tests already written")
+            await _notify_pipeline("⏭️ Phase 2a skipped — functional tests already written")
         elif not os.path.isfile(design_path):
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
         else:
-            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: Writing failing unit tests (parallel agents)"], timeout=5, cwd=wd)
-            await _notify_pipeline("🧪 Phase 2a: Writing failing unit tests (parallel agents)")
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: Writing failing functional tests (parallel agents)"], timeout=5, cwd=wd)
+            await _notify_pipeline("🧪 Phase 2a: Writing failing functional tests (parallel agents)")
 
             try:
                 design_doc = open(design_path).read()
@@ -3547,7 +3547,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             for i, batch in enumerate(batches):
                 batch_text = "\n\n---\n\n".join(batch)
                 test_prompt = (
-                    "You are writing UNIT tests for a TDD workflow. Read BOTH the spec at "
+                    "You are writing FUNCTIONAL TESTS (not unit tests) for a TDD workflow. "
+                    "These tests use REAL implementations — real databases, real HTTP clients, "
+                    "real subprocesses. No mocking. Read BOTH the spec at "
                     ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
                     "write ONLY the test files described below.\n\n"
                     "REQUIREMENTS:\n"
@@ -3593,14 +3595,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
             if failures:
                 _run_cmd(["tk", "add-note", params.ticket_id,
-                          f"Unit test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
+                          f"Functional test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
 
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Unit test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
+                      f"Functional test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
             await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
 
             # Code review of test quality
-            await _code_review("Unit tests")
+            await _code_review("Functional tests")
 
         _save_state("2a")
 
@@ -3617,7 +3619,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "You are writing INTEGRATION tests for a TDD workflow. Read BOTH the spec at "
                 ".marvin/spec.md AND the architecture doc at .marvin/design.md.\n\n"
                 "You are writing tests that verify the REAL system works end-to-end. "
-                "These tests complement the unit tests that already exist (or will exist).\n\n"
+                "These tests complement the functional tests that already exist (or will exist).\n\n"
                 "CRITICAL RULES — READ CAREFULLY:\n"
                 "- Put integration tests in tests/test_integration.py\n"
                 "- Do NOT mock internal modules, database layer, routes, or models\n"
@@ -4033,7 +4035,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     if params.design_first:
         phases.insert(0, "Design")
     if params.tdd:
-        phases.insert(-1, "Unit tests")
+        phases.insert(-1, "Functional tests")
         phases.insert(-1, "Integration tests")
         phases.append("Debug loop")
         phases.append("E2E smoke test")

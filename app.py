@@ -2769,6 +2769,58 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
         return ""
 
+    def _project_context() -> str:
+        """Build a rich project context block from spec/design docs and file listing.
+        Injected into every code-touching sub-agent prompt so it knows what the
+        project is, what files exist, and what to focus on."""
+        parts = []
+
+        # Project identity
+        parts.append(
+            f"PROJECT: {os.path.basename(wd)}\n"
+            f"WORKING DIRECTORY: {wd}\n"
+            f"ORIGINAL TASK: {params.prompt[:300]}\n"
+        )
+
+        # Spec summary (first ~2000 chars — covers overview + user stories)
+        spec_path = os.path.join(wd, ".marvin", "spec.md")
+        if os.path.isfile(spec_path):
+            try:
+                spec_text = open(spec_path).read()
+                parts.append(f"SPEC SUMMARY (from .marvin/spec.md, {len(spec_text)} bytes total — read full file for details):\n"
+                             + spec_text[:2000] + "\n[... truncated — read .marvin/spec.md for full spec]\n")
+            except Exception:
+                pass
+
+        # Architecture summary (first ~2000 chars — covers file structure + key decisions)
+        design_path = os.path.join(wd, ".marvin", "design.md")
+        if os.path.isfile(design_path):
+            try:
+                design_text = open(design_path).read()
+                parts.append(f"ARCHITECTURE SUMMARY (from .marvin/design.md, {len(design_text)} bytes total):\n"
+                             + design_text[:2000] + "\n[... truncated — read .marvin/design.md for full architecture]\n")
+            except Exception:
+                pass
+
+        # Current file listing with sizes
+        file_list = []
+        for root, dirs, files in os.walk(wd):
+            dirs[:] = [d for d in dirs if d not in (".venv", ".git", "__pycache__", ".pytest_cache", "node_modules", ".marvin")]
+            for f in files:
+                fp = os.path.join(root, f)
+                rel = os.path.relpath(fp, wd)
+                try:
+                    sz = os.path.getsize(fp)
+                    file_list.append(f"  {rel} ({sz} bytes)")
+                except Exception:
+                    file_list.append(f"  {rel}")
+        if file_list:
+            parts.append("PROJECT FILES:\n" + "\n".join(sorted(file_list)) + "\n")
+        else:
+            parts.append("PROJECT FILES: (none yet — you are creating the project from scratch)\n")
+
+        return "\n".join(parts)
+
     # ── Code review helper ────────────────────────────────────────────
     async def _code_review(phase_label: str, focus: str = "all") -> None:
         """Run a critical code review after a phase completes.
@@ -2787,7 +2839,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         # Get app.py bridge interface context
         app_interface_hint = _marvin_interface_context()
 
-        review_prompt = (
+        review_prompt = _project_context() + "\n\n"
+        review_prompt += (
             f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase output.\n\n"
             "Read EVERY source file in the project with read_file. "
             "Also read .marvin/spec.md and .marvin/design.md to understand intended behavior.\n\n"
@@ -3081,6 +3134,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "Commit the test files with a descriptive message like "
                     "'Add failing tests for <module> (TDD red phase)'."
                 )
+                test_prompt = _project_context() + "\n\n" + test_prompt
                 test_tasks.append(_run_sub_with_retry(
                     test_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Test agent {i+1}"))
 
@@ -3141,6 +3195,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "Commit the test file with message 'Add failing integration tests (TDD red phase)'."
             )
             integ_prompt += _marvin_interface_context()
+            integ_prompt = _project_context() + "\n\n" + integ_prompt
 
             rc, out, err = await _run_sub_with_retry(
                 integ_prompt, "gpt-5.3-codex", base_timeout=300, label="Integration test agent")
@@ -3194,7 +3249,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "run_command to verify they pass."
             )
 
-        # Add Marvin CLI interface context so the agent knows how bridge.py should work
+        # Add project context, Marvin CLI interface, and question protocol
+        impl_prompt = _project_context() + "\n\n" + impl_prompt
         impl_prompt += _marvin_interface_context()
 
         # Add question protocol
@@ -3266,6 +3322,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
                     "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
                 ).format(round=debug_round, max=max_debug_rounds)
+                debug_prompt = _project_context() + "\n\n" + debug_prompt
                 debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
@@ -3324,6 +3381,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 ).format(round=e2e_round, max=max_e2e_rounds)
 
                 # Add Marvin CLI interface context so E2E agent understands bridge integration
+                e2e_prompt = _project_context() + "\n\n" + e2e_prompt
                 e2e_prompt += _marvin_interface_context()
                 e2e_prompt += (
                     "\n\nQUESTION PROTOCOL: If you need clarification about how the app should "

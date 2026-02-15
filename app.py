@@ -2506,11 +2506,16 @@ async def run_command(params: RunCommandParams) -> str:
             return "Command cancelled by user."
 
     try:
+        # Clean env so uv/pytest use the project's own venv, not the parent's
+        cmd_env = os.environ.copy()
+        cmd_env.pop("VIRTUAL_ENV", None)
+        cmd_env.pop("CONDA_PREFIX", None)
         proc = await asyncio.create_subprocess_shell(
             params.command,
             cwd=_coding_working_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=cmd_env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=params.timeout)

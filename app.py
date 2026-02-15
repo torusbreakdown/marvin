@@ -2507,9 +2507,17 @@ async def _git_run(*args: str, cwd: str | None = None) -> str:
     if not wd:
         return "No working directory set. Use set_working_dir first."
     try:
+        git_env = os.environ.copy()
+        _proj_git = os.path.join(wd, ".git")
+        if os.path.isdir(_proj_git):
+            git_env["GIT_DIR"] = _proj_git
+        else:
+            git_env.pop("GIT_DIR", None)
+        git_env["GIT_WORK_TREE"] = wd
         proc = await asyncio.create_subprocess_exec(
             "git", *args,
-            cwd=wd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=wd, env=git_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
         out = stdout.decode(errors="replace").strip()
@@ -2623,6 +2631,13 @@ async def run_command(params: RunCommandParams) -> str:
         cmd_env = os.environ.copy()
         cmd_env.pop("VIRTUAL_ENV", None)
         cmd_env.pop("CONDA_PREFIX", None)
+        # Ensure git uses the project's repo, not any parent GIT_DIR
+        if _coding_working_dir:
+            _proj_git = os.path.join(_coding_working_dir, ".git")
+            if os.path.isdir(_proj_git):
+                cmd_env["GIT_DIR"] = _proj_git
+            else:
+                cmd_env.pop("GIT_DIR", None)
         proc = await asyncio.create_subprocess_shell(
             params.command,
             cwd=_coding_working_dir,
@@ -2792,6 +2807,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
         sub_env.pop("CONDA_PREFIX", None)
+        # Reset GIT_DIR so sub-agents use the project's .git, not the parent's
+        sub_env.pop("GIT_DIR", None)
+        sub_env["GIT_DIR"] = os.path.join(wd, ".git")
         sub_env["MARVIN_DEPTH"] = str(depth + 1)
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id

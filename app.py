@@ -75,69 +75,72 @@ def _log_tool_call(name: str, args: dict, result: str, elapsed_s: float) -> None
 import time as _time
 
 def _wrap_tools_with_logging(tools: list) -> list:
-    """Wrap each tool function so every call is logged to the JSONL file.
+    """Monkey-patch each SDK tool's handler to log every call to the JSONL file.
 
-    Works with both SDK-decorated tools (_original_fn) and plain functions.
-    Preserves all attributes the SDK needs (name, _original_fn, _tool_description, etc).
+    The Copilot SDK stores the callable in tool.handler. We replace it with a
+    wrapper that logs args/result/timing, then calls the original handler.
+    For non-SDK tools (plain functions), we wrap similarly via _original_fn.
     """
     if not _SUBAGENT_TOOL_LOG:
         return tools
 
-    import functools, inspect
+    import functools
 
-    wrapped = []
     for tool in tools:
-        orig_fn = getattr(tool, "_original_fn", tool)
-        fn_name = getattr(tool, "name", None) or orig_fn.__name__
+        fn_name = getattr(tool, "name", None) or getattr(tool, "__name__", "unknown")
 
-        @functools.wraps(orig_fn)
-        async def _logged_fn(_params=None, *, _orig=orig_fn, _name=fn_name):
-            args = {}
-            if _params is not None:
+        if hasattr(tool, "handler"):
+            # SDK Tool dataclass — patch handler in-place
+            orig_handler = tool.handler
+
+            @functools.wraps(orig_handler)
+            async def _logged_handler(*args, _orig=orig_handler, _name=fn_name, **kwargs):
+                call_args = {}
+                for a in args:
+                    if hasattr(a, "__dict__"):
+                        call_args.update(a.__dict__)
+                    elif hasattr(a, "model_dump"):
+                        call_args.update(a.model_dump())
+                call_args.update(kwargs)
+                t0 = _time.time()
                 try:
-                    args = _params.__dict__ if hasattr(_params, "__dict__") else {"value": str(_params)}
-                except Exception:
-                    args = {"value": str(_params)}
-            t0 = _time.time()
-            try:
-                result = await _orig(_params) if _params is not None else await _orig()
-                elapsed = _time.time() - t0
-                _log_tool_call(_name, args, str(result), elapsed)
-                return result
-            except Exception as e:
-                elapsed = _time.time() - t0
-                _log_tool_call(_name, args, f"ERROR: {e}", elapsed)
-                raise
+                    result = await _orig(*args, **kwargs)
+                    elapsed = _time.time() - t0
+                    _log_tool_call(_name, call_args, str(result), elapsed)
+                    return result
+                except Exception as e:
+                    elapsed = _time.time() - t0
+                    _log_tool_call(_name, call_args, f"ERROR: {e}", elapsed)
+                    raise
 
-        # Preserve SDK attributes on the wrapper
-        _logged_fn._original_fn = _logged_fn  # non-SDK path calls _original_fn directly
-        if hasattr(tool, "name"):
-            _logged_fn.name = tool.name
-        if hasattr(tool, "_tool_description"):
-            _logged_fn._tool_description = tool._tool_description
-        # Copy any other SDK attributes (schema, etc.)
-        for attr in ("__tool_schema__", "__tool_params__", "schema", "parameters"):
-            if hasattr(tool, attr):
-                setattr(_logged_fn, attr, getattr(tool, attr))
+            tool.handler = _logged_handler
 
-        # If the original is an SDK-decorated tool, we need to re-wrap it so the
-        # SDK sees our logged version.  The SDK calls the tool object directly
-        # (tool(params)), so we create a callable that delegates to _logged_fn.
-        if hasattr(tool, "_original_fn") and tool is not orig_fn and CopilotClient is not None:
-            # SDK tool — need to produce a new SDK-compatible wrapper
-            try:
-                # Re-decorate with the SDK define_tool
-                desc = getattr(tool, "_tool_description", "")
-                new_tool = _orig_define_tool(description=desc)(_logged_fn)
-                new_tool._original_fn = _logged_fn
-                wrapped.append(new_tool)
-            except Exception:
-                # Fallback: just replace _original_fn on a copy
-                wrapped.append(_logged_fn)
-        else:
-            wrapped.append(_logged_fn)
+        elif hasattr(tool, "_original_fn"):
+            # Non-SDK decorated tool — patch _original_fn
+            orig_fn = tool._original_fn
 
-    return wrapped
+            @functools.wraps(orig_fn)
+            async def _logged_fn(_params=None, *, _orig=orig_fn, _name=fn_name):
+                call_args = {}
+                if _params is not None:
+                    try:
+                        call_args = _params.__dict__ if hasattr(_params, "__dict__") else {"value": str(_params)}
+                    except Exception:
+                        call_args = {"value": str(_params)}
+                t0 = _time.time()
+                try:
+                    result = await _orig(_params) if _params is not None else await _orig()
+                    elapsed = _time.time() - t0
+                    _log_tool_call(_name, call_args, str(result), elapsed)
+                    return result
+                except Exception as e:
+                    elapsed = _time.time() - t0
+                    _log_tool_call(_name, call_args, f"ERROR: {e}", elapsed)
+                    raise
+
+            tool._original_fn = _logged_fn
+
+    return tools
 
 
 # ── Usage tracking ──────────────────────────────────────────────────────────

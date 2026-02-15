@@ -2715,9 +2715,9 @@ async def install_packages(params: InstallPackagesParams) -> str:
 # ── Sub-agent dispatch ───────────────────────────────────────────────────────
 
 _AGENT_MODELS = {
-    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),
-    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),
-    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6")),
+    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),       # tests, implementation, review fixes
+    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),      # code reviews (readonly)
+    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", "gpt-5.2"),             # spec, architecture, debugging
 }
 
 
@@ -3834,8 +3834,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         await _notify_pipeline("⏭️ Phase 3 skipped — implementation already done")
         impl_out = "(resumed — implementation was already complete)"
     else:
-        _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5, cwd=wd)
-        await _notify_pipeline(f"🔨 Phase 3: Implementation started ({tier}/{model_name})")
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({_AGENT_MODELS['codex']})"], timeout=5, cwd=wd)
+        await _notify_pipeline(f"🔨 Phase 3: Implementation started ({_AGENT_MODELS['codex']})")
 
         impl_prompt = params.prompt
         spec_path = os.path.join(wd, ".marvin", "spec.md")
@@ -3880,7 +3880,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "by reading the spec/design docs."
         )
 
-        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=1200, label="Implementation")
+        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Implementation")
         if rc != 0:
             _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
@@ -3949,7 +3949,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
-                    debug_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"Debug round {debug_round}")
+                    debug_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"Debug round {debug_round}")
 
                 if "ALL_TESTS_PASS" in (dbg_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5, cwd=wd)
@@ -4013,7 +4013,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
 
                 rc, e2e_out, e2e_err = await _run_sub_with_retry(
-                    e2e_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"E2E round {e2e_round}")
+                    e2e_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"E2E round {e2e_round}")
 
                 if "E2E_SMOKE_PASS" in (e2e_out or ""):
                     _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5, cwd=wd)
@@ -4181,7 +4181,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt += _marvin_interface_context()
 
                 rc, fix_out, fix_err = await _run_sub_with_retry(
-                    fix_prompt, _AGENT_MODELS["codex"], base_timeout=1800,
+                    fix_prompt, _AGENT_MODELS["plan"], base_timeout=1800,
                     label=f"QA-fix-round-{qa_round}")
 
                 _run_cmd(["tk", "add-note", params.ticket_id,

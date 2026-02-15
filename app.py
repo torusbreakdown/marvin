@@ -2819,6 +2819,32 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         else:
             parts.append("PROJECT FILES: (none yet — you are creating the project from scratch)\n")
 
+        # Marvin upstream source — the AI assistant this project integrates with
+        upstream_dir = os.path.join(wd, ".marvin", "upstream")
+        upstream_files = []
+        if os.path.isdir(upstream_dir):
+            for f in sorted(os.listdir(upstream_dir)):
+                fp = os.path.join(upstream_dir, f)
+                if os.path.isfile(fp):
+                    try:
+                        upstream_files.append(f"  .marvin/upstream/{f} ({os.path.getsize(fp)} bytes)")
+                    except Exception:
+                        pass
+        if upstream_files:
+            parts.append(
+                "MARVIN UPSTREAM SOURCE (the AI assistant this web UI wraps):\n"
+                "These files are the SOURCE CODE of Marvin itself. You MUST read them to\n"
+                "understand how the bridge/subprocess integration works:\n"
+                + "\n".join(upstream_files) + "\n\n"
+                "CRITICAL: Read .marvin/upstream/app.py with read_file to understand:\n"
+                "  - The --non-interactive --prompt interface (search for '_run_non_interactive')\n"
+                "  - How Marvin processes prompts and streams responses to stdout\n"
+                "  - What flags/env vars are available (--working-dir, --ntfy, MARVIN_MODEL, etc.)\n"
+                "  - The tool system and how Marvin uses tools internally\n"
+                "Read .marvin/upstream/README.md and .marvin/upstream/REFERENCE.md for\n"
+                "user-facing documentation and CLI reference.\n"
+            )
+
         return "\n".join(parts)
 
     # ── Code review helper ────────────────────────────────────────────
@@ -2901,6 +2927,20 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             return _phase_order.index(completed_phase) >= _phase_order.index(phase)
         except ValueError:
             return False
+
+    # Copy Marvin source + docs into .marvin/upstream/ so sub-agents can read them
+    upstream_dir = os.path.join(wd, ".marvin", "upstream")
+    os.makedirs(upstream_dir, exist_ok=True)
+    for src_file in ["app.py", "README.md", "REFERENCE.md"]:
+        src_path = os.path.join(os.path.dirname(app_path), src_file)
+        dst_path = os.path.join(upstream_dir, src_file)
+        if os.path.isfile(src_path) and (
+            not os.path.isfile(dst_path) or os.path.getmtime(src_path) > os.path.getmtime(dst_path)
+        ):
+            try:
+                shutil.copy2(src_path, dst_path)
+            except Exception:
+                pass
 
     # Auto-generate an ntfy topic for this pipeline run if none was provided
     global _ntfy_override_topic

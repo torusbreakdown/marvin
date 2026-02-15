@@ -2662,12 +2662,71 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     async def _run_sub_with_retry(
         prompt: str, model: str, base_timeout: int = 600, label: str = "",
+        allow_questions: int = 3,
     ) -> tuple[int, str, str]:
-        """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time."""
+        """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
+
+        If allow_questions > 0, the sub-agent can output 'QUESTIONS_FOR_PARENT:'
+        followed by numbered questions. The parent answers them using its own
+        context (spec, design docs, app.py interface) and re-runs with answers
+        appended. Up to `allow_questions` Q&A rounds.
+        """
+        qa_context = ""
+        questions_asked = 0
+
         rc, out, err = -1, "", ""
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
-            rc, out, err = await _run_sub(prompt, model, timeout_s=timeout_s, label=label)
+            full_prompt = prompt + qa_context
+            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label)
+
+            # Check if sub-agent is asking questions instead of finishing
+            if questions_asked < allow_questions and "QUESTIONS_FOR_PARENT:" in (out or ""):
+                q_start = out.index("QUESTIONS_FOR_PARENT:")
+                questions_text = out[q_start + len("QUESTIONS_FOR_PARENT:"):].strip()
+                if questions_text:
+                    questions_asked += 1
+                    _run_cmd(["tk", "add-note", params.ticket_id,
+                              f"{label}: sub-agent asked questions (round {questions_asked}/{allow_questions})"], timeout=5)
+                    await _notify_pipeline(f"❓ {label}: answering sub-agent questions ({questions_asked}/{allow_questions})")
+
+                    # Build parent context to answer questions
+                    answer_ctx_parts = []
+                    spec_path = os.path.join(wd, ".marvin", "spec.md")
+                    design_path = os.path.join(wd, ".marvin", "design.md")
+                    for doc_path, doc_name in [(spec_path, "spec.md"), (design_path, "design.md")]:
+                        if os.path.isfile(doc_path):
+                            try:
+                                content = open(doc_path).read()[:8000]
+                                answer_ctx_parts.append(f"=== {doc_name} (truncated) ===\n{content}")
+                            except Exception:
+                                pass
+                    answer_ctx_parts.append(_marvin_interface_context())
+
+                    # Use parent's LLM to answer the questions
+                    answer_prompt = (
+                        "A sub-agent working on this project has questions. Answer each one "
+                        "concisely and specifically based on the project context below.\n\n"
+                        f"QUESTIONS:\n{questions_text}\n\n"
+                        "PROJECT CONTEXT:\n" + "\n\n".join(answer_ctx_parts)
+                    )
+                    # Run a quick opus call to answer
+                    a_rc, answers, _ = await _run_sub(
+                        answer_prompt, "claude-opus-4.6", timeout_s=120, label=f"{label} Q&A")
+
+                    if a_rc == 0 and answers:
+                        qa_context += (
+                            f"\n\nYou previously asked questions. Here are the answers from the "
+                            f"parent orchestrator (round {questions_asked}):\n"
+                            f"YOUR QUESTIONS:\n{questions_text}\n\n"
+                            f"ANSWERS:\n{answers}\n\n"
+                            "Now continue with your task using these answers. Do NOT ask more "
+                            "questions unless absolutely necessary."
+                        )
+                        # Don't count this as a retry attempt — re-run with answers
+                        continue
+                    # If answering failed, fall through to normal retry logic
+
             if rc == 0:
                 return rc, out, err
             combined = f"{out} {err}"
@@ -2682,6 +2741,33 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         _run_cmd(["tk", "add-note", params.ticket_id,
                   f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
+
+    # ── Marvin CLI interface context for sub-agents ─────────────────────
+    def _marvin_interface_context() -> str:
+        """Extract the --non-interactive CLI interface from app.py so sub-agents
+        know how bridge.py should invoke Marvin."""
+        try:
+            with open(app_path) as _af:
+                _app_src = _af.read()
+            _ni_start = _app_src.find("async def _run_non_interactive")
+            if _ni_start >= 0:
+                _ni_end = _app_src.find("\n\n\n", _ni_start)
+                snippet = _app_src[_ni_start:_ni_end][:2000]
+                return (
+                    "\n\nMARVIN CLI INTERFACE — this is how the web UI must communicate with Marvin:\n"
+                    "The backend's bridge module spawns app.py as a subprocess. Key facts:\n"
+                    "  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt\n"
+                    "  - Marvin streams its response to stdout (the bridge reads this via async pipe)\n"
+                    "  - For CONVERSATION CONTEXT, the bridge must include prior messages in the prompt\n"
+                    "    (e.g. format as 'Previous messages:\\nUser: ...\\nAssistant: ...\\n\\nNew message: ...')\n"
+                    "    because each --non-interactive invocation is stateless — there is NO session persistence\n"
+                    "  - The --prompt flag accepts the full conversation context as a single string\n"
+                    "  - stderr contains cost/debug info, NOT the response\n\n"
+                    "```python\n" + snippet + "\n```\n"
+                )
+        except Exception:
+            pass
+        return ""
 
     # ── Code review helper ────────────────────────────────────────────
     async def _code_review(phase_label: str, focus: str = "all") -> None:
@@ -2698,21 +2784,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 if f.endswith((".py", ".js", ".html", ".css", ".toml", ".yaml", ".yml", ".json", ".md")):
                     file_list.append(os.path.relpath(os.path.join(root, f), wd))
 
-        # Read app.py bridge interface so reviewer knows the CLI contract
-        app_interface_hint = ""
-        try:
-            with open(app_path) as _af:
-                _app_src = _af.read()
-            # Extract the --non-interactive arg parsing section
-            _ni_start = _app_src.find("async def _run_non_interactive")
-            if _ni_start >= 0:
-                _ni_end = _app_src.find("\n\n\n", _ni_start)
-                app_interface_hint = (
-                    "\n\nMARVIN CLI INTERFACE (bridge.py must call app.py correctly):\n"
-                    "```python\n" + _app_src[_ni_start:_ni_end][:2000] + "\n```\n"
-                )
-        except Exception:
-            pass
+        # Get app.py bridge interface context
+        app_interface_hint = _marvin_interface_context()
 
         review_prompt = (
             f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase output.\n\n"
@@ -3067,6 +3140,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "- Do NOT try to run the tests — they are expected to fail\n\n"
                 "Commit the test file with message 'Add failing integration tests (TDD red phase)'."
             )
+            integ_prompt += _marvin_interface_context()
 
             rc, out, err = await _run_sub_with_retry(
                 integ_prompt, "gpt-5.3-codex", base_timeout=300, label="Integration test agent")
@@ -3119,6 +3193,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "the code to make them pass. After implementing, run the tests with "
                 "run_command to verify they pass."
             )
+
+        # Add Marvin CLI interface context so the agent knows how bridge.py should work
+        impl_prompt += _marvin_interface_context()
+
+        # Add question protocol
+        impl_prompt += (
+            "\n\nQUESTION PROTOCOL: If you need clarification about the project architecture, "
+            "the Marvin CLI interface, or how components should integrate, you may ask by "
+            "responding with ONLY 'QUESTIONS_FOR_PARENT:' followed by your numbered questions. "
+            "The parent orchestrator will answer and re-run you with the answers. "
+            "Use this sparingly — only for genuine blockers, not things you can figure out "
+            "by reading the spec/design docs."
+        )
 
         rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=600, label="Implementation")
         if rc != 0:
@@ -3179,6 +3266,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "Make MINIMAL changes to fix failures. Do NOT refactor working code. "
                     "Commit each fix with a message like 'Fix <what> to pass <test_name>'."
                 ).format(round=debug_round, max=max_debug_rounds)
+                debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
                     debug_prompt, "gpt-5.3-codex", base_timeout=300, label=f"Debug round {debug_round}")
@@ -3234,6 +3322,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "Make MINIMAL fixes. Commit each fix with a descriptive message. "
                     "After fixing, re-run 'pytest -v' to make sure you didn't break tests."
                 ).format(round=e2e_round, max=max_e2e_rounds)
+
+                # Add Marvin CLI interface context so E2E agent understands bridge integration
+                e2e_prompt += _marvin_interface_context()
+                e2e_prompt += (
+                    "\n\nQUESTION PROTOCOL: If you need clarification about how the app should "
+                    "work, respond with ONLY 'QUESTIONS_FOR_PARENT:' followed by your numbered "
+                    "questions. The parent will answer and re-run you."
+                )
 
                 rc, e2e_out, e2e_err = await _run_sub_with_retry(
                     e2e_prompt, "gpt-5.3-codex", base_timeout=300, label=f"E2E round {e2e_round}")

@@ -2777,6 +2777,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             return False
 
     # Auto-generate an ntfy topic for this pipeline run if none was provided
+    global _ntfy_override_topic
     if not _ntfy_override_topic:
         import random as _rng
         _dict_path = "/usr/share/dict/words"

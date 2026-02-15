@@ -2024,12 +2024,24 @@ _LOCK_EXPIRE_SECONDS = 300  # 5 minutes
 
 
 def _resolve_coding_path(rel_path: str) -> str:
-    """Resolve a path relative to coding working directory."""
+    """Resolve a path relative to coding working directory.
+    Absolute paths are rejected — all paths must be relative to the working dir.
+    Paths that escape the working dir via '..' are also rejected.
+    """
     if not _coding_working_dir:
         raise ValueError("No working directory set. Use set_working_dir first.")
     if os.path.isabs(rel_path):
-        return rel_path
-    return os.path.normpath(os.path.join(_coding_working_dir, rel_path))
+        # Strip leading path components to make it relative to working dir
+        # e.g. /home/user/project/foo.py → foo.py (best effort)
+        stripped = os.path.relpath(rel_path, _coding_working_dir)
+        if stripped.startswith(".."):
+            raise ValueError(f"Absolute path '{rel_path}' is outside the working directory. Use a relative path instead.")
+        rel_path = stripped
+    resolved = os.path.normpath(os.path.join(_coding_working_dir, rel_path))
+    # Ensure resolved path is within working dir
+    if not resolved.startswith(os.path.normpath(_coding_working_dir) + os.sep) and resolved != os.path.normpath(_coding_working_dir):
+        raise ValueError(f"Path '{rel_path}' resolves outside the working directory.")
+    return resolved
 
 
 def _lock_path(directory: str) -> str:
@@ -2160,12 +2172,12 @@ class GetWorkingDirParams(BaseModel):
 
 
 class CreateFileParams(BaseModel):
-    path: str = Field(description="File path (relative to working dir or absolute)")
+    path: str = Field(description="File path relative to working directory (no absolute paths)")
     content: str = Field(description="File content to write")
 
 
 class ApplyPatchParams(BaseModel):
-    path: str = Field(description="File path to edit (relative to working dir or absolute)")
+    path: str = Field(description="File path relative to working directory (no absolute paths)")
     old_str: str = Field(description="Exact string to find in the file (must match exactly)")
     new_str: str = Field(description="Replacement string")
 

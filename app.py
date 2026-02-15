@@ -10513,8 +10513,31 @@ async def _run_non_interactive():
     print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
 
 
+def _print_help() -> None:
+    print(
+        "Local Finder (Marvin)\n\n"
+        "Usage:\n"
+        "  python app.py                 # curses UI (default)\n"
+        "  python app.py --plain         # plain terminal UI\n"
+        "  python app.py 'your prompt'   # single-shot\n\n"
+        "Options:\n"
+        "  -h, --help                    Show this help\n"
+        "  --plain                       Disable curses UI\n"
+        "  --curses                      Force curses UI\n"
+        "  --provider <name>             LLM provider override\n"
+        "  --ntfy [topic]                Override ntfy topic (or auto-generate)\n\n"
+        "Sub-agent (non-interactive) mode:\n"
+        "  python app.py --non-interactive --prompt '...' [--working-dir DIR] [--ntfy TOPIC]\n"
+        "  python app.py --non-interactive --design-first --prompt '...' [--working-dir DIR]\n"
+    )
+
+
 async def main():
     global _profile_switch_requested, _compact_session_requested, _coding_mode, _coding_working_dir, _ntfy_override_topic
+
+    if "--help" in sys.argv or "-h" in sys.argv:
+        _print_help()
+        return
 
     # Non-interactive sub-agent mode
     if "--non-interactive" in sys.argv:

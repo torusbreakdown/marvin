@@ -167,6 +167,13 @@ class UsageTracker:
         "github_clone": 0.0,
         "github_read_file": 0.0,
         "create_ticket": 0.0,
+        "ticket_add_dep": 0.0,
+        "ticket_start": 0.0,
+        "ticket_close": 0.0,
+        "ticket_add_note": 0.0,
+        "ticket_show": 0.0,
+        "ticket_list": 0.0,
+        "ticket_dep_tree": 0.0,
         "github_grep": 0.0,
         "weather_forecast": 0.0,           # Open-Meteo, free
         "convert_units": 0.0,              # Frankfurter, free
@@ -2987,8 +2994,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 _app_src = _af.read()
             _ni_start = _app_src.find("async def _run_non_interactive")
             if _ni_start >= 0:
-                _ni_end = _app_src.find("\n\n\n", _ni_start)
-                snippet = _app_src[_ni_start:_ni_end][:2000]
+                # Find the end of the function signature + arg parsing block only
+                # Stop at the first blank line after "sys.exit(1)" (end of arg parsing)
+                _ni_end = _app_src.find("# Set up coding mode", _ni_start)
+                if _ni_end < 0:
+                    _ni_end = _ni_start + 800
+                snippet = _app_src[_ni_start:_ni_end].strip()
+                # Cap at 800 chars to avoid leaking unrelated source
+                snippet = snippet[:800]
                 return (
                     "\n\nMARVIN CLI INTERFACE — this is how the web UI must communicate with Marvin:\n"
                     "The backend's bridge module spawns app.py as a subprocess. Key facts:\n"
@@ -3209,7 +3222,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         return ""
 
     completed_phase = _load_state()
-    _phase_order = ["1a", "1b", "2a", "2b", "3", "4a", "4b"]
+    _phase_order = ["1a", "1b", "2a", "2b", "3", "4a", "4b", "5"]
     def _phase_done(phase: str) -> bool:
         if not completed_phase:
             return False
@@ -3733,6 +3746,174 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 await _notify_pipeline(f"⚠️ Phase 4b: E2E smoke test exhausted ({max_e2e_rounds} rounds)")
         _save_state("4b")
 
+    # ── Phase 5: Adversarial QA ──────────────────────────────────────────
+    if params.tdd:
+        if _phase_done("5"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: SKIPPED — already completed"], timeout=5, cwd=wd)
+            await _notify_pipeline("⏭️ Phase 5 skipped — adversarial QA already done")
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: Adversarial QA — battle-testing every feature"], timeout=5, cwd=wd)
+            await _notify_pipeline("⚔️ Phase 5: Adversarial QA — battle-testing every feature")
+
+            # Read spec to build QA areas
+            spec_text = ""
+            spec_path = os.path.join(wd, ".marvin", "spec.md")
+            if os.path.isfile(spec_path):
+                try:
+                    spec_text = open(spec_path).read()
+                except Exception:
+                    pass
+
+            # Define QA focus areas — each gets a parallel adversarial agent
+            qa_areas = [
+                {
+                    "area": "API & Data Integrity",
+                    "focus": (
+                        "Battle-test every API endpoint. Try:\n"
+                        "- Malformed JSON, missing fields, extra fields, wrong types\n"
+                        "- SQL injection in all text inputs (titles, messages, search)\n"
+                        "- Extremely long strings (100K+ chars), empty strings, unicode, null bytes\n"
+                        "- Concurrent requests (create+delete same resource simultaneously)\n"
+                        "- Race conditions (two renames at once, delete during stream)\n"
+                        "- Boundary values: conversation with 0 messages, 1000 messages\n"
+                        "- Verify all error responses have correct HTTP codes and valid JSON bodies"
+                    ),
+                },
+                {
+                    "area": "SSE Streaming & Bridge",
+                    "focus": (
+                        "Battle-test the streaming chat functionality. Try:\n"
+                        "- Send a message, immediately disconnect — does the server clean up?\n"
+                        "- Send multiple messages rapidly without waiting for responses\n"
+                        "- Verify SSE event format is correct (data: prefix, double newline)\n"
+                        "- Check that the bridge subprocess is killed on client disconnect\n"
+                        "- Verify streaming works with very long responses (mock if needed)\n"
+                        "- Test the stop/cancel functionality mid-stream\n"
+                        "- Verify conversation history is correctly passed to the CLI"
+                    ),
+                },
+                {
+                    "area": "Frontend & Security",
+                    "focus": (
+                        "Battle-test the frontend for XSS and rendering issues. Try:\n"
+                        "- XSS payloads in message content: <script>, <img onerror=>, javascript: URLs\n"
+                        "- XSS in conversation titles (create conv with script tag name)\n"
+                        "- Markdown rendering edge cases: nested code blocks, unclosed tags\n"
+                        "- Theme switching during streaming — does it break?\n"
+                        "- Keyboard shortcuts during modal dialogs\n"
+                        "- Test all interactive states: empty state, loading, error, overflow\n"
+                        "- Verify responsive breakpoints actually work (check CSS media queries)\n"
+                        "- Check for console.log/debug statements left in production JS"
+                    ),
+                },
+                {
+                    "area": "Error Handling & Edge Cases",
+                    "focus": (
+                        "Battle-test error handling and resilience. Try:\n"
+                        "- Start the server, corrupt/delete the database file, then make requests\n"
+                        "- Request a conversation that doesn't exist (404 handling)\n"
+                        "- Send requests with missing Content-Type header\n"
+                        "- Test CORS headers if applicable\n"
+                        "- Verify static file 404s return proper errors (not stack traces)\n"
+                        "- Test graceful shutdown (SIGTERM while streaming)\n"
+                        "- Verify all file paths are safe (no path traversal in static serving)\n"
+                        "- Check that the app starts cleanly with no existing database"
+                    ),
+                },
+            ]
+
+            max_qa_rounds = int(os.environ.get("MARVIN_QA_ROUNDS", "3"))
+            for qa_round in range(1, max_qa_rounds + 1):
+                await _notify_pipeline(f"⚔️ QA round {qa_round}/{max_qa_rounds} — launching {len(qa_areas)} adversarial agents")
+
+                qa_tasks = []
+                for qa in qa_areas:
+                    qa_prompt = _project_context() + "\n\n"
+                    qa_prompt += (
+                        f"You are an ADVERSARIAL QA tester (round {qa_round}/{max_qa_rounds}). "
+                        f"Your focus area: **{qa['area']}**\n\n"
+                        "Your job is to BREAK the application. Find bugs, security holes, crashes, "
+                        "and spec violations. Be creative and ruthless.\n\n"
+                        "IMPORTANT RULES:\n"
+                        "1. DO NOT edit any source code. You are READ-ONLY.\n"
+                        "2. DO NOT fix anything. Only find and report issues.\n"
+                        "3. Start the server, run tests, make HTTP requests, inspect source.\n"
+                        "4. Use run_command for curl, pytest, starting the server, etc.\n"
+                        "5. Use read_file to inspect source code for security issues.\n\n"
+                        f"TEST PLAN:\n{qa['focus']}\n\n"
+                        "Read .marvin/spec.md for expected behavior.\n\n"
+                        "OUTPUT FORMAT — respond with ONLY this structured report:\n"
+                        "```\n"
+                        "QA_REPORT: {area}\n"
+                        "SEVERITY: critical|major|minor|clean\n\n"
+                        "FINDINGS:\n"
+                        "1. [CRITICAL/MAJOR/MINOR] <file:line> — <description>\n"
+                        "   REPRO: <exact command or steps to reproduce>\n"
+                        "   EXPECTED: <what should happen>\n"
+                        "   ACTUAL: <what actually happens>\n\n"
+                        "2. ...\n\n"
+                        "PASSED CHECKS:\n"
+                        "- <thing that worked correctly>\n"
+                        "- ...\n"
+                        "```\n\n"
+                        "If you find no issues, set SEVERITY: clean and list what you verified.\n"
+                        "Kill any server processes you started before finishing."
+                    ).format(area=qa["area"])
+                    qa_prompt += _marvin_interface_context()
+
+                    qa_tasks.append(_run_sub_with_retry(
+                        qa_prompt, "claude-opus-4.6", base_timeout=1200,
+                        label=f"QA-{qa['area'].replace(' ', '-')}-r{qa_round}"))
+
+                qa_results = await asyncio.gather(*qa_tasks)
+
+                # Collect findings from all QA agents
+                all_findings = []
+                clean_areas = []
+                for (rc, qa_out, qa_err), qa in zip(qa_results, qa_areas):
+                    qa_text = qa_out or ""
+                    if "SEVERITY: clean" in qa_text:
+                        clean_areas.append(qa["area"])
+                    elif "CRITICAL" in qa_text or "MAJOR" in qa_text:
+                        all_findings.append(f"=== {qa['area']} ===\n{qa_text}")
+
+                summary = f"{len(clean_areas)} clean, {len(all_findings)} with issues"
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA round {qa_round}: {summary}"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"⚔️ QA round {qa_round} results: {summary}")
+
+                if not all_findings:
+                    _run_cmd(["tk", "add-note", params.ticket_id,
+                              f"QA passed — all {len(qa_areas)} areas clean after round {qa_round}"], timeout=5, cwd=wd)
+                    await _notify_pipeline(f"✅ Phase 5: All QA areas clean after round {qa_round}!")
+                    break
+
+                # Dispatch a fixer agent with the combined findings
+                fix_prompt = _project_context() + "\n\n"
+                fix_prompt += (
+                    f"QA round {qa_round} found issues that need fixing. "
+                    "Below are the findings from adversarial testers. "
+                    "Fix EVERY critical and major issue. Ignore minor issues for now.\n\n"
+                    "After fixing, run 'pytest -v' to make sure you haven't broken anything.\n"
+                    "Commit each fix with a message like 'QA fix: <description>'.\n\n"
+                    "FINDINGS:\n" + "\n\n".join(all_findings)
+                )
+                fix_prompt += _marvin_interface_context()
+
+                rc, fix_out, fix_err = await _run_sub_with_retry(
+                    fix_prompt, "gpt-5.3-codex", base_timeout=1800,
+                    label=f"QA-fix-round-{qa_round}")
+
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA fix round {qa_round} complete (exit {rc})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"🔧 QA fix round {qa_round} complete")
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA exhausted ({max_qa_rounds} rounds) — some issues may remain"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"⚠️ Phase 5: QA exhausted ({max_qa_rounds} rounds)")
+
+        _save_state("5")
+
     # ── Done ─────────────────────────────────────────────────────────────
     _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5, cwd=wd)
     _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=wd)
@@ -3745,6 +3926,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         phases.insert(-1, "Integration tests")
         phases.append("Debug loop")
         phases.append("E2E smoke test")
+        phases.append("Adversarial QA")
 
     await _notify_pipeline(f"✅ Pipeline complete ({' → '.join(phases)})\nTicket: {params.ticket_id}")
     return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
@@ -7711,6 +7893,92 @@ async def create_ticket(params: CreateTicketParams) -> str:
     return f"Created ticket: {ticket_id}"
 
 
+class TicketDepParams(BaseModel):
+    ticket_id: str = Field(description="The ticket that depends on another")
+    depends_on: str = Field(description="The ticket it depends on (must be completed first)")
+
+
+@define_tool(
+    description="Add a dependency between tickets: ticket_id depends on depends_on. "
+    "The dependent ticket is blocked until the dependency is closed."
+)
+async def ticket_add_dep(params: TicketDepParams) -> str:
+    ok, out = _run_cmd(["tk", "dep", params.ticket_id, params.depends_on], timeout=5, cwd=wd)
+    return out.strip() if ok else f"Failed: {out}"
+
+
+class TicketStatusParams(BaseModel):
+    ticket_id: str = Field(description="Ticket ID to update")
+
+
+@define_tool(
+    description="Mark a ticket as in_progress (started). Use when beginning work on a ticket."
+)
+async def ticket_start(params: TicketStatusParams) -> str:
+    ok, out = _run_cmd(["tk", "start", params.ticket_id], timeout=5, cwd=wd)
+    return out.strip() if ok else f"Failed: {out}"
+
+
+@define_tool(
+    description="Close a ticket (mark as done). Use when a task is fully complete."
+)
+async def ticket_close(params: TicketStatusParams) -> str:
+    ok, out = _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=wd)
+    return out.strip() if ok else f"Failed: {out}"
+
+
+class TicketNoteParams(BaseModel):
+    ticket_id: str = Field(description="Ticket ID to add a note to")
+    note: str = Field(description="The note text to append (timestamped automatically)")
+
+
+@define_tool(
+    description="Add a timestamped note to a ticket. Use for progress updates, findings, "
+    "blockers, or any important information about the task."
+)
+async def ticket_add_note(params: TicketNoteParams) -> str:
+    ok, out = _run_cmd(["tk", "add-note", params.ticket_id, params.note], timeout=5, cwd=wd)
+    return out.strip() if ok else f"Failed: {out}"
+
+
+@define_tool(
+    description="Show full details of a ticket including description, notes, dependencies, and status."
+)
+async def ticket_show(params: TicketStatusParams) -> str:
+    ok, out = _run_cmd(["tk", "show", params.ticket_id], timeout=10, cwd=wd)
+    return out if ok else f"Failed: {out}"
+
+
+class TicketListParams(BaseModel):
+    status: str = Field(default="", description="Filter by status: 'open', 'in_progress', 'closed', or empty for all")
+    tags: str = Field(default="", description="Filter by tag")
+
+
+@define_tool(
+    description="List tickets in the current project. Optionally filter by status or tag."
+)
+async def ticket_list(params: TicketListParams) -> str:
+    cmd = ["tk", "list"]
+    if params.status:
+        cmd += [f"--status={params.status}"]
+    if params.tags:
+        cmd += ["-T", params.tags]
+    ok, out = _run_cmd(cmd, timeout=10, cwd=wd)
+    return out if ok else f"Failed: {out}"
+
+
+class TicketTreeParams(BaseModel):
+    ticket_id: str = Field(description="Root ticket ID to show dependency tree for")
+
+
+@define_tool(
+    description="Show the dependency tree for a ticket — all its children, their deps, and status."
+)
+async def ticket_dep_tree(params: TicketTreeParams) -> str:
+    ok, out = _run_cmd(["tk", "dep", "tree", params.ticket_id], timeout=10, cwd=wd)
+    return out if ok else f"Failed: {out}"
+
+
 # ── Tool: GitHub search ─────────────────────────────────────────────────────
 
 class GitHubSearchParams(BaseModel):
@@ -9574,7 +9842,8 @@ def _build_all_tools():
         file_read_lines, file_apply_patch,
         github_search, github_clone, github_read_file,
         github_grep,
-        create_ticket,
+        create_ticket, ticket_add_dep, ticket_start, ticket_close,
+        ticket_add_note, ticket_show, ticket_list, ticket_dep_tree,
         weather_forecast,
         convert_units,
         dictionary_lookup,

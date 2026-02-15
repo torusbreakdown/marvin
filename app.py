@@ -2803,7 +2803,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         except Exception:
             pass
 
-    async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "") -> tuple[int, str, str]:
+    async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "", readonly: bool = False) -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
@@ -2815,6 +2815,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
+        if readonly:
+            sub_env["MARVIN_READONLY"] = "1"
         cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
@@ -2924,7 +2926,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     async def _run_sub_with_retry(
         prompt: str, model: str, base_timeout: int = 600, label: str = "",
-        allow_questions: int = 3,
+        allow_questions: int = 3, readonly: bool = False,
     ) -> tuple[int, str, str]:
         """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
 
@@ -2940,7 +2942,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
             full_prompt = prompt + qa_context
-            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label)
+            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly)
 
             # Check if sub-agent is asking questions instead of finishing
             if questions_asked < allow_questions and "QUESTIONS_FOR_PARENT:" in (out or ""):
@@ -3184,15 +3186,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "5. **Spec violations** — features in spec.md that are missing or wrong\n\n"
                 "Do NOT flag: style, naming, missing comments, minor refactors.\n\n"
                 "For EACH issue: FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION\n\n"
-                "Fix EVERY critical and major issue yourself:\n"
-                "- Edit files with edit_file\n"
-                "- Run 'pytest -v' after fixing to verify no regressions\n"
-                "- Commit fixes with message 'Code review fix ({area.lower()}): <summary>'\n"
+                "OUTPUT YOUR FINDINGS AS A REPORT. Do NOT edit any files. Do NOT run commands.\n"
+                "You are a read-only reviewer — report issues and the parent orchestrator will "
+                "dispatch a separate agent to fix them.\n\n"
                 "If no critical/major issues, respond with 'REVIEW_CLEAN'."
             )
             return ctx
 
-        # Launch reviews in parallel for non-empty buckets
+        # Launch reviews in parallel for non-empty buckets (all readonly)
         review_tasks = []
         review_labels = []
         for area, files in [("Backend", backend_files), ("Frontend", frontend_files), ("Tests/Config", test_config_files)]:
@@ -3201,7 +3202,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             prompt = _build_review_prompt(area, files)
             review_labels.append(area)
             review_tasks.append(_run_sub_with_retry(
-                prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label}"))
+                prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label}", readonly=True))
 
         # Spec-conformance reviewer: dedicated agent that checks ALL code against spec + architecture
         all_project_files = backend_files + frontend_files + test_config_files
@@ -3232,39 +3233,82 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 f"PROJECT FILES:\n{chr(10).join('  - ' + f for f in sorted(all_project_files))}\n\n"
                 "OUTPUT FORMAT — for each finding:\n"
                 "SPEC_GAP: <spec section> — <what's missing or wrong> — SEVERITY: critical/major/minor\n\n"
-                "Fix EVERY critical and major spec gap yourself:\n"
-                "- Edit files with edit_file\n"
-                "- Run 'pytest -v' after fixing to verify no regressions\n"
-                "- Commit fixes with message 'Spec conformance fix: <summary>'\n"
+                "OUTPUT YOUR FINDINGS AS A REPORT. Do NOT edit any files. Do NOT run commands.\n"
+                "You are a read-only reviewer — report issues and the parent orchestrator will "
+                "dispatch a separate agent to fix them.\n\n"
                 "If everything matches the spec, respond with 'SPEC_CONFORMANT'."
             )
             review_labels.append("Spec-Conformance")
             review_tasks.append(_run_sub_with_retry(
-                spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}"))
+                spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}", readonly=True))
 
         _run_cmd(["tk", "add-note", params.ticket_id,
                   f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔍 Code review: {phase_label} ({len(review_tasks)} reviewers)")
 
-        results = await asyncio.gather(*review_tasks)
+        _MAX_REVIEW_ROUNDS = 3
+        for review_round in range(1, _MAX_REVIEW_ROUNDS + 1):
+            results = await asyncio.gather(*review_tasks)
 
-        clean_count = 0
-        fix_count = 0
-        for (rc, rev_out, rev_err), area in zip(results, review_labels):
-            if "REVIEW_CLEAN" in (rev_out or ""):
-                clean_count += 1
-            else:
-                fix_count += 1
+            # Collect findings from all reviewers
+            all_findings = []
+            clean_count = 0
+            for (rc, rev_out, rev_err), area in zip(results, review_labels):
+                if "REVIEW_CLEAN" in (rev_out or "") or "SPEC_CONFORMANT" in (rev_out or ""):
+                    clean_count += 1
+                else:
+                    all_findings.append(f"=== {area} Review Findings ===\n{rev_out or '(no output)'}")
 
-        summary = f"{clean_count} clean, {fix_count} with fixes"
-        if fix_count == 0:
+            if not all_findings:
+                summary = f"all {clean_count} reviewers passed"
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Review clean: {phase_label} (round {review_round}) — {summary}"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"✅ Review clean: {phase_label} (round {review_round}, {summary})")
+                break
+
+            # Dispatch a fixer agent with the combined review findings
+            combined_findings = "\n\n".join(all_findings)
+            fix_prompt = (
+                _project_context() + "\n\n"
+                f"CODE REVIEW FINDINGS (round {review_round}/{_MAX_REVIEW_ROUNDS}):\n"
+                "The following issues were found by parallel code reviewers. "
+                "Fix ALL critical and major issues. Minor issues are optional.\n\n"
+                f"{combined_findings}\n\n"
+                "INSTRUCTIONS:\n"
+                "1. Read the files mentioned in each finding\n"
+                "2. Fix each critical/major issue with the smallest possible change\n"
+                "3. Run 'pytest -v' after fixing to verify no regressions\n"
+                "4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
+                "Read .marvin/spec.md and .marvin/design.md for the intended behavior."
+            )
             _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Review clean: {phase_label} — all {clean_count} reviewers passed"], timeout=5, cwd=wd)
-            await _notify_pipeline(f"✅ Review clean: {phase_label} ({summary})")
-        else:
-            _run_cmd(["tk", "add-note", params.ticket_id,
-                      f"Review complete: {phase_label} — {summary}"], timeout=5, cwd=wd)
-            await _notify_pipeline(f"🔧 Review complete: {phase_label} ({summary})")
+                      f"Review round {review_round}: {len(all_findings)} reviewers found issues — dispatching fixer"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
+
+            fix_rc, fix_out, fix_err = await _run_sub_with_retry(
+                fix_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
+
+            if review_round >= _MAX_REVIEW_ROUNDS:
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Review complete: {phase_label} — {_MAX_REVIEW_ROUNDS} rounds exhausted"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"⚠️ Review: {phase_label} — max rounds reached")
+                break
+
+            # Re-run reviewers for next round
+            await _notify_pipeline(f"🔍 Re-review: {phase_label} (round {review_round + 1})")
+            review_tasks = []
+            review_labels = []
+            for area, files in [("Backend", backend_files), ("Frontend", frontend_files), ("Tests/Config", test_config_files)]:
+                if not files:
+                    continue
+                prompt = _build_review_prompt(area, files)
+                review_labels.append(area)
+                review_tasks.append(_run_sub_with_retry(
+                    prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label} R{review_round + 1}", readonly=True))
+            if all_project_files:
+                review_labels.append("Spec-Conformance")
+                review_tasks.append(_run_sub_with_retry(
+                    spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label} R{review_round + 1}", readonly=True))
 
     # ── Pipeline state for resume ────────────────────────────────────────
     state_file = os.path.join(wd, ".marvin", "pipeline_state")
@@ -10437,6 +10481,10 @@ async def _run_non_interactive():
         return
 
     all_tools = _build_all_tools()
+    # MARVIN_READONLY: block write tools so review agents cannot modify files
+    if os.environ.get("MARVIN_READONLY") == "1":
+        _WRITE_TOOLS = {"create_file", "apply_patch", "file_apply_patch", "git_commit", "git_checkout", "run_command"}
+        all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _WRITE_TOOLS]
     if _SUBAGENT_TOOL_LOG:
         all_tools = _wrap_tools_with_logging(all_tools)
     system_msg = _build_system_message()

@@ -2692,6 +2692,73 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                   f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
+    # ── Code review helper ────────────────────────────────────────────
+    async def _code_review(phase_label: str, focus: str = "all") -> None:
+        """Run a critical code review after a phase completes.
+
+        Reads all project files, reviews for bugs/security/logic issues,
+        then launches a fix agent to address findings.
+        """
+        # Build file listing for the reviewer
+        file_list = []
+        for root, dirs, files in os.walk(wd):
+            dirs[:] = [d for d in dirs if d not in (".venv", ".git", "__pycache__", ".pytest_cache", "node_modules", ".marvin")]
+            for f in files:
+                if f.endswith((".py", ".js", ".html", ".css", ".toml", ".yaml", ".yml", ".json", ".md")):
+                    file_list.append(os.path.relpath(os.path.join(root, f), wd))
+
+        # Read app.py bridge interface so reviewer knows the CLI contract
+        app_interface_hint = ""
+        try:
+            with open(app_path) as _af:
+                _app_src = _af.read()
+            # Extract the --non-interactive arg parsing section
+            _ni_start = _app_src.find("async def _run_non_interactive")
+            if _ni_start >= 0:
+                _ni_end = _app_src.find("\n\n\n", _ni_start)
+                app_interface_hint = (
+                    "\n\nMARVIN CLI INTERFACE (bridge.py must call app.py correctly):\n"
+                    "```python\n" + _app_src[_ni_start:_ni_end][:2000] + "\n```\n"
+                )
+        except Exception:
+            pass
+
+        review_prompt = (
+            f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase output.\n\n"
+            "Read EVERY source file in the project with read_file. "
+            "Also read .marvin/spec.md and .marvin/design.md to understand intended behavior.\n\n"
+            f"Project files:\n{chr(10).join('  - ' + f for f in sorted(file_list))}\n"
+            f"{app_interface_hint}\n"
+            "REVIEW CRITERIA — flag ONLY genuine issues:\n"
+            "1. **Security** — XSS, injection, unsafe HTML rendering, missing sanitization\n"
+            "2. **Logic bugs** — wrong conditions, off-by-one, race conditions, data not flowing correctly\n"
+            "3. **Integration bugs** — frontend calling wrong endpoints, wrong request/response shapes, "
+            "SSE parsing issues, subprocess interface mismatches\n"
+            "4. **Missing error handling** — unhandled exceptions, missing null checks, timeout issues\n"
+            "5. **Spec violations** — features described in spec.md that are missing or wrong\n\n"
+            "Do NOT flag: style issues, naming conventions, missing comments, or minor refactors.\n\n"
+            "For EACH issue found, write it as:\n"
+            "  FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION — SUGGESTED FIX\n\n"
+            "After listing all issues, fix EVERY critical and major issue yourself:\n"
+            "- Edit the files directly with edit_file or create_file\n"
+            "- Run 'pytest -v' after fixing to make sure you didn't break anything\n"
+            "- Commit fixes with message 'Code review fix: <summary>'\n"
+            "If no critical/major issues found, respond with 'REVIEW_CLEAN'."
+        )
+
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Code review: {phase_label}"], timeout=5)
+        await _notify_pipeline(f"🔍 Code review: {phase_label}")
+
+        rc, rev_out, rev_err = await _run_sub_with_retry(
+            review_prompt, "claude-opus-4.6", base_timeout=600, label=f"Review: {phase_label}")
+
+        if "REVIEW_CLEAN" in (rev_out or ""):
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Review clean: {phase_label} — no critical issues"], timeout=5)
+            await _notify_pipeline(f"✅ Review clean: {phase_label}")
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Review complete: {phase_label} — fixes applied"], timeout=5)
+            await _notify_pipeline(f"🔧 Review complete: {phase_label} — fixes applied")
+
     # ── Pipeline state for resume ────────────────────────────────────────
     state_file = os.path.join(wd, ".marvin", "pipeline_state")
     os.makedirs(os.path.join(wd, ".marvin"), exist_ok=True)
@@ -2962,6 +3029,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Unit test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
             await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
+
+            # Code review of test quality
+            await _code_review("Unit tests")
+
         _save_state("2a")
 
     # ── Phase 2b: Integration tests (TDD, optional) ──────────────────────
@@ -3006,6 +3077,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             else:
                 _run_cmd(["tk", "add-note", params.ticket_id, "Integration tests written"], timeout=5)
             await _notify_pipeline(f"✅ Phase 2b complete — integration tests written")
+
+            # Code review of integration tests
+            await _code_review("Integration tests")
+
         _save_state("2b")
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
@@ -3047,6 +3122,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5)
         await _notify_pipeline("✅ Phase 3 complete — implementation finished")
+
+        # Code review after implementation
+        await _code_review("Post-implementation")
+
     _save_state("3")
 
     # ── Phase 4a: Debug loop — unit + integration tests (TDD green) ─────
@@ -3107,6 +3186,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             else:
                 _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5)
                 await _notify_pipeline(f"⚠️ Phase 4a: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
+
+            # Code review after debug loop
+            await _code_review("Post-debug-loop")
+
         _save_state("4a")
 
     # ── Phase 4b: End-to-end smoke test ──────────────────────────────────

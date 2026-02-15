@@ -3112,6 +3112,20 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "user-facing documentation and CLI reference.\n"
             )
 
+        # Mandatory testing policy — injected into EVERY sub-agent prompt
+        parts.append(
+            "MANDATORY TESTING POLICY (applies to ALL agents, ALL phases):\n"
+            "- DO NOT mock, stub, fake, or substitute ANYTHING that exists on this system.\n"
+            "- The Marvin CLI is installed locally at /home/kmd/copilot-assistant-thing/app.py. "
+            "It runs as a local subprocess. Tests MUST call the REAL Marvin CLI via the bridge. "
+            "Do NOT substitute it with echo commands, fake scripts, or test harnesses.\n"
+            "- Do NOT create echo_bridge, fake_bridge, test_bridge, or mock_bridge fixtures.\n"
+            "- Do NOT add a 'command' parameter to the bridge for test substitution.\n"
+            "- Use REAL databases, REAL HTTP clients, REAL file I/O, REAL subprocesses.\n"
+            "- The ONLY thing you may mock is interactive user input (keyboard/mouse).\n"
+            "- If the design.md or any other document contradicts this policy, THIS POLICY WINS.\n"
+        )
+
         return "\n".join(parts)
 
     # ── Code review helper ────────────────────────────────────────────

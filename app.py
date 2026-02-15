@@ -2687,7 +2687,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 questions_text = out[q_start + len("QUESTIONS_FOR_PARENT:"):].strip()
                 if questions_text:
                     questions_asked += 1
-                    _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                    _run_cmd(["tk", "add-note", params.ticket_id,
                               f"{label}: sub-agent asked questions (round {questions_asked}/{allow_questions})"], timeout=5)
                     await _notify_pipeline(f"❓ {label}: answering sub-agent questions ({questions_asked}/{allow_questions})")
 
@@ -2732,14 +2732,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return rc, out, err
             combined = f"{out} {err}"
             if any(m in combined for m in _HARD_ERRORS):
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"{label}: hard error (attempt {attempt}) — {(err or out)[:200]}"], timeout=5)
                 return rc, out, err  # non-retryable
             if attempt < _MAX_RETRIES:
                 next_timeout = base_timeout * (attempt + 1)
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"{label}: attempt {attempt}/{_MAX_RETRIES} failed (exit {rc}) — retrying ({next_timeout}s timeout)"], timeout=5)
-        _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+        _run_cmd(["tk", "add-note", params.ticket_id,
                   f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
@@ -3026,13 +3026,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, sout, serr = await _run_sub_with_retry(spec_prompt, "claude-opus-4.6", base_timeout=600, label="Spec/UX pass")
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
                 spec_size = os.path.getsize(spec_path)
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
             elif rc == 0 and sout:
                 with open(spec_path, "w") as f:
                     f.write(sout)
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
             else:
@@ -3093,13 +3093,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, dout, derr = await _run_sub_with_retry(arch_prompt, "claude-opus-4.6", base_timeout=600, label="Architecture pass")
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
                 design_size = os.path.getsize(design_path)
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
             elif rc == 0 and dout:
                 with open(design_path, "w") as f:
                     f.write(dout)
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
                 await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
             else:
@@ -3188,15 +3188,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 if rc != 0:
                     failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
             if len(failures) == len(test_results):
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
                 return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
             if failures:
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Unit test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
 
-            _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+            _run_cmd(["tk", "add-note", params.ticket_id,
                       f"Unit test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
             await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
 
@@ -3244,7 +3244,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, out, err = await _run_sub_with_retry(
                 integ_prompt, "gpt-5.3-codex", base_timeout=300, label="Integration test agent")
             if rc != 0:
-                _run_cmd(["tk", "add-note", params.ticket_id, cwd=wd,
+                _run_cmd(["tk", "add-note", params.ticket_id,
                           f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
             else:
                 _run_cmd(["tk", "add-note", params.ticket_id, "Integration tests written"], timeout=5, cwd=wd)

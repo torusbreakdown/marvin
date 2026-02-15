@@ -2110,6 +2110,11 @@ class RunCommandParams(BaseModel):
     timeout: int = Field(default=60, description="Timeout in seconds")
 
 
+class InstallPackagesParams(BaseModel):
+    packages: list[str] = Field(description="Package names to install (e.g. ['httpx', 'aiosqlite>=0.20'])")
+    dev: bool = Field(default=False, description="Install as dev dependency (--dev flag)")
+
+
 class LaunchAgentParams(BaseModel):
     ticket_id: str = Field(description="Ticket ID (from tk) for the task being dispatched. Required — create a ticket first with create_ticket.")
     prompt: str = Field(description="The task/prompt for the sub-agent to execute")
@@ -2538,6 +2543,52 @@ async def run_command(params: RunCommandParams) -> str:
     return "\n".join(result) + f"\n{exit_str}"
 
 
+@define_tool(
+    description=(
+        "Install Python packages into the project's virtual environment using uv. "
+        "Use this to add dependencies (e.g. httpx, pytest, aiosqlite) to the project. "
+        "Packages are added to pyproject.toml and installed into the project's .venv. "
+        "This is the ONLY way to install packages — do not use pip or uv pip directly."
+    )
+)
+async def install_packages(params: InstallPackagesParams) -> str:
+    if not _coding_working_dir:
+        return "No working directory set. Use set_working_dir first."
+
+    cmd_env = os.environ.copy()
+    cmd_env.pop("VIRTUAL_ENV", None)
+    cmd_env.pop("CONDA_PREFIX", None)
+
+    results = []
+    for pkg in params.packages:
+        add_cmd = ["uv", "add"]
+        if params.dev:
+            add_cmd.append("--dev")
+        add_cmd.append(pkg)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *add_cmd,
+                cwd=_coding_working_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=cmd_env,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+            out = (stdout or b"").decode(errors="replace").strip()
+            err = (stderr or b"").decode(errors="replace").strip()
+            if proc.returncode == 0:
+                results.append(f"✅ {pkg}: installed")
+            else:
+                results.append(f"❌ {pkg}: failed — {err or out}")
+        except asyncio.TimeoutError:
+            results.append(f"❌ {pkg}: timed out")
+        except Exception as e:
+            results.append(f"❌ {pkg}: {e}")
+
+    return "\n".join(results)
+
+
 # ── Sub-agent dispatch ───────────────────────────────────────────────────────
 
 _AGENT_MODELS = {
@@ -2640,6 +2691,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
+
+        # Set up log file for this sub-agent run
+        log_dir = os.path.join(wd, ".marvin", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        safe_label = (label or "sub").replace(" ", "-").replace("/", "-")[:40]
+        import time as _time
+        log_path = os.path.join(log_dir, f"{safe_label}-{int(_time.time())}.log")
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -2647,7 +2706,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+            stdout_text = (sout or b"").decode(errors="replace").strip()
             stderr_text = (serr or b"").decode(errors="replace").strip()
+
+            # Write log
+            try:
+                with open(log_path, "w") as lf:
+                    lf.write(f"=== {label} | model={model} | rc={proc.returncode} ===\n")
+                    lf.write(f"=== PROMPT ===\n{prompt[:500]}\n...\n\n")
+                    lf.write(f"=== STDOUT ===\n{stdout_text}\n\n")
+                    lf.write(f"=== STDERR ===\n{stderr_text}\n")
+            except Exception:
+                pass
+
             # Parse sub-agent cost data from stderr
             for line in stderr_text.splitlines():
                 if line.startswith("MARVIN_COST:"):
@@ -2655,10 +2726,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         _usage.absorb_sub_cost(json.loads(line[len("MARVIN_COST:"):]))
                     except Exception:
                         pass
-            return proc.returncode or 0, (sout or b"").decode(errors="replace").strip(), stderr_text
+            return proc.returncode or 0, stdout_text, stderr_text
         except asyncio.TimeoutError:
             if proc and proc.returncode is None:
                 proc.kill()
+            try:
+                with open(log_path, "w") as lf:
+                    lf.write(f"=== {label} | model={model} | TIMED OUT after {timeout_s}s ===\n")
+            except Exception:
+                pass
             return -1, "", f"{label or 'Sub-agent'} timed out after {timeout_s}s"
         except Exception as e:
             return -1, "", f"{label or 'Sub-agent'} failed: {e}"
@@ -9275,7 +9351,7 @@ def _build_all_tools():
         set_working_dir, get_working_dir,
         create_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
-        run_command, launch_agent,
+        run_command, install_packages, launch_agent,
         # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,

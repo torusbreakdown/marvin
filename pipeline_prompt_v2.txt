@@ -1,0 +1,18 @@
+=== TOP-LEVEL PROMPT (passed to app.py --non-interactive --design-first) ===
+
+Build a self-hosted web chat interface for Marvin. Read .marvin/upstream/MARVIN_API_SPEC.md for the full integration contract. The web UI should be a FastAPI server with SSE streaming, SQLite persistence, and a clean responsive chat interface. Single server.py file serves both API and static frontend. No npm, no bundler. The server MUST bind to 0.0.0.0 (not 127.0.0.1) so it is accessible from the network.
+
+=== CHANGES FROM v1 ===
+- Added "The server MUST bind to 0.0.0.0 (not 127.0.0.1)" requirement
+- Code review agents are now read-only (MARVIN_READONLY=1) — cannot edit files
+- Multi-round review/fix cycle: reviewers report → fixer fixes → re-review (up to 3 rounds)
+
+=== PIPELINE A: Pure Copilot (claude-opus-4.6 for all tiers) ===
+MARVIN_CODE_MODEL_HIGH=claude-opus-4.6
+MARVIN_CODE_MODEL_LOW=claude-opus-4.6
+MARVIN_CODE_MODEL_PLAN=claude-opus-4.6
+
+=== PIPELINE B: Hybrid (claude-opus-4.6 plan + gemini-3-pro-preview exec) ===
+MARVIN_CODE_MODEL_HIGH=gemini-3-pro-preview
+MARVIN_CODE_MODEL_LOW=gemini-3-pro-preview
+MARVIN_CODE_MODEL_PLAN=claude-opus-4.6

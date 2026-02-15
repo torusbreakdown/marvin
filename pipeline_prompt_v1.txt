@@ -1,0 +1,187 @@
+=== TOP-LEVEL PROMPT (passed to app.py --non-interactive --design-first) ===
+
+Build a self-hosted web chat interface for Marvin. Read .marvin/upstream/MARVIN_API_SPEC.md for the full integration contract. The web UI should be a FastAPI server with SSE streaming, SQLite persistence, and a clean responsive chat interface. Single server.py file serves both API and static frontend. No npm, no bundler.
+
+
+=== EXPANDED IMPLEMENTATION PROMPT (constructed by app.py for Phase 2b sub-agent) ===
+
+PROJECT: marvin-web-a
+WORKING DIRECTORY: /home/kmd/marvin-web-a
+ORIGINAL TASK: Build a self-hosted web chat interface for Marvin. Read .marvin/upstream/MARVIN_API_SPEC.md for the full integration contract. The web UI should be a FastAPI server with SSE streaming, SQLite persistence, and a clean responsive chat interface. Single server.py file serves both API and static fronten
+
+SPEC SUMMARY (from .marvin/spec.md, 49733 bytes total — read full file for details):
+# Marvin Web Chat — Product Specification & UX Design
+
+> **Version**: 1.0  
+> **Date**: 2026-02-15  
+> **Status**: Approved for implementation
+
+---
+
+## Table of Contents
+
+1. [Product Overview](#1-product-overview)
+2. [User Stories & Acceptance Criteria](#2-user-stories--acceptance-criteria)
+3. [Information Architecture](#3-information-architecture)
+4. [UX Design Schema](#4-ux-design-schema)
+5. [Style Guide](#5-style-guide)
+6. [Interaction Patterns](#6-interaction-patterns)
+7. [Error States & Edge Cases](#7-error-states--edge-cases)
+8. [Constraints & Non-Functional Requirements](#8-constraints--non-functional-requirements)
+
+---
+
+## 1. Product Overview
+
+### 1.1 What It Is
+
+A self-hosted, single-file web chat interface for Marvin — a local AI assistant with 70+ tools. The web UI is a FastAPI server (`server.py`) that serves both the REST/SSE API and static HTML/CSS/JS frontend. It communicates with Marvin by spawning `app.py --non-interactive` subprocesses and streaming their stdout to the browser via Server-Sent Events.
+
+### 1.2 Who It's For
+
+A single user (the machine owner) who wants browser-based access to Marvin instead of the terminal TUI. No authentication, no multi-tenancy — this is a local tool.
+
+### 1.3 What It Does
+
+- Multi-conversation chat with persistent history (SQLite)
+- Real-time streaming responses via SSE
+- Markdown rendering in assistant messages
+- Conversation management (create, rename, delete, list)
+- Cost tracking per message and per conversation
+- Responsive layout (desktop sidebar + mobile drawer)
+- Dark mode only (matches developer aesthetic)
+
+### 1.4 What It Does NOT Do
+
+- No user authentication (single-user, localhost)
+- No file upload
+- No voice input
+- No slash commands (those are interactive-mode only)
+- No profile management (Marvin handles that internally)
+- No plugin system
+- No npm, no bundler — all frontend is vanilla HTML/CSS/JS served inline or as static files
+
+### 1.5 Integration Contract Summary
+
+The server acts as a **bridge** 
+[... truncated — read .marvin/spec.md for full spec]
+
+ARCHITECTURE SUMMARY (from .marvin/design.md, 50773 bytes total):
+# Marvin Web Chat — Architecture & Test Plan
+
+> **Version**: 1.0  
+> **Date**: 2026-02-15  
+> **Status**: Approved for implementation  
+> **Spec Reference**: `.marvin/spec.md`
+
+---
+
+## Table of Contents
+
+1. [Architecture Overview](#1-architecture-overview)
+2. [File Structure](#2-file-structure)
+3. [Module Design](#3-module-design)
+4. [Database Schema & Access Layer](#4-database-schema--access-layer)
+5. [API Endpoints](#5-api-endpoints)
+6. [Bridge: Marvin Subprocess Management](#6-bridge-marvin-subprocess-management)
+7. [Frontend Architecture](#7-frontend-architecture)
+8. [Error Handling Strategy](#8-error-handling-strategy)
+9. [Technology Choices & Rationale](#9-technology-choices--rationale)
+10. [Implementation Plan](#10-implementation-plan)
+11. [Test Plan](#11-test-plan)
+
+---
+
+## 1. Architecture Overview
+
+### 1.1 System Diagram
+
+```
+┌─────────────────────────┐         ┌──────────────────────────────┐
+│  Browser (Vanilla JS)   │  HTTP   │  FastAPI Server (server.py)  │
+│                         │ ◄─────► │                              │
+│  - marked.js (CDN)      │  SSE    │  ┌──────────┐  ┌──────────┐ │
+│  - highlight.js (CDN)   │ stream  │  │  Routes   │  │  Bridge  │ │
+│                         │         │  │  (api.py) │  │(bridge.py│ │
+└─────────────────────────┘         │  └─────┬────┘  └────┬─────┘ │
+                                    │        │             │       │
+                                    │  ┌─────▼────┐       │       │
+                                    │  │ Database  │       ▼       │
+                                    │  │ (db.py)   │  subprocess   │
+                                    │  └─────┬────┘  (app.py      │
+                                    │        │    --non-interactive)│
+                                    │  ┌─────▼────┐               │
+                                    │  │  SQLite   │               │
+                                    │  │ (WAL mode)│               │
+                                    │  └──────────┘  
+[... truncated — read .marvin/design.md for full architecture]
+
+PROJECT FILES:
+  .tickets/mwa-vr8s.md (1051 bytes)
+  tests/__init__.py (16 bytes)
+  tests/conftest.py (3915 bytes)
+  tests/test_api.py (33709 bytes)
+  tests/test_bridge.py (10856 bytes)
+  tests/test_db.py (27052 bytes)
+  tests/test_frontend.py (6405 bytes)
+  tests/test_integration.py (35001 bytes)
+
+MARVIN UPSTREAM REFERENCE (do not modify these files):
+  .marvin/upstream/MARVIN_API_SPEC.md (32191 bytes)
+  .marvin/upstream/README.md (8407 bytes)
+  .marvin/upstream/REFERENCE.md (5365 bytes)
+
+READ .marvin/upstream/MARVIN_API_SPEC.md FIRST — it is the authoritative
+reference for how to integrate with Marvin. It documents:
+  - The non-interactive CLI contract (input/output/streaming/cost)
+  - What state the bridge must manage (conversation history) vs what Marvin handles
+  - The subprocess invocation pattern with code examples
+  - The stdout streaming format (raw text, strip trailing \n from each chunk)
+  - The stderr cost data format (MARVIN_COST:{json})
+  - All 70+ tools (for reference only — Marvin handles tool calling internally)
+  - The recommended bridge architecture
+README.md and REFERENCE.md provide user-facing docs and CLI reference.
+
+MANDATORY TESTING POLICY (applies to ALL agents, ALL phases):
+- DO NOT mock, stub, fake, or substitute ANYTHING that exists on this system.
+- The Marvin CLI is installed locally at /home/kmd/copilot-assistant-thing/app.py. It runs as a local subprocess. Tests MUST call the REAL Marvin CLI via the bridge. Do NOT substitute it with echo commands, fake scripts, or test harnesses.
+- Do NOT create echo_bridge, fake_bridge, test_bridge, or mock_bridge fixtures.
+- Do NOT add a 'command' parameter to the bridge for test substitution.
+- Use REAL databases, REAL HTTP clients, REAL file I/O, REAL subprocesses.
+- The ONLY thing you may mock is interactive user input (keyboard/mouse).
+- If the design.md or any other document contradicts this policy, THIS POLICY WINS.
+
+
+Build a self-hosted web chat interface for Marvin. Read .marvin/upstream/MARVIN_API_SPEC.md for the full integration contract. The web UI should be a FastAPI server with SSE streaming, SQLite persistence, and a clean responsive chat interface. Single server.py file serves both API and static frontend. No npm, no bundler.
+
+IMPORTANT: Read these documents with read_file BEFORE writing any code:
+  - .marvin/spec.md (product spec & UX design)
+  - .marvin/design.md (architecture & implementation plan)
+
+Follow the architecture, file structure, and UX design specified in those documents exactly. Do not deviate unless you encounter a technical impossibility.
+
+VISUAL POLISH IS CRITICAL: The CSS must look professional and modern — not like unstyled HTML with colors slapped on. Follow the spec's style guide exactly: use the specified box-shadows, border-radius, transitions, hover states, and spacing scale. Every interactive element needs a visible hover/focus transition. Typography must have clear hierarchy. Whitespace should feel intentional and spacious. If the spec defines gradients, backdrop-filters, or animations, implement them. The bar is Linear/Vercel/Raycast-level fit and finish.
+
+TDD MODE: Failing tests have already been written. Read the test files to understand what's expected, then implement the code to make them pass. After implementing, run the tests with run_command to verify they pass.
+
+MARVIN CLI INTERFACE — READ .marvin/upstream/MARVIN_API_SPEC.md for the full contract.
+Key facts for the bridge:
+  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt
+  - Marvin streams its response to stdout (the bridge reads via async pipe)
+  - IMPORTANT: Each invocation is stateless — the bridge MUST include conversation
+    history in the prompt (last 20 messages, formatted as 'User: ... / Marvin: ...')
+  - stdout chunks have trailing \n — ALWAYS strip with .rstrip('\n')
+  - stderr has cost data as MARVIN_COST:{json} on the last line
+  - Marvin handles preferences, tools, and profile state internally
+  - The bridge only manages: conversation storage, history in prompts, SSE to browser
+See Sections 3 and 14 of MARVIN_API_SPEC.md for code examples and architecture.
+
+
+QUESTION PROTOCOL: If you need clarification about the project architecture, the Marvin CLI interface, or how components should integrate, you may ask by responding with ONLY 'QUESTIONS_FOR_PARENT:' followed by your numbered questions. The parent orchestrator will answer and re-run you with the answers. Use this sparingly — only for genuine blockers, not things you can figure out by reading the spec/design docs.
+
+=== NOTES ===
+- The top-level prompt is what the user provides
+- app.py expands it with project context, spec/design summaries, upstream references, testing policy, and phase-specific instructions
+- The expanded prompt is what the sub-agent actually receives
+- MISSING FROM PROMPT: host="0.0.0.0" requirement — server bound to 127.0.0.1 by default, unreachable from other machines
+- ADD TO FUTURE PROMPTS: "The server MUST bind to 0.0.0.0 (not 127.0.0.1) so it is accessible from the network"

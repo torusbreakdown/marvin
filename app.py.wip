@@ -2024,36 +2024,12 @@ _LOCK_EXPIRE_SECONDS = 300  # 5 minutes
 
 
 def _resolve_coding_path(rel_path: str) -> str:
-    """Resolve a path relative to coding working directory.
-    Absolute paths are rejected — all paths must be relative to the working dir.
-    Paths that escape the working dir via '..' are also rejected.
-    """
+    """Resolve a path relative to coding working directory."""
     if not _coding_working_dir:
         raise ValueError("No working directory set. Use set_working_dir first.")
     if os.path.isabs(rel_path):
-        # Strip leading path components to make it relative to working dir
-        # e.g. /home/user/project/foo.py → foo.py (best effort)
-        stripped = os.path.relpath(rel_path, _coding_working_dir)
-        if stripped.startswith(".."):
-            raise ValueError(f"Absolute path '{rel_path}' is outside the working directory. Use a relative path instead.")
-        rel_path = stripped
-    resolved = os.path.normpath(os.path.join(_coding_working_dir, rel_path))
-    # Ensure resolved path is within working dir
-    if not resolved.startswith(os.path.normpath(_coding_working_dir) + os.sep) and resolved != os.path.normpath(_coding_working_dir):
-        raise ValueError(f"Path '{rel_path}' resolves outside the working directory.")
-    # Block direct edits to .tickets/ — use the tk tool instead
-    rel_resolved = os.path.relpath(resolved, _coding_working_dir)
-    if rel_resolved == ".tickets" or rel_resolved.startswith(".tickets" + os.sep):
-        raise ValueError(
-            f"Cannot edit .tickets/ files directly. Use the tk tool instead:\n"
-            f"  tk(args='create \"Title\" -t task --parent PARENT_ID')  # create ticket\n"
-            f"  tk(args='start ID')       # mark in-progress\n"
-            f"  tk(args='close ID')       # mark done\n"
-            f"  tk(args='add-note ID \"text\"')  # add a note\n"
-            f"  tk(args='show ID')        # view ticket\n"
-            f"  tk(args='ls')             # list tickets"
-        )
-    return resolved
+        return rel_path
+    return os.path.normpath(os.path.join(_coding_working_dir, rel_path))
 
 
 def _lock_path(directory: str) -> str:
@@ -2061,13 +2037,87 @@ def _lock_path(directory: str) -> str:
 
 
 def _acquire_lock(directory: str, tool_name: str) -> str | None:
-    """No-op — locking disabled. Agents run serially for write tasks."""
+    """Acquire a directory lock atomically. Returns None on success, error string on failure."""
+    lp = _lock_path(directory)
+    my_pid = os.getpid()
+
+    # Check for existing lock
+    if os.path.exists(lp):
+        try:
+            with open(lp) as f:
+                lock_info = json.loads(f.read())
+            lock_time = lock_info.get("time", 0)
+            lock_pid = lock_info.get("pid", -1)
+
+            # Same process re-entrancy: allow nested locks from same PID
+            if lock_pid == my_pid:
+                return None
+
+            # Check if lock holder process is still alive
+            stale = False
+            if isinstance(lock_pid, int) and lock_pid > 0:
+                try:
+                    os.kill(lock_pid, 0)  # signal 0 = check existence
+                except ProcessLookupError:
+                    stale = True  # process is dead
+                except PermissionError:
+                    pass  # process exists but we can't signal it
+
+            if not stale and _time.time() - lock_time < _LOCK_EXPIRE_SECONDS:
+                owner = lock_info.get("tool", "?")
+                user = lock_info.get("user", "?")
+                age = int(_time.time() - lock_time)
+                return (
+                    f"🔒 Directory locked by '{owner}' (PID {lock_pid}, user {user}, {age}s ago). "
+                    f"Cannot proceed — another operation is in progress."
+                )
+            # Stale lock (expired or dead process), safe to overwrite
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupted lock, overwrite
+
+    # Atomic lock creation using O_CREAT|O_EXCL via tempfile + rename
+    lock_data = {
+        "pid": my_pid,
+        "user": os.environ.get("USER", "unknown"),
+        "time": _time.time(),
+        "tool": tool_name,
+        "dir": directory,
+    }
+    tmp_path = lp + f".{my_pid}.tmp"
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        try:
+            os.write(fd, json.dumps(lock_data).encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, lp)  # atomic on POSIX
+    except FileExistsError:
+        # Another process beat us to it
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return "🔒 Lock contention — another process is acquiring the lock. Retry shortly."
+    except OSError as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return f"Failed to acquire lock: {e}"
     return None
 
 
 def _release_lock(directory: str):
-    """No-op — locking disabled."""
-    pass
+    """Release a directory lock (only if we own it)."""
+    lp = _lock_path(directory)
+    try:
+        if os.path.exists(lp):
+            with open(lp) as f:
+                lock_info = json.loads(f.read())
+            if lock_info.get("pid") == os.getpid():
+                os.unlink(lp)
+    except (OSError, json.JSONDecodeError):
+        pass
 
 
 def _read_instructions_file() -> str:
@@ -2110,19 +2160,14 @@ class GetWorkingDirParams(BaseModel):
 
 
 class CreateFileParams(BaseModel):
-    path: str = Field(description="File path relative to working directory (no absolute paths)")
-    content: str = Field(default="", description="File content to write. REQUIRED — include the full file content.")
-
-
-class AppendFileParams(BaseModel):
-    path: str = Field(description="File path relative to working directory (no absolute paths)")
-    content: str = Field(default="", description="Content to append to the file. REQUIRED.")
+    path: str = Field(description="File path (relative to working dir or absolute)")
+    content: str = Field(description="File content to write")
 
 
 class ApplyPatchParams(BaseModel):
-    path: str = Field(description="File path relative to working directory (no absolute paths)")
-    old_str: str = Field(default="", description="Exact string to find in the file (must match exactly). REQUIRED.")
-    new_str: str = Field(default="", description="Replacement string. REQUIRED (use empty string to delete).")
+    path: str = Field(description="File path to edit (relative to working dir or absolute)")
+    old_str: str = Field(description="Exact string to find in the file (must match exactly)")
+    new_str: str = Field(description="Replacement string")
 
 
 class CodeGrepParams(BaseModel):
@@ -2229,42 +2274,13 @@ async def get_working_dir(params: GetWorkingDirParams) -> str:
     return f"Working directory: {_coding_working_dir}"
 
 
-def _ticket_gate_check() -> str | None:
-    """If MARVIN_TICKET is set (sub-agent) and no ticket has been created yet, reject."""
-    if os.environ.get("MARVIN_READONLY") == "1":
-        return None
-    if not os.environ.get("MARVIN_TICKET"):
-        return None
-    if getattr(tk, "_agent_has_ticket", False):
-        return None
-    parent = os.environ.get("MARVIN_TICKET", "unknown")
-    return (
-        "⚠️ BLOCKED: You must create a ticket before doing any work.\n"
-        f"Use tk(args='create \"Your task title\" -t task --parent {parent} "
-        f"-d \"Detailed description with acceptance criteria\"') first.\n"
-        "Your first tk create will be rejected once for review — this is expected. "
-        "Retry with a thorough description including acceptance criteria."
-    )
-
-
 @define_tool(
     description=(
-        "Create a new file with the given content. Fails if the file already exists (use apply_patch to edit). "
-        "Parameters: path (relative to working dir), content (the full file text — REQUIRED, must not be empty). "
-        "For large files (>3000 words), write the first section with create_file, then use append_file for remaining sections."
+        "Create a new file. Acquires a directory lock first. "
+        "Refuses if the file already exists. Path is relative to working dir."
     )
 )
 async def create_file(params: CreateFileParams) -> str:
-    if not params.content:
-        return (
-            "❌ ERROR: 'content' parameter is missing or empty. "
-            "create_file requires BOTH 'path' and 'content' parameters.\n"
-            "Usage: create_file(path='path/to/file.md', content='full file content here')\n"
-            "You must include the entire file content as a string in the 'content' field."
-        )
-    gate = _ticket_gate_check()
-    if gate:
-        return gate
     try:
         full = _resolve_coding_path(params.path)
     except ValueError as e:
@@ -2292,59 +2308,11 @@ async def create_file(params: CreateFileParams) -> str:
 
 @define_tool(
     description=(
-        "Append content to an existing file (file must already exist — use create_file first). "
-        "Parameters: path (relative to working dir), content (text to append — REQUIRED, must not be empty). "
-        "Use this after create_file to write large documents in sections, keeping each call under ~3000 words."
-    )
-)
-async def append_file(params: AppendFileParams) -> str:
-    if not params.content:
-        return (
-            "❌ ERROR: 'content' parameter is missing or empty. "
-            "append_file requires BOTH 'path' and 'content' parameters.\n"
-            "Usage: append_file(path='path/to/file.md', content='content to append')"
-        )
-    gate = _ticket_gate_check()
-    if gate:
-        return gate
-    try:
-        full = _resolve_coding_path(params.path)
-    except ValueError as e:
-        return str(e)
-
-    if not os.path.isfile(full):
-        return f"File not found: {full}. Use create_file first."
-
-    try:
-        with open(full, "a") as f:
-            f.write(params.content)
-    except OSError as e:
-        return f"Failed to append to file: {e}"
-
-    total_lines = sum(1 for _ in open(full))
-    return f"✅ Appended to {full} (now {total_lines} lines total)"
-
-
-@define_tool(
-    description=(
         "Edit a file by replacing an exact string match with new content. "
-        "Requires 3 parameters: path (file to edit), old_str (exact text to find — "
-        "copy/paste from the file, whitespace-sensitive), new_str (replacement text). "
-        "old_str must match exactly ONE location. Use read_file first to get the exact text."
+        "Acquires a directory lock. The old_str must match exactly one location in the file."
     )
 )
 async def apply_patch(params: ApplyPatchParams) -> str:
-    if not params.old_str:
-        return (
-            "❌ ERROR: 'old_str' parameter is missing or empty.\n"
-            "apply_patch requires: path, old_str, new_str.\n"
-            "old_str must be the EXACT text from the file you want to replace.\n"
-            "Use read_file first to see the exact content, then copy the exact "
-            "string (whitespace-sensitive) into old_str."
-        )
-    gate = _ticket_gate_check()
-    if gate:
-        return gate
     try:
         full = _resolve_coding_path(params.path)
     except ValueError as e:
@@ -2497,12 +2465,7 @@ async def tree(params: TreeParams) -> str:
 
 
 @define_tool(
-    description=(
-        "Read a file's contents with line numbers. "
-        "Parameters: path (relative to working dir), start_line (optional, 1-based), end_line (optional, 1-based inclusive). "
-        "Use start_line/end_line to read specific sections of large files. "
-        "Tip: read the exact lines you need before calling apply_patch, so you can copy the precise old_str."
-    )
+    description="Read a file's contents. Optionally specify a line range."
 )
 async def read_file(params: ReadFileParams) -> str:
     try:
@@ -2524,19 +2487,6 @@ async def read_file(params: ReadFileParams) -> str:
     end = params.end_line or total
     start = max(0, min(start, total))
     end = max(start, min(end, total))
-
-    # Guard against reading huge files without a line range
-    _MAX_READ_BYTES = 10_000
-    selected_size = sum(len(l) for l in lines[start:end])
-    if selected_size > _MAX_READ_BYTES and not (params.start_line or params.end_line):
-        return (
-            f"⚠️ File is too large to read in full ({total} lines, ~{os.path.getsize(full)//1024}KB). "
-            f"Use start_line and end_line to read a section at a time.\n"
-            f"Example: read_file(path='{params.path}', start_line=1, end_line=200)\n"
-            f"Then: read_file(path='{params.path}', start_line=201, end_line=400)\n"
-            f"Total lines: {total}"
-        )
-
     selected = lines[start:end]
 
     numbered = []
@@ -2661,23 +2611,6 @@ async def run_command(params: RunCommandParams) -> str:
     if not _coding_working_dir:
         return "No working directory set. Use set_working_dir first."
 
-    gate = _ticket_gate_check()
-    if gate:
-        return gate
-
-    # Block tk via run_command — force use of the tk tool instead
-    cmd_stripped = params.command.strip()
-    if cmd_stripped.startswith("tk ") or cmd_stripped == "tk":
-        return (
-            "❌ Do not run tk via run_command. Use the dedicated tk tool instead.\n"
-            "The tk tool provides structured ticket management. Example:\n"
-            "  tk(args='create \"Title\" -t task -d \"Description with acceptance criteria\" --parent PARENT_ID')\n"
-            "  tk(args='start ID')\n"
-            "  tk(args='close ID')\n"
-            "  tk(args='add-note ID \"note\"')\n"
-            "  tk(args='ls')"
-        )
-
     # Sub-agents auto-approve; interactive mode prompts user
     if _auto_approve_commands:
         pass  # skip confirmation
@@ -2733,67 +2666,6 @@ async def run_command(params: RunCommandParams) -> str:
     return "\n".join(result) + f"\n{exit_str}"
 
 
-class TkParams(BaseModel):
-    args: str = Field(
-        description=(
-            "Arguments to pass to the tk CLI. Examples:\n"
-            "  'create \"Phase 1a: Spec\" -t epic --parent PARENT_ID'\n"
-            "  'create \"Write product spec\" -t task --parent EPIC_ID'\n"
-            "  'start TICKET_ID'\n"
-            "  'close TICKET_ID'\n"
-            "  'add-note TICKET_ID \"some note\"'\n"
-            "  'show TICKET_ID'\n"
-            "  'ls --status=open'"
-        )
-    )
-
-
-@define_tool(
-    description=(
-        "Run the tk ticket CLI. Use to create epics for pipeline stages, "
-        "tasks for individual agent work items, track status, and add notes. "
-        "Tickets are stored as markdown in .tickets/. Supports: create, start, "
-        "close, status, add-note, show, ls, dep, link. Use -t epic for phases, "
-        "-t task for individual work items, --parent to set hierarchy."
-    )
-)
-async def tk(params: TkParams) -> str:
-    wd = _coding_working_dir or os.getcwd()
-    import shlex
-    args = shlex.split(params.args)
-
-    # For 'create' commands, unconditionally reject the first call so the agent
-    # pauses to reconsider. Accept unconditionally on the second call.
-    if args and args[0] == "create":
-        if not hasattr(tk, "_create_rejected"):
-            tk._create_rejected = False
-        if not tk._create_rejected:
-            tk._create_rejected = True
-            parent_ticket = os.environ.get("MARVIN_TICKET", "")
-            return (
-                "⚠️ REJECTED — review your ticket before creating it.\n"
-                "Before retrying, verify:\n"
-                "1. Does the title clearly describe the deliverable?\n"
-                "2. Did you include -d with a DETAILED description that includes:\n"
-                "   - What exactly will be done\n"
-                "   - Acceptance criteria (bullet list of testable outcomes)\n"
-                "   - Key files to create or modify\n"
-                "   - Dependencies on other work\n"
-                f"3. Did you set --parent {parent_ticket} (your parent epic)?\n"
-                "4. Did you set -t to the right type (epic for phases, task for work items)?\n"
-                "5. Did you add --tags for categorization?\n\n"
-                "If you're confident this is correct, call tk again with the same or improved args."
-            )
-        # On successful create, mark that this agent has created a ticket
-        ok, output = _run_cmd(["tk"] + args, timeout=10, cwd=wd)
-        if ok:
-            tk._agent_has_ticket = True
-        return output if output else ("✅ Done" if ok else "❌ tk command failed")
-
-    ok, output = _run_cmd(["tk"] + args, timeout=10, cwd=wd)
-    return output if output else ("✅ Done" if ok else "❌ tk command failed")
-
-
 @define_tool(
     description=(
         "Install Python packages into the project's virtual environment using uv. "
@@ -2843,9 +2715,9 @@ async def install_packages(params: InstallPackagesParams) -> str:
 # ── Sub-agent dispatch ───────────────────────────────────────────────────────
 
 _AGENT_MODELS = {
-    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),       # tests, implementation, review fixes
-    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),      # code reviews (readonly)
-    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", "gpt-5.2"),             # spec, architecture, debugging
+    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),
+    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),
+    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6")),
 }
 
 
@@ -2931,8 +2803,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         except Exception:
             pass
 
-    async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "",
-                       readonly: bool = False) -> tuple[int, str, str]:
+    async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "") -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
@@ -2944,23 +2815,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
-        if readonly:
-            sub_env["MARVIN_READONLY"] = "1"
-
-        # Inject ticket creation instruction into prompt for non-readonly agents
-        ticket_preamble = ""
-        if not readonly:
-            ticket_preamble = (
-                f"\n⚠️ TICKET REQUIREMENT: Before doing ANY work, you MUST create a ticket "
-                f"for your task using the tk tool. Your parent epic is: {params.ticket_id}\n"
-                f"Example: tk(args='create \"Your task title\" -t task --parent {params.ticket_id} "
-                f"-d \"Detailed description with acceptance criteria\"')\n"
-                f"The first create attempt will be rejected — review and retry with full detail.\n"
-                f"After creating your ticket, start it with tk(args='start YOUR_TICKET_ID').\n"
-                f"Create child tasks for sub-units of work. Close your ticket when done.\n\n"
-            )
-
-        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", ticket_preamble + prompt]
+        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", prompt]
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
 
@@ -3069,7 +2924,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     async def _run_sub_with_retry(
         prompt: str, model: str, base_timeout: int = 600, label: str = "",
-        allow_questions: int = 3, readonly: bool = False,
+        allow_questions: int = 3,
     ) -> tuple[int, str, str]:
         """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
 
@@ -3085,7 +2940,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
             full_prompt = prompt + qa_context
-            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly)
+            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label)
 
             # Check if sub-agent is asking questions instead of finishing
             if questions_asked < allow_questions and "QUESTIONS_FOR_PARENT:" in (out or ""):
@@ -3093,6 +2948,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 questions_text = out[q_start + len("QUESTIONS_FOR_PARENT:"):].strip()
                 if questions_text:
                     questions_asked += 1
+                    _run_cmd(["tk", "add-note", params.ticket_id,
+                              f"{label}: sub-agent asked questions (round {questions_asked}/{allow_questions})"], timeout=5)
                     await _notify_pipeline(f"❓ {label}: answering sub-agent questions ({questions_asked}/{allow_questions})")
 
                     # Build parent context to answer questions
@@ -3136,63 +2993,49 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return rc, out, err
             combined = f"{out} {err}"
             if any(m in combined for m in _HARD_ERRORS):
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"{label}: hard error (attempt {attempt}) — {(err or out)[:200]}"], timeout=5)
                 return rc, out, err  # non-retryable
             if attempt < _MAX_RETRIES:
                 next_timeout = base_timeout * (attempt + 1)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"{label}: attempt {attempt}/{_MAX_RETRIES} failed (exit {rc}) — retrying ({next_timeout}s timeout)"], timeout=5)
+        _run_cmd(["tk", "add-note", params.ticket_id,
+                  f"{label}: failed after {_MAX_RETRIES} attempts (exit {rc})"], timeout=5)
         return rc, out, err
 
     # ── Marvin CLI interface context for sub-agents ─────────────────────
-    def _upstream_summary() -> str:
-        """Build an inline summary of all upstream reference docs.
-        Read each file in .marvin/upstream/ and produce a condensed summary
-        so sub-agents get the critical facts without having to read the full files."""
-        upstream_dir = os.path.join(wd, ".marvin", "upstream")
-        if not os.path.isdir(upstream_dir):
-            return ""
-        summaries = []
-        for f in sorted(os.listdir(upstream_dir)):
-            fp = os.path.join(upstream_dir, f)
-            if not os.path.isfile(fp):
-                continue
-            try:
-                content = open(fp).read()
-                # Include first 3000 chars of each upstream doc inline
-                summaries.append(
-                    f"--- .marvin/upstream/{f} ({len(content)} bytes) ---\n"
-                    + content[:3000]
-                    + ("\n[... truncated — read full file for complete details]\n" if len(content) > 3000 else "\n")
-                )
-            except Exception:
-                pass
-        if not summaries:
-            return ""
-        return (
-            "UPSTREAM REFERENCE DOCUMENTS (do not modify these files):\n"
-            "These are the authoritative integration specs provided by the upstream project.\n"
-            "Your generated spec/design MUST be consistent with these documents.\n"
-            "If there is a conflict, the UPSTREAM documents win.\n\n"
-            + "\n".join(summaries)
-        )
-
     def _marvin_interface_context() -> str:
-        """Point sub-agents to upstream specs for integration details."""
-        upstream_dir = os.path.join(wd, ".marvin", "upstream")
-        if not os.path.isdir(upstream_dir):
-            return ""
-        # List upstream files and remind agents to read them
-        upstream_files = []
-        for f in sorted(os.listdir(upstream_dir)):
-            fp = os.path.join(upstream_dir, f)
-            if os.path.isfile(fp):
-                upstream_files.append(f"  .marvin/upstream/{f} ({os.path.getsize(fp)} bytes)")
-        if not upstream_files:
-            return ""
-        return (
-            "\n\nUPSTREAM INTEGRATION CONTRACT — read ALL files in .marvin/upstream/ for the "
-            "full integration spec. These are the authoritative reference for how to integrate "
-            "with the upstream system. Your implementation MUST match these specs exactly.\n"
-            "Files:\n" + "\n".join(upstream_files) + "\n"
-        )
+        """Extract the --non-interactive CLI interface from app.py so sub-agents
+        know how bridge.py should invoke Marvin."""
+        try:
+            with open(app_path) as _af:
+                _app_src = _af.read()
+            _ni_start = _app_src.find("async def _run_non_interactive")
+            if _ni_start >= 0:
+                # Find the end of the function signature + arg parsing block only
+                # Stop at the first blank line after "sys.exit(1)" (end of arg parsing)
+                _ni_end = _app_src.find("# Set up coding mode", _ni_start)
+                if _ni_end < 0:
+                    _ni_end = _ni_start + 800
+                snippet = _app_src[_ni_start:_ni_end].strip()
+                # Cap at 800 chars to avoid leaking unrelated source
+                snippet = snippet[:800]
+                return (
+                    "\n\nMARVIN CLI INTERFACE — this is how the web UI must communicate with Marvin:\n"
+                    "The backend's bridge module spawns app.py as a subprocess. Key facts:\n"
+                    "  - `python app.py --non-interactive --prompt '<text>'` runs a single prompt\n"
+                    "  - Marvin streams its response to stdout (the bridge reads this via async pipe)\n"
+                    "  - For CONVERSATION CONTEXT, the bridge must include prior messages in the prompt\n"
+                    "    (e.g. format as 'Previous messages:\\nUser: ...\\nAssistant: ...\\n\\nNew message: ...')\n"
+                    "    because each --non-interactive invocation is stateless — there is NO session persistence\n"
+                    "  - The --prompt flag accepts the full conversation context as a single string\n"
+                    "  - stderr contains cost/debug info, NOT the response\n\n"
+                    "```python\n" + snippet + "\n```\n"
+                )
+        except Exception:
+            pass
+        return ""
 
     def _project_context() -> str:
         """Build a rich project context block from spec/design docs and file listing.
@@ -3214,16 +3057,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 spec_text = open(spec_path).read()
                 parts.append(f"SPEC SUMMARY (from .marvin/spec.md, {len(spec_text)} bytes total — read full file for details):\n"
                              + spec_text[:2000] + "\n[... truncated — read .marvin/spec.md for full spec]\n")
-            except Exception:
-                pass
-
-        # UX design summary
-        ux_path = os.path.join(wd, ".marvin", "ux.md")
-        if os.path.isfile(ux_path):
-            try:
-                ux_text = open(ux_path).read()
-                parts.append(f"UX DESIGN SUMMARY (from .marvin/ux.md, {len(ux_text)} bytes total — read full file for details):\n"
-                             + ux_text[:2000] + "\n[... truncated — read .marvin/ux.md for full UX design]\n")
             except Exception:
                 pass
 
@@ -3254,147 +3087,47 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         else:
             parts.append("PROJECT FILES: (none yet — you are creating the project from scratch)\n")
 
-        # Upstream reference docs — inline summaries so agents get critical facts
-        upstream_summary = _upstream_summary()
-        if upstream_summary:
-            parts.append(upstream_summary)
-
-        # Ticket tracking instructions
-        ticket_id = params.ticket_id
-        parts.append(
-            "TICKET TRACKING — use the tk tool (DO NOT edit .tickets/ files directly):\n"
-            f"Parent pipeline ticket: {ticket_id}\n\n"
-            "tk CLI usage:\n"
-            "  create [title] [options]  Create ticket, prints ID\n"
-            "    -d, --description       Description text\n"
-            "    -t, --type              Type: bug|feature|task|epic|chore [default: task]\n"
-            "    -p, --priority          Priority 0-4, 0=highest [default: 2]\n"
-            "    --parent                Parent ticket ID\n"
-            "    --tags                  Comma-separated tags\n"
-            "  start <id>               Set status to in_progress\n"
-            "  close <id>               Set status to closed\n"
-            "  status <id> <status>     Update status (open|in_progress|closed)\n"
-            "  dep <id> <dep-id>        Add dependency\n"
-            "  link <id> <id>           Link tickets together\n"
-            "  ls [--status=X]          List tickets\n"
-            "  show <id>                Display ticket\n"
-            "  add-note <id> [text]     Append timestamped note\n\n"
-            "How to use tickets in this pipeline:\n"
-            f"1. Create an EPIC for your phase: tk(args='create \"Phase: X\" -t epic --parent {ticket_id}')\n"
-            "2. Create TASKs under the epic for each unit of work: tk(args='create \"Write tests for API\" -t task --parent EPIC_ID')\n"
-            "3. Start tasks when you begin: tk(args='start TASK_ID')\n"
-            "4. Add notes for findings/decisions: tk(args='add-note TASK_ID \"Found 3 issues\"')\n"
-            "5. Close tasks when done: tk(args='close TASK_ID')\n"
-            "6. Close the epic when all tasks are done: tk(args='close EPIC_ID')\n"
-        )
-
-        # Mandatory testing policy — injected into EVERY sub-agent prompt
-        parts.append(
-            "MANDATORY TESTING POLICY (applies to ALL agents, ALL phases):\n"
-            "- DO NOT mock, stub, fake, or substitute ANYTHING that exists on this system.\n"
-            "- If the upstream system is installed locally, tests MUST call the REAL binary/CLI. "
-            "Do NOT substitute it with echo commands, fake scripts, or test harnesses.\n"
-            "- Do NOT create fake/mock fixtures for real system components.\n"
-            "- Do NOT add a 'command' parameter or similar indirection for test substitution.\n"
-            "- Use REAL databases, REAL HTTP clients, REAL file I/O, REAL subprocesses.\n"
-            "- The ONLY thing you may mock is interactive user input (keyboard/mouse).\n"
-            "- If the design.md or any other document contradicts this policy, THIS POLICY WINS.\n"
-        )
-
-        return "\n".join(parts)
-
-    # ── Spec/design review helper ────────────────────────────────────
-    async def _spec_design_review(doc_path: str, doc_label: str) -> None:
-        """Review a generated spec or design doc against upstream references.
-
-        Runs a readonly reviewer (opus tier) that checks the generated document
-        for consistency with upstream reference docs. If issues are found,
-        dispatches a fixer (plan tier) to update the document, then re-reviews.
-        Up to 2 rounds of review/fix.
-        """
-        if not os.path.isfile(doc_path):
-            return
-
+        # Marvin upstream source — the AI assistant this project integrates with
         upstream_dir = os.path.join(wd, ".marvin", "upstream")
         upstream_files = []
         if os.path.isdir(upstream_dir):
             for f in sorted(os.listdir(upstream_dir)):
                 fp = os.path.join(upstream_dir, f)
                 if os.path.isfile(fp):
-                    upstream_files.append(f".marvin/upstream/{f}")
-        if not upstream_files:
-            return  # nothing to verify against
+                    try:
+                        upstream_files.append(f"  .marvin/upstream/{f} ({os.path.getsize(fp)} bytes)")
+                    except Exception:
+                        pass
+        if upstream_files:
+            parts.append(
+                "MARVIN UPSTREAM SOURCE (REFERENCE ONLY — do not modify or review these):\n"
+                "These files are the source code of the Marvin AI assistant that this web UI wraps.\n"
+                "Use them to understand how bridge.py should invoke the CLI, but do NOT treat them\n"
+                "as part of this project's codebase:\n"
+                + "\n".join(upstream_files) + "\n\n"
+                "KEY SECTIONS TO READ in .marvin/upstream/app.py:\n"
+                "  - Search for '_run_non_interactive' to see the --non-interactive --prompt interface\n"
+                "  - Understand: Marvin streams its response to stdout, stderr has debug/cost info\n"
+                "  - Each invocation is STATELESS — conversation history must go in the prompt\n"
+                "Read .marvin/upstream/README.md and .marvin/upstream/REFERENCE.md for\n"
+                "user-facing documentation and CLI reference.\n"
+            )
 
-        rel_doc = os.path.relpath(doc_path, wd)
-        # When reviewing design.md, also verify it against spec.md
-        spec_path = os.path.join(wd, ".marvin", "spec.md")
-        also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
-        review_prompt = (
-            f"You are a SPEC VERIFICATION REVIEWER. Your job is to verify that the "
-            f"generated document '{rel_doc}' is consistent with the upstream reference "
-            f"documents"
-            + (" and the product spec (.marvin/spec.md)" if also_check_spec else "")
-            + ".\n\n"
-            "STEPS:\n"
-            f"1. Read {rel_doc} completely with read_file.\n"
-            "2. Read ALL upstream reference documents:\n"
-            + "\n".join(f"   - {f}" for f in upstream_files) + "\n"
-            + (f"3. Read .marvin/spec.md — the generated product spec.\n" if also_check_spec else "")
-            + f"{'4' if also_check_spec else '3'}. Cross-check EVERY claim in the generated document against the upstream "
-            "   references"
-            + (" and the spec" if also_check_spec else "")
-            + ". Look for:\n"
-            "   - **Contradictions** — the generated doc says X but upstream says Y\n"
-            "   - **Wrong labels/names** — e.g. using 'Assistant:' when upstream says 'Marvin:'\n"
-            "   - **Missing critical details** — upstream specifies something important that "
-            "     the generated doc ignores or gets wrong\n"
-            "   - **Format mismatches** — streaming formats, event names, field names, etc.\n"
-            "   - **Invented behavior** — the generated doc describes behavior not in upstream\n"
-            "   - **Missing newline/whitespace handling** — upstream often specifies exact "
-            "     string processing rules\n"
-            + ("   - **Spec inconsistency** — the design contradicts or omits requirements from spec.md\n" if also_check_spec else "")
-            + "\n"
-            "OUTPUT FORMAT — for each finding:\n"
-            "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
-            "SEVERITY: critical/major/minor\n\n"
-            "Do NOT edit any files. Do NOT run commands. Report only.\n"
-            "If everything is consistent, respond with 'SPEC_VERIFIED'.\n"
+        # Mandatory testing policy — injected into EVERY sub-agent prompt
+        parts.append(
+            "MANDATORY TESTING POLICY (applies to ALL agents, ALL phases):\n"
+            "- DO NOT mock, stub, fake, or substitute ANYTHING that exists on this system.\n"
+            "- The Marvin CLI is installed locally at /home/kmd/copilot-assistant-thing/app.py. "
+            "It runs as a local subprocess. Tests MUST call the REAL Marvin CLI via the bridge. "
+            "Do NOT substitute it with echo commands, fake scripts, or test harnesses.\n"
+            "- Do NOT create echo_bridge, fake_bridge, test_bridge, or mock_bridge fixtures.\n"
+            "- Do NOT add a 'command' parameter to the bridge for test substitution.\n"
+            "- Use REAL databases, REAL HTTP clients, REAL file I/O, REAL subprocesses.\n"
+            "- The ONLY thing you may mock is interactive user input (keyboard/mouse).\n"
+            "- If the design.md or any other document contradicts this policy, THIS POLICY WINS.\n"
         )
 
-        _MAX_SPEC_REVIEW_ROUNDS = 2
-        for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
-            await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
-
-            rc, rev_out, rev_err = await _run_sub_with_retry(
-                review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
-                label=f"Spec review: {doc_label} R{review_round}", readonly=True)
-
-            if "SPEC_VERIFIED" in (rev_out or ""):
-                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
-                break
-
-            # Dispatch a fixer agent (plan tier) to update the document
-            fix_prompt = (
-                _project_context() + "\n\n"
-                f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
-                "The following inconsistencies were found between the generated document "
-                "and the upstream reference specs. Fix ALL critical and major issues by "
-                "updating the generated document.\n\n"
-                f"{rev_out or '(no output)'}\n\n"
-                "INSTRUCTIONS:\n"
-                f"1. Read {rel_doc} and ALL upstream files in .marvin/upstream/\n"
-                "2. Fix each SPEC_MISMATCH by updating the generated document to match upstream\n"
-                "3. Use apply_patch or edit the file to make corrections\n"
-                "4. Do NOT change upstream reference files — only update the generated document\n"
-                "5. Preserve the overall structure and completeness of the document\n"
-            )
-            await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
-            await _run_sub_with_retry(
-                fix_prompt, _AGENT_MODELS["codex"], base_timeout=900,
-                label=f"Spec fixer: {doc_label} R{review_round}")
-
-            if review_round >= _MAX_SPEC_REVIEW_ROUNDS:
-                await _notify_pipeline(f"⚠️ Spec review: {doc_label} — max rounds reached")
+        return "\n".join(parts)
 
     # ── Code review helper ────────────────────────────────────────────
     async def _code_review(phase_label: str, focus: str = "all") -> None:
@@ -3430,8 +3163,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             ctx += (
                 f"You are a CRITICAL code reviewer auditing the '{phase_label}' phase — "
                 f"**{area}** files only.\n\n"
-                "Read EVERY file listed below with read_file. Also read .marvin/spec.md, "
-                ".marvin/ux.md, and .marvin/design.md for intended behavior.\n\n"
+                "Read EVERY file listed below with read_file. Also read .marvin/spec.md and "
+                ".marvin/design.md for intended behavior.\n\n"
                 "IMPORTANT: Do NOT review files in .marvin/upstream/ — those are upstream "
                 "reference code. Do NOT review files outside your assigned list.\n\n"
                 f"YOUR FILES TO REVIEW:\n{chr(10).join('  - ' + f for f in sorted(files))}\n"
@@ -3439,7 +3172,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             if area == "Backend":
                 ctx += (
                     f"{app_interface_hint}\n"
-                    "Focus on: backend integration, database correctness, API contract "
+                    "Focus on: bridge↔CLI integration, database correctness, API contract "
                     "matching spec, error handling, SQL injection, subprocess safety.\n\n"
                 )
             elif area == "Frontend":
@@ -3463,14 +3196,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "5. **Spec violations** — features in spec.md that are missing or wrong\n\n"
                 "Do NOT flag: style, naming, missing comments, minor refactors.\n\n"
                 "For EACH issue: FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION\n\n"
-                "OUTPUT YOUR FINDINGS AS A REPORT. Do NOT edit any files. Do NOT run commands.\n"
-                "You are a read-only reviewer — report issues and the parent orchestrator will "
-                "dispatch a separate agent to fix them.\n\n"
+                "Fix EVERY critical and major issue yourself:\n"
+                "- Edit files with edit_file\n"
+                "- Run 'pytest -v' after fixing to verify no regressions\n"
+                "- Commit fixes with message 'Code review fix ({area.lower()}): <summary>'\n"
                 "If no critical/major issues, respond with 'REVIEW_CLEAN'."
             )
             return ctx
 
-        # Launch reviews in parallel for non-empty buckets (all readonly)
+        # Launch reviews in parallel for non-empty buckets
         review_tasks = []
         review_labels = []
         for area, files in [("Backend", backend_files), ("Frontend", frontend_files), ("Tests/Config", test_config_files)]:
@@ -3479,140 +3213,76 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             prompt = _build_review_prompt(area, files)
             review_labels.append(area)
             review_tasks.append(_run_sub_with_retry(
-                prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label}", readonly=True))
+                prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label}"))
 
         # Spec-conformance reviewer: dedicated agent that checks ALL code against spec + architecture
         all_project_files = backend_files + frontend_files + test_config_files
         if all_project_files:
             spec_review_ctx = _project_context() + "\n\n"
-            is_test_only_phase = "test" in phase_label.lower()
             spec_review_ctx += (
                 f"You are a SPEC-CONFORMANCE AUDITOR for the '{phase_label}' phase.\n\n"
-            )
-            if is_test_only_phase:
-                spec_review_ctx += (
-                    "IMPORTANT: This is a TEST-WRITING phase (TDD). Implementation code does NOT exist yet — "
-                    "that is EXPECTED and CORRECT. Do NOT report missing implementation as an issue. "
-                    "Your job is ONLY to verify that the TESTS correctly cover the spec requirements. "
-                    "Tests SHOULD fail right now (no implementation) — that is the point of TDD.\n\n"
-                    "STEPS:\n"
-                    "1. Read .marvin/spec.md — note every user story, acceptance criterion, endpoint, behavior.\n"
-                    "2. Read .marvin/design.md — note the test plan section.\n"
-                    "3. Read all test files and verify:\n"
-                    "   - Tests cover every spec requirement and acceptance criterion\n"
-                    "   - Tests verify OBSERVABLE BEHAVIOR matching the spec\n"
-                    "   - Tests do NOT mock things that should be tested for real\n"
-                    "   - Test assertions match spec-defined values (status codes, field names, etc.)\n"
-                    "   - Tests do NOT assert placeholder/dummy behavior\n\n"
-                )
-            else:
-                spec_review_ctx += (
-                    "Your SOLE job is to verify that the implementation matches the spec and "
-                    "architecture documents EXACTLY. You are not reviewing code quality — only "
-                    "checking that every requirement is implemented correctly.\n\n"
-                    "STEPS:\n"
-                    "1. Read .marvin/spec.md completely — note every user story, acceptance criterion, "
-                    "endpoint, behavior, constraint, and feature requirement.\n"
-                    "2. Read .marvin/ux.md completely — note every screen, component, interaction, "
-                    "state, style rule, and accessibility requirement.\n"
-                    "3. Read .marvin/design.md completely — note every architecture decision, file "
-                    "structure, API shape, database schema, and module responsibility.\n"
-                    "4. Read all implementation files and verify:\n"
-                    "   - Every user story's acceptance criteria are implemented\n"
-                    "   - Every API endpoint matches the specified request/response shapes\n"
-                    "   - Every database table/column matches the schema\n"
-                    "   - Every keyboard shortcut, theme rule, and UX behavior exists\n"
-                    "   - Error handling matches what the spec requires\n"
-                    "   - File structure matches the architecture\n"
-                    "5. Read all test files and verify:\n"
-                    "   - Tests cover every spec requirement (not just implementation details)\n"
-                    "   - Tests do NOT mock things that should be tested for real\n"
-                    "   - Tests verify OBSERVABLE BEHAVIOR matching the spec\n"
-                    "   - Tests do NOT assert buggy behavior that contradicts the spec\n\n"
-                )
-            spec_review_ctx += (
+                "Your SOLE job is to verify that the implementation matches the spec and "
+                "architecture documents EXACTLY. You are not reviewing code quality — only "
+                "checking that every requirement is implemented correctly.\n\n"
+                "STEPS:\n"
+                "1. Read .marvin/spec.md completely — note every user story, acceptance criterion, "
+                "endpoint, behavior, constraint, and UX requirement.\n"
+                "2. Read .marvin/design.md completely — note every architecture decision, file "
+                "structure, API shape, database schema, and module responsibility.\n"
+                "3. Read all implementation files and verify:\n"
+                "   - Every user story's acceptance criteria are implemented\n"
+                "   - Every API endpoint matches the specified request/response shapes\n"
+                "   - Every database table/column matches the schema\n"
+                "   - Every keyboard shortcut, theme rule, and UX behavior exists\n"
+                "   - Error handling matches what the spec requires\n"
+                "   - File structure matches the architecture\n"
+                "4. Read all test files and verify:\n"
+                "   - Tests cover every spec requirement (not just implementation details)\n"
+                "   - Tests do NOT mock things that should be tested for real\n"
+                "   - Tests verify OBSERVABLE BEHAVIOR matching the spec\n"
+                "   - Tests do NOT assert buggy behavior that contradicts the spec\n\n"
                 f"PROJECT FILES:\n{chr(10).join('  - ' + f for f in sorted(all_project_files))}\n\n"
                 "OUTPUT FORMAT — for each finding:\n"
                 "SPEC_GAP: <spec section> — <what's missing or wrong> — SEVERITY: critical/major/minor\n\n"
-                "OUTPUT YOUR FINDINGS AS A REPORT. Do NOT edit any files. Do NOT run commands.\n"
-                "You are a read-only reviewer — report issues and the parent orchestrator will "
-                "dispatch a separate agent to fix them.\n\n"
+                "Fix EVERY critical and major spec gap yourself:\n"
+                "- Edit files with edit_file\n"
+                "- Run 'pytest -v' after fixing to verify no regressions\n"
+                "- Commit fixes with message 'Spec conformance fix: <summary>'\n"
                 "If everything matches the spec, respond with 'SPEC_CONFORMANT'."
             )
             review_labels.append("Spec-Conformance")
             review_tasks.append(_run_sub_with_retry(
-                spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}", readonly=True))
+                spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label}"))
 
+        _run_cmd(["tk", "add-note", params.ticket_id,
+                  f"Code review: {phase_label} ({len(review_tasks)} parallel reviewers)"], timeout=5, cwd=wd)
         await _notify_pipeline(f"🔍 Code review: {phase_label} ({len(review_tasks)} reviewers)")
 
-        _MAX_REVIEW_ROUNDS = 3
-        for review_round in range(1, _MAX_REVIEW_ROUNDS + 1):
-            results = await asyncio.gather(*review_tasks)
+        results = await asyncio.gather(*review_tasks)
 
-            # Collect findings from all reviewers
-            all_findings = []
-            clean_count = 0
-            for (rc, rev_out, rev_err), area in zip(results, review_labels):
-                if "REVIEW_CLEAN" in (rev_out or "") or "SPEC_CONFORMANT" in (rev_out or ""):
-                    clean_count += 1
-                else:
-                    all_findings.append(f"=== {area} Review Findings ===\n{rev_out or '(no output)'}")
+        clean_count = 0
+        fix_count = 0
+        for (rc, rev_out, rev_err), area in zip(results, review_labels):
+            if "REVIEW_CLEAN" in (rev_out or ""):
+                clean_count += 1
+            else:
+                fix_count += 1
 
-            if not all_findings:
-                summary = f"all {clean_count} reviewers passed"
-                await _notify_pipeline(f"✅ Review clean: {phase_label} (round {review_round}, {summary})")
-                break
-
-            # Dispatch a fixer agent with the combined review findings
-            combined_findings = "\n\n".join(all_findings)
-            fix_prompt = (
-                _project_context() + "\n\n"
-                f"CODE REVIEW FINDINGS (round {review_round}/{_MAX_REVIEW_ROUNDS}):\n"
-                "The following issues were found by parallel code reviewers. "
-                "Fix ALL critical and major issues. Minor issues are optional.\n\n"
-                f"{combined_findings}\n\n"
-                "INSTRUCTIONS:\n"
-                "1. Read the files mentioned in each finding\n"
-                "2. Fix each critical/major issue with the smallest possible change\n"
-                "3. Run 'pytest -v' after fixing to verify no regressions\n"
-                "4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
-                "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
-            )
-            await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
-
-            fix_rc, fix_out, fix_err = await _run_sub_with_retry(
-                fix_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
-
-            if review_round >= _MAX_REVIEW_ROUNDS:
-                await _notify_pipeline(f"⚠️ Review: {phase_label} — max rounds reached")
-                break
-
-            # Re-run reviewers for next round
-            await _notify_pipeline(f"🔍 Re-review: {phase_label} (round {review_round + 1})")
-            review_tasks = []
-            review_labels = []
-            for area, files in [("Backend", backend_files), ("Frontend", frontend_files), ("Tests/Config", test_config_files)]:
-                if not files:
-                    continue
-                prompt = _build_review_prompt(area, files)
-                review_labels.append(area)
-                review_tasks.append(_run_sub_with_retry(
-                    prompt, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review {area}: {phase_label} R{review_round + 1}", readonly=True))
-            if all_project_files:
-                review_labels.append("Spec-Conformance")
-                review_tasks.append(_run_sub_with_retry(
-                    spec_review_ctx, _AGENT_MODELS["opus"], base_timeout=900, label=f"Review Spec-Conformance: {phase_label} R{review_round + 1}", readonly=True))
+        summary = f"{clean_count} clean, {fix_count} with fixes"
+        if fix_count == 0:
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Review clean: {phase_label} — all {clean_count} reviewers passed"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"✅ Review clean: {phase_label} ({summary})")
+        else:
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Review complete: {phase_label} — {summary}"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"🔧 Review complete: {phase_label} ({summary})")
 
     # ── Pipeline state for resume ────────────────────────────────────────
     state_file = os.path.join(wd, ".marvin", "pipeline_state")
     os.makedirs(os.path.join(wd, ".marvin"), exist_ok=True)
 
     def _save_state(phase: str):
-        """Save pipeline state, but never downgrade to an earlier phase."""
-        current = _load_state()
-        if current and phase in _phase_order and current in _phase_order:
-            if _phase_order.index(current) >= _phase_order.index(phase):
-                return  # already at or past this phase
         with open(state_file, "w") as f:
             f.write(phase)
 
@@ -3624,20 +3294,20 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
         return ""
 
-    _phase_order = ["1a", "1a_review", "1b", "1b_review", "2a", "2b", "3", "4a", "4b", "5"]
+    completed_phase = _load_state()
+    _phase_order = ["1a", "1b", "2a", "2b", "3", "4a", "4b", "5"]
     def _phase_done(phase: str) -> bool:
-        current = _load_state()
-        if not current:
+        if not completed_phase:
             return False
         try:
-            return _phase_order.index(current) >= _phase_order.index(phase)
+            return _phase_order.index(completed_phase) >= _phase_order.index(phase)
         except ValueError:
             return False
 
     # Copy Marvin source + docs into .marvin/upstream/ so sub-agents can read them
     upstream_dir = os.path.join(wd, ".marvin", "upstream")
     os.makedirs(upstream_dir, exist_ok=True)
-    for src_file in ["MARVIN_API_SPEC.md", "README.md", "REFERENCE.md"]:
+    for src_file in ["app.py", "README.md", "REFERENCE.md"]:
         src_path = os.path.join(os.path.dirname(app_path), src_file)
         dst_path = os.path.join(upstream_dir, src_file)
         if os.path.isfile(src_path) and (
@@ -3659,12 +3329,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             _ntfy_override_topic = "-".join(_rng.sample(_words, 5))
         except Exception:
             _ntfy_override_topic = f"marvin-pipeline-{_rng.randint(10000, 99999)}"
-
+    _run_cmd(["tk", "add-note", params.ticket_id, f"ntfy topic: {_ntfy_override_topic}"], timeout=5, cwd=wd)
     await _notify_pipeline(f"📡 Pipeline notifications on: {_ntfy_override_topic}")
 
-    _resumed_from = _load_state()
-    if _resumed_from:
-        await _notify_pipeline(f"🔄 Resuming pipeline from after phase {_resumed_from}")
+    if completed_phase:
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Resuming pipeline from after phase {completed_phase}"], timeout=5, cwd=wd)
+        await _notify_pipeline(f"🔄 Resuming pipeline from after phase {completed_phase}")
 
     # ── Phase 1a: Spec & UX Design ──────────────────────────────────────
     if params.design_first:
@@ -3687,106 +3357,35 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # Phase 1a: Spec & UX — skip if spec.md already exists and is substantial
         spec_path = os.path.join(design_dir, "spec.md")
-        ux_path = os.path.join(design_dir, "ux.md")
-        if _phase_done("1a") or (os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000
-                                and os.path.isfile(ux_path) and os.path.getsize(ux_path) > 1000):
+        if _phase_done("1a") or (os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000):
             spec_size = os.path.getsize(spec_path) if os.path.isfile(spec_path) else 0
-            ux_size = os.path.getsize(ux_path) if os.path.isfile(ux_path) else 0
-            await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md ({spec_size}B) ux.md ({ux_size}B)")
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: SKIPPED — spec.md exists ({spec_size} bytes)"], timeout=5, cwd=wd)
+            await _notify_pipeline(f"⏭️ Phase 1a skipped — spec.md exists ({spec_size} bytes)")
         else:
-            await _notify_pipeline("🎨 Phase 1a: Spec + UX design")
-
-            # Shared upstream injection
-            upstream_injection = ""
-            upstream_summary = _upstream_summary()
-            if upstream_summary:
-                upstream_injection = (
-                    "UPSTREAM INTEGRATION SPECS:\n"
-                    "The following upstream reference documents define the integration contract "
-                    "for this project. READ THEM CAREFULLY with read_file before writing. "
-                    "Your output MUST be consistent with these documents — use the exact formats, "
-                    "field names, labels, and patterns they specify. If the upstream spec says to "
-                    "use specific labels (e.g. 'User:' / 'Marvin:'), use those exact labels. "
-                    "If it specifies a streaming format, match it exactly.\n\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing.\n\n"
-                )
-            instructions_injection = f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n" if instructions_ctx else ""
-
-            # Spec agent — skip if spec.md already exists
-            if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000:
-                await _notify_pipeline(f"⏭️ spec.md exists ({os.path.getsize(spec_path)}B), skipping spec agent")
-            else:
-
-                # Agent 1: Product spec — features, user stories, API contract, constraints
-                product_prompt = (
-                    "You are a senior product manager. Your job is to produce a detailed "
-                    "PRODUCT SPECIFICATION for the following task. Do NOT write any code, "
-                    "do NOT describe architecture/file structure, and do NOT design visual UX "
-                    "(a separate agent handles UX). Focus ONLY on:\n\n"
-                    "1. **Product Overview** — what the product does, who it's for, core value proposition.\n"
-                    "2. **User Stories & Acceptance Criteria** — every user story with numbered acceptance "
-                    "criteria. Be exhaustive: cover happy path, error cases, edge cases.\n"
-                    "3. **Feature Requirements** — every feature with detailed behavior specification. "
-                    "Include API endpoint contract (routes, methods, request/response shapes, status codes) "
-                    "if the product has an API.\n"
-                    "4. **Integration Contract** — how the product integrates with upstream systems. "
-                    "Include exact subprocess invocation, streaming format, data formats, labels. "
-                    "Copy critical details VERBATIM from upstream specs — do not paraphrase.\n"
-                    "5. **Constraints & Non-Functional Requirements** — performance, security, "
-                    "accessibility mandates, technology constraints.\n"
-                    "6. **Information Architecture** — navigation structure, URL scheme, data "
-                    "relationships from the user's perspective.\n\n"
-                    f"TASK:\n{params.prompt}\n\n"
-                    + upstream_injection + instructions_injection +
-                    "Save the spec as .marvin/spec.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                    "Use create_file for the first section (e.g. title + overview + first major section), "
-                    "then use append_file for each subsequent section. Each call should be 2000-4000 words max. "
-                    "Be exhaustive — every feature, every endpoint, every edge case. "
-                    "A separate UX agent will read this spec next to produce the visual design.\n"
-                )
-
-                # Run spec — retry until file exists
-                for _spec_attempt in range(1, _MAX_RETRIES + 1):
-                    spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Product spec")
-                    if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000:
-                        spec_size = os.path.getsize(spec_path)
-                        await _notify_pipeline(f"✅ spec.md ready ({spec_size} bytes)")
-                        break
-                    await _notify_pipeline(f"⚠️ spec.md not written (attempt {_spec_attempt}/{_MAX_RETRIES})")
-                else:
-                    await _notify_pipeline(f"🚫 Pipeline ABORTED: product spec failed after {_MAX_RETRIES} attempts")
-                    return f"🚫 Product spec failed (exit {spec_rc}, ticket {params.ticket_id}):\n{serr or sout}"
-
-            # Agent 2: UX design — screens, components, style guide, visual polish
-            ux_prompt = (
-                "You are a senior UX designer. Your job is to produce a detailed "
-                "UX DESIGN DOCUMENT for the following task. Do NOT write any code, "
-                "do NOT describe architecture/file structure, and do NOT write the product spec "
-                "(it already exists at .marvin/spec.md — READ IT FIRST with read_file). "
-                "Your UX design must be consistent with the spec. Focus ONLY on:\n\n"
-                "1. **UX Design Schema** — describe every screen/view, its components, layout, "
-                "interactions, states (loading, empty, error, streaming, success), transitions, "
-                "and responsive breakpoints. Use a structured format. Cover every user flow "
-                "end-to-end.\n"
-                "2. **Component Library** — every UI component with its states, variants, "
-                "dimensions, and behavior. Name components consistently.\n"
-                "3. **Style Guide** — colors (exact hex/rgba for both light and dark themes), "
-                "typography (font families, sizes, weights, line-heights), spacing scale, "
-                "border-radius values, shadow definitions, transition timing.\n"
-                "4. **Interaction Patterns** — hover/focus/active states, keyboard shortcuts, "
-                "micro-interactions, animation timing, toast/notification behavior.\n"
-                "5. **Responsive Design** — exact breakpoints, layout changes per breakpoint, "
-                "mobile-specific interactions (swipe, drawer behavior).\n"
-                "6. **Accessibility** — ARIA roles/labels, keyboard navigation flow, focus "
-                "management, screen reader announcements, contrast ratios.\n\n"
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1a: Spec & UX design ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
+            await _notify_pipeline("🎨 Phase 1a: Spec & UX design started")
+            spec_prompt = (
+                "You are a senior product designer. Your job is to produce a detailed "
+                "SPECIFICATION and UX DESIGN for the following task. Do NOT write any code "
+                "and do NOT describe architecture or file structure. Focus ONLY on:\n\n"
+                "1. **Product Spec** — what the product does, who it's for, core user stories, "
+                "acceptance criteria for each feature, constraints and non-functional requirements.\n"
+                "2. **UX Design Schema** — describe every screen/view, its components, layout, "
+                "interactions, states, transitions, and responsive breakpoints. Use a structured "
+                "format. Cover every user flow end-to-end: happy path, error states, empty states, "
+                "loading states.\n"
+                "3. **Style Guide** — colors, typography, spacing, component naming conventions, "
+                "accessibility requirements (ARIA, keyboard nav, contrast ratios).\n"
+                "4. **Information Architecture** — navigation structure, URL scheme, data "
+                "relationships from the user's perspective.\n\n"
                 f"TASK:\n{params.prompt}\n\n"
-                "IMPORTANT: Read .marvin/spec.md first to understand all features and requirements.\n\n"
-                + upstream_injection + instructions_injection +
-                "Save the UX design as .marvin/ux.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                "Use create_file for the first section (e.g. title + overview + UX schema), "
-                "then use append_file for each subsequent section (component library, style guide, etc). "
-                "Each call should be 2000-4000 words max. Never put the entire document in one create_file call. "
-                "Be exhaustive — every screen, every component, every state.\n\n"
+            )
+            if instructions_ctx:
+                spec_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
+            spec_prompt += (
+                "Save the spec as .marvin/spec.md using create_file. "
+                "Be exhaustive — every screen, every interaction, every edge case. "
+                "The architecture pass will read this spec to design the technical solution.\n\n"
                 "VISUAL DESIGN QUALITY: The style guide must produce a POLISHED, modern UI — not "
                 "just functional. Specify exact CSS values: subtle gradients, box-shadows with "
                 "multiple layers, smooth transitions (200-300ms ease), hover/focus micro-interactions, "
@@ -3796,37 +3395,32 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "backdrop-filter for overlays, and a cohesive spacing scale."
             )
 
-            # Run UX after spec (sequential — UX reads spec.md) — retry until file exists
-            for _ux_attempt in range(1, _MAX_RETRIES + 1):
-                ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="UX design")
-                if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 1000:
-                    ux_size = os.path.getsize(ux_path)
-                    await _notify_pipeline(f"✅ ux.md ready ({ux_size} bytes)")
-                    break
-                await _notify_pipeline(f"⚠️ ux.md not written (attempt {_ux_attempt}/{_MAX_RETRIES})")
-            else:
-                await _notify_pipeline(f"🚫 Pipeline ABORTED: UX design failed after {_MAX_RETRIES} attempts")
-                return f"🚫 UX design failed (exit {ux_rc}, ticket {params.ticket_id}):\n{ux_err or ux_out}"
-
-            await _notify_pipeline("✅ Phase 1a complete — spec.md + ux.md")
-        _save_state("1a")
-
-        # Phase 1a-review: verify spec and UX against upstream references
-        if _phase_done("1a_review"):
-            await _notify_pipeline("⏭️ Phase 1a review skipped — already completed")
-        else:
+            rc, sout, serr = await _run_sub_with_retry(spec_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Spec/UX pass")
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
-                await _spec_design_review(spec_path, "spec.md")
-            if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 100:
-                await _spec_design_review(ux_path, "ux.md")
-            _save_state("1a_review")
+                spec_size = os.path.getsize(spec_path)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Spec/UX complete — agent saved .marvin/spec.md ({spec_size} bytes)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({spec_size} bytes)")
+            elif rc == 0 and sout:
+                with open(spec_path, "w") as f:
+                    f.write(sout)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Spec/UX complete — saved output to .marvin/spec.md ({len(sout)} chars)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1a complete — spec.md ({len(sout)} chars)")
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: spec/UX pass failed (exit {rc})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: spec/UX pass failed (exit {rc})")
+                return f"🚫 Spec/UX pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{serr or sout}"
+        _save_state("1a")
 
         # Phase 1b: Architecture & Test Plan — skip if design.md already exists
         design_path = os.path.join(design_dir, "design.md")
         if _phase_done("1b") or (os.path.isfile(design_path) and os.path.getsize(design_path) > 1000):
             design_size = os.path.getsize(design_path) if os.path.isfile(design_path) else 0
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: SKIPPED — design.md exists ({design_size} bytes)"], timeout=5, cwd=wd)
             await _notify_pipeline(f"⏭️ Phase 1b skipped — design.md exists ({design_size} bytes)")
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 1b: Architecture & test plan ({_AGENT_MODELS['plan']})"], timeout=5, cwd=wd)
             await _notify_pipeline("📐 Phase 1b: Architecture & test plan started")
 
             try:
@@ -3835,10 +3429,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"Failed to read spec: {e}"
 
             arch_prompt = (
-                "You are a senior software architect. A product spec has been created at "
-                ".marvin/spec.md and a UX design at .marvin/ux.md. Read BOTH with read_file "
-                "first, then produce a detailed ARCHITECTURE and TEST PLAN. Do NOT write any "
-                "code. Produce:\n\n"
+                "You are a senior software architect. A product spec and UX design has already "
+                "been created at .marvin/spec.md. Read it first with read_file, then produce "
+                "a detailed ARCHITECTURE and TEST PLAN. Do NOT write any code. Produce:\n\n"
                 "1. **Architecture** — file structure, modules, data flow, API endpoints "
                 "(with request/response shapes and status codes), database schema, error handling "
                 "strategy, technology choices with rationale. Every decision must trace back to "
@@ -3863,71 +3456,60 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "(SQLite temp files), REAL HTTP clients (httpx.AsyncClient), REAL file I/O, "
                 "REAL subprocess calls. The ONLY things that should be mocked are: user keyboard "
                 "input.\n"
-                "   - If there is a locally installed upstream CLI/binary, tests MUST call the "
-                "REAL subprocess. Do NOT substitute with echo commands, fake scripts, "
-                "or test harnesses.\n"
+                "   - The Marvin CLI (app.py) is installed LOCALLY at "
+                "/home/kmd/copilot-assistant-thing/app.py. It runs "
+                "locally and streams to stdout. Tests MUST call the real Marvin subprocess "
+                "via the bridge. Do NOT substitute it with echo, do NOT create fake bridge "
+                "commands, do NOT use 'echo_bridge' fixtures. Test the REAL bridge with the "
+                "REAL Marvin CLI.\n"
                 "   - NEVER plan to mock internal modules, the database layer, route handlers, "
-                "or anything in .marvin/upstream/.\n"
+                "the bridge, or anything in .marvin/upstream/.\n"
                 "   - Do NOT use the word 'mock' in test descriptions.\n"
-                "   - Do NOT create fake/mock fixtures for real system components.\n"
-                "   - Do NOT add a 'command' parameter or similar indirection for test substitution.\n"
+                "   - Do NOT create 'echo_bridge', 'fake_bridge', or 'test_bridge' fixtures.\n"
+                "   - Do NOT design the bridge with a 'command' parameter for substitution. "
+                "The bridge calls Marvin. Period.\n"
                 "   - Tests must verify OBSERVABLE BEHAVIOR (HTTP responses, database state, "
                 "rendered output) — not internal implementation details.\n"
                 "   - Integration tests should test real cross-module interactions.\n\n"
             )
-            # Inject upstream reference summaries for the architect
-            upstream_summary = _upstream_summary()
-            if upstream_summary:
-                arch_prompt += (
-                    "UPSTREAM INTEGRATION SPECS:\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the design. "
-                    "Your architecture MUST be consistent with the upstream integration contract. "
-                    "Pay special attention to: subprocess invocation patterns, streaming formats, "
-                    "data formats, labels, and string processing rules.\n\n"
-                )
             if instructions_ctx:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
             arch_prompt += (
-                "Save the architecture document as .marvin/design.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                "Use create_file for the first section, then append_file for each subsequent section. "
-                "Each call should be 2000-4000 words max. "
-                "Be thorough and specific — this document, the spec, and the UX design together "
-                "will be the sole reference for the test-writing and implementation agents. "
+                "Save the architecture document as .marvin/design.md using create_file. "
+                "Be thorough and specific — this document and the spec together will be "
+                "the sole reference for the test-writing and implementation agents. "
                 "The test plan section is CRITICAL — it must be exhaustive enough that "
                 "agents can write a complete test suite with full coverage from it alone."
             )
 
-            for _arch_attempt in range(1, _MAX_RETRIES + 1):
-                rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Architecture pass")
-                if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
-                    design_size = os.path.getsize(design_path)
-                    await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
-                    break
-                # Delete garbage if agent wrote CoT instead of real content
-                if os.path.isfile(design_path):
-                    os.remove(design_path)
-                await _notify_pipeline(f"⚠️ design.md not written (attempt {_arch_attempt}/{_MAX_RETRIES})")
+            rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Architecture pass")
+            if os.path.isfile(design_path) and os.path.getsize(design_path) > 100:
+                design_size = os.path.getsize(design_path)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Architecture complete — agent saved .marvin/design.md ({design_size} bytes)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
+            elif rc == 0 and dout:
+                with open(design_path, "w") as f:
+                    f.write(dout)
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Architecture complete — saved output to .marvin/design.md ({len(dout)} chars)"], timeout=5)
+                await _notify_pipeline(f"✅ Phase 1b complete — design.md ({len(dout)} chars)")
             else:
-                await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed after {_MAX_RETRIES} attempts")
-                return f"🚫 Architecture pass failed (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: architecture pass failed (exit {rc})"], timeout=5, cwd=wd)
+                await _notify_pipeline(f"🚫 Pipeline ABORTED: architecture pass failed (exit {rc})")
+                return f"🚫 Architecture pass failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{derr or dout}"
         _save_state("1b")
-
-        # Phase 1b-review: verify design against upstream references AND spec
-        if _phase_done("1b_review"):
-            await _notify_pipeline("⏭️ Phase 1b review skipped — already completed")
-        else:
-            if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
-                await _spec_design_review(design_path, "design.md")
-            _save_state("1b_review")
 
     # ── Phase 2a: Functional tests (TDD, optional) ───────────────────────────
     design_path = os.path.join(wd, ".marvin", "design.md")
     if params.tdd:
         if _phase_done("2a"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 2a skipped — functional tests already written")
         elif not os.path.isfile(design_path):
             return "🚫 TDD requires a design doc. Use design_first=true or create .marvin/design.md manually."
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2a: Writing failing functional tests (parallel agents)"], timeout=5, cwd=wd)
             await _notify_pipeline("🧪 Phase 2a: Writing failing functional tests (parallel agents)")
 
             try:
@@ -3968,9 +3550,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 test_prompt = (
                     "You are writing FUNCTIONAL TESTS (not unit tests) for a TDD workflow. "
                     "These tests use REAL implementations — real databases, real HTTP clients, "
-                    "real subprocesses. No mocking. Read the spec at .marvin/spec.md, the UX "
-                    "design at .marvin/ux.md, AND the architecture doc at .marvin/design.md, "
-                    "then write ONLY the test files described below.\n\n"
+                    "real subprocesses. No mocking. Read BOTH the spec at "
+                    ".marvin/spec.md AND the architecture doc at .marvin/design.md, then "
+                    "write ONLY the test files described below.\n\n"
                     "REQUIREMENTS:\n"
                     "- Tests MUST fail (the implementation doesn't exist yet)\n"
                     "- Write EVERY test listed in the Test Plan section — do not skip any\n"
@@ -3987,8 +3569,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "(keyboard/mouse) and services that "
                     "aren't installed on this system. If a library is installed, USE IT FOR REAL.\n"
                     "- NEVER mock internal modules, database calls, the filesystem, or anything "
-                    "in .marvin/upstream/. If an upstream CLI is available locally, test "
-                    "against it with a real subprocess.\n"
+                    "in .marvin/upstream/. If Marvin CLI (app.py) is available locally, test "
+                    "the bridge against it with a real subprocess.\n"
                     "- Tests must verify OBSERVABLE BEHAVIOR (HTTP responses, DB state, rendered "
                     "output), not internal implementation details. If a test passes when the "
                     "behavior is wrong, the test is broken.\n"
@@ -4008,10 +3590,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 if rc != 0:
                     failures.append(f"Test agent {i+1} failed (exit {rc}): {err or out}")
             if len(failures) == len(test_results):
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Pipeline ABORTED: all {len(test_results)} test agents failed after retries"], timeout=5)
                 await _notify_pipeline(f"🚫 Pipeline ABORTED: all test agents failed")
                 return f"🚫 All test agents failed — aborting pipeline (ticket {params.ticket_id}):\n" + "\n".join(failures)
             if failures:
-                await _notify_pipeline(f"⚠️ {len(failures)}/{len(test_results)} test agents failed, continuing with partial results")
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Functional test pass: {len(failures)}/{len(test_results)} agents failed (continuing with partial tests)"], timeout=5)
+
+            _run_cmd(["tk", "add-note", params.ticket_id,
+                      f"Functional test pass complete — {len(test_results)} agents, {len(failures)} failures"], timeout=5)
             await _notify_pipeline(f"✅ Phase 2a complete — {len(test_results)} test agents, {len(failures)} failures")
 
             # Code review of test quality
@@ -4022,14 +3610,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 2b: Integration tests (TDD, optional) ──────────────────────
     if params.tdd:
         if _phase_done("2b"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 2b skipped — integration tests already written")
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 2b: Writing failing integration tests"], timeout=5, cwd=wd)
             await _notify_pipeline("🧪 Phase 2b: Writing failing integration tests")
 
             integ_prompt = (
-                "You are writing INTEGRATION tests for a TDD workflow. Read the spec at "
-                ".marvin/spec.md, the UX design at .marvin/ux.md, AND the architecture doc "
-                "at .marvin/design.md.\n\n"
+                "You are writing INTEGRATION tests for a TDD workflow. Read BOTH the spec at "
+                ".marvin/spec.md AND the architecture doc at .marvin/design.md.\n\n"
                 "You are writing tests that verify the REAL system works end-to-end. "
                 "These tests complement the functional tests that already exist (or will exist).\n\n"
                 "CRITICAL RULES — READ CAREFULLY:\n"
@@ -4041,8 +3630,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "real subprocess calls. The only things you should mock are: user input "
                 "(keyboard/mouse). If a library "
                 "or service is installed on this system, USE IT FOR REAL.\n"
-                "- NEVER mock anything in .marvin/upstream/. If an upstream CLI is available, "
-                "test it with a real subprocess.\n"
+                "- NEVER mock anything in .marvin/upstream/. If Marvin CLI is available, "
+                "test the bridge with a real subprocess.\n"
                 "- Test full request→response flows through the actual FastAPI app:\n"
                 "  • Create a conversation via the API, send a message, verify the SSE stream\n"
                 "  • Create, list, get, delete conversations — verify DB state matches\n"
@@ -4062,7 +3651,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             rc, out, err = await _run_sub_with_retry(
                 integ_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Integration test agent")
             if rc != 0:
-                await _notify_pipeline(f"⚠️ Integration test agent failed (exit {rc})")
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"Integration test agent failed (exit {rc}) — continuing"], timeout=5)
+            else:
+                _run_cmd(["tk", "add-note", params.ticket_id, "Integration tests written"], timeout=5, cwd=wd)
             await _notify_pipeline(f"✅ Phase 2b complete — integration tests written")
 
             # Code review of integration tests
@@ -4072,10 +3664,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
     # ── Phase 3: Implementation ──────────────────────────────────────────
     if _phase_done("3"):
+        _run_cmd(["tk", "add-note", params.ticket_id, "Phase 3: SKIPPED — already completed"], timeout=5, cwd=wd)
         await _notify_pipeline("⏭️ Phase 3 skipped — implementation already done")
         impl_out = "(resumed — implementation was already complete)"
     else:
-        await _notify_pipeline(f"🔨 Phase 3: Implementation started ({_AGENT_MODELS['codex']})")
+        _run_cmd(["tk", "add-note", params.ticket_id, f"Phase 3: Implementation ({tier}/{model_name})"], timeout=5, cwd=wd)
+        await _notify_pipeline(f"🔨 Phase 3: Implementation started ({tier}/{model_name})")
 
         impl_prompt = params.prompt
         spec_path = os.path.join(wd, ".marvin", "spec.md")
@@ -4085,16 +3679,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "IMPORTANT: Read these documents with read_file BEFORE writing any code:\n"
             )
             if os.path.isfile(spec_path):
-                impl_prompt += "  - .marvin/spec.md (product spec & feature requirements)\n"
-            ux_path = os.path.join(wd, ".marvin", "ux.md")
-            if os.path.isfile(ux_path):
-                impl_prompt += "  - .marvin/ux.md (UX design, components, style guide)\n"
+                impl_prompt += "  - .marvin/spec.md (product spec & UX design)\n"
             impl_prompt += (
                 "  - .marvin/design.md (architecture & implementation plan)\n\n"
                 "Follow the architecture, file structure, and UX design specified in those "
                 "documents exactly. Do not deviate unless you encounter a technical impossibility.\n\n"
                 "VISUAL POLISH IS CRITICAL: The CSS must look professional and modern — not like "
-                "unstyled HTML with colors slapped on. Follow the UX design in .marvin/ux.md exactly: "
+                "unstyled HTML with colors slapped on. Follow the spec's style guide exactly: "
                 "use the specified box-shadows, border-radius, transitions, hover states, and "
                 "spacing scale. Every interactive element needs a visible hover/focus transition. "
                 "Typography must have clear hierarchy. Whitespace should feel intentional and "
@@ -4123,11 +3714,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "by reading the spec/design docs."
         )
 
-        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Implementation")
+        rc, impl_out, impl_err = await _run_sub_with_retry(impl_prompt, model_name, base_timeout=1200, label="Implementation")
         if rc != 0:
+            _run_cmd(["tk", "add-note", params.ticket_id, f"Pipeline ABORTED: implementation failed (exit {rc})"], timeout=5, cwd=wd)
             await _notify_pipeline(f"🚫 Pipeline ABORTED: implementation failed (exit {rc})")
             return f"🚫 Implementation failed after {_MAX_RETRIES} retries (exit {rc}, ticket {params.ticket_id}):\n{impl_err or impl_out}"
 
+        _run_cmd(["tk", "add-note", params.ticket_id, "Implementation complete"], timeout=5, cwd=wd)
         await _notify_pipeline("✅ Phase 3 complete — implementation finished")
 
         # Code review after implementation
@@ -4138,8 +3731,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 4a: Debug loop — unit + integration tests (TDD green) ─────
     if params.tdd:
         if _phase_done("4a"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 4a skipped — debug loop already done")
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4a: Debug loop — running tests until green"], timeout=5, cwd=wd)
             await _notify_pipeline("🐛 Phase 4a: Debug loop — running tests until green")
 
             max_debug_rounds = int(os.environ.get("MARVIN_DEBUG_ROUNDS", "50"))
@@ -4162,6 +3757,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     _pt_text = ""
 
                 if _pt_rc == 0 and "passed" in _pt_text:
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass (pytest exit 0) after {debug_round} debug round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
                     break
 
@@ -4187,14 +3783,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 debug_prompt += _marvin_interface_context()
 
                 rc, dbg_out, dbg_err = await _run_sub_with_retry(
-                    debug_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"Debug round {debug_round}")
+                    debug_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"Debug round {debug_round}")
 
                 if "ALL_TESTS_PASS" in (dbg_out or ""):
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"All tests pass after {debug_round} debug round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 All tests pass after {debug_round} debug round(s)!")
                     break
                 if rc != 0:
-                    await _notify_pipeline(f"⚠️ Debug round {debug_round} failed (exit {rc})")
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"Debug round {debug_round} failed (exit {rc})"], timeout=5, cwd=wd)
             else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 4a: Debug loop exhausted ({max_debug_rounds} rounds) — some tests may still fail")
 
             # Code review after debug loop
@@ -4205,8 +3803,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     # ── Phase 4b: End-to-end smoke test ──────────────────────────────────
     if params.tdd:
         if _phase_done("4b"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 4b skipped — e2e testing already done")
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 4b: End-to-end smoke test — verifying real app works"], timeout=5, cwd=wd)
             await _notify_pipeline("🔍 Phase 4b: End-to-end smoke test")
 
             max_e2e_rounds = int(os.environ.get("MARVIN_E2E_ROUNDS", "10"))
@@ -4227,7 +3827,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "   - List conversations (GET) — verify it appears\n"
                     "   - Get the conversation detail (GET) — verify shape\n"
                     "   - Send a chat message (POST) — verify SSE stream starts "
-                    "(the upstream system may fail but the endpoint should respond, not 500)\n"
+                    "(the bridge/LLM may fail but the endpoint should respond, not 500)\n"
                     "   - Delete the conversation (DELETE) — verify 204\n"
                     "   - Try invalid requests — verify proper error codes (404, 422)\n"
                     "4. Kill the server process when done\n"
@@ -4237,7 +3837,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "After fixing, re-run 'pytest -v' to make sure you didn't break tests."
                 ).format(round=e2e_round, max=max_e2e_rounds)
 
-                # Add upstream interface context so E2E agent understands integration
+                # Add Marvin CLI interface context so E2E agent understands bridge integration
                 e2e_prompt = _project_context() + "\n\n" + e2e_prompt
                 e2e_prompt += _marvin_interface_context()
                 e2e_prompt += (
@@ -4247,22 +3847,26 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
 
                 rc, e2e_out, e2e_err = await _run_sub_with_retry(
-                    e2e_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"E2E round {e2e_round}")
+                    e2e_prompt, _AGENT_MODELS["codex"], base_timeout=1800, label=f"E2E round {e2e_round}")
 
                 if "E2E_SMOKE_PASS" in (e2e_out or ""):
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test passed after {e2e_round} round(s)"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"🎉 E2E smoke test passed after {e2e_round} round(s)!")
                     break
                 if rc != 0:
-                    await _notify_pipeline(f"⚠️ E2E round {e2e_round} failed (exit {rc})")
+                    _run_cmd(["tk", "add-note", params.ticket_id, f"E2E round {e2e_round} failed (exit {rc})"], timeout=5, cwd=wd)
             else:
+                _run_cmd(["tk", "add-note", params.ticket_id, f"E2E smoke test exhausted ({max_e2e_rounds} rounds)"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 4b: E2E smoke test exhausted ({max_e2e_rounds} rounds)")
         _save_state("4b")
 
     # ── Phase 5: Adversarial QA ──────────────────────────────────────────
     if params.tdd:
         if _phase_done("5"):
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: SKIPPED — already completed"], timeout=5, cwd=wd)
             await _notify_pipeline("⏭️ Phase 5 skipped — adversarial QA already done")
         else:
+            _run_cmd(["tk", "add-note", params.ticket_id, "Phase 5: Adversarial QA — battle-testing every feature"], timeout=5, cwd=wd)
             await _notify_pipeline("⚔️ Phase 5: Adversarial QA — battle-testing every feature")
 
             # Read spec to build QA areas
@@ -4296,7 +3900,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         "- Send a message, immediately disconnect — does the server clean up?\n"
                         "- Send multiple messages rapidly without waiting for responses\n"
                         "- Verify SSE event format is correct (data: prefix, double newline)\n"
-                        "- Check that backend subprocesses are killed on client disconnect\n"
+                        "- Check that the bridge subprocess is killed on client disconnect\n"
                         "- Verify streaming works with very long responses (mock if needed)\n"
                         "- Test the stop/cancel functionality mid-stream\n"
                         "- Verify conversation history is correctly passed to the CLI"
@@ -4388,9 +3992,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         all_findings.append(f"=== {qa['area']} ===\n{qa_text}")
 
                 summary = f"{len(clean_areas)} clean, {len(all_findings)} with issues"
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA round {qa_round}: {summary}"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚔️ QA round {qa_round} results: {summary}")
 
                 if not all_findings:
+                    _run_cmd(["tk", "add-note", params.ticket_id,
+                              f"QA passed — all {len(qa_areas)} areas clean after round {qa_round}"], timeout=5, cwd=wd)
                     await _notify_pipeline(f"✅ Phase 5: All QA areas clean after round {qa_round}!")
                     break
 
@@ -4407,16 +4015,21 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt += _marvin_interface_context()
 
                 rc, fix_out, fix_err = await _run_sub_with_retry(
-                    fix_prompt, _AGENT_MODELS["plan"], base_timeout=1800,
+                    fix_prompt, _AGENT_MODELS["codex"], base_timeout=1800,
                     label=f"QA-fix-round-{qa_round}")
 
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA fix round {qa_round} complete (exit {rc})"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"🔧 QA fix round {qa_round} complete")
             else:
+                _run_cmd(["tk", "add-note", params.ticket_id,
+                          f"QA exhausted ({max_qa_rounds} rounds) — some issues may remain"], timeout=5, cwd=wd)
                 await _notify_pipeline(f"⚠️ Phase 5: QA exhausted ({max_qa_rounds} rounds)")
 
         _save_state("5")
 
     # ── Done ─────────────────────────────────────────────────────────────
+    _run_cmd(["tk", "add-note", params.ticket_id, f"Completed by {tier} sub-agent"], timeout=5, cwd=wd)
     _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=wd)
 
     phases = ["Implementation"]
@@ -7562,12 +7175,7 @@ async def write_note(params: WriteNoteParams) -> str:
         return "Path cannot contain '..'."
     if not rel:
         return "Please provide a filename, e.g. 'todo.md'."
-    # In coding mode, redirect notes to .marvin/notes/ inside the project
-    if _coding_working_dir:
-        notes_dir = os.path.join(_coding_working_dir, ".marvin", "notes")
-    else:
-        notes_dir = _NOTES_DIR
-    full = os.path.join(notes_dir, rel)
+    full = os.path.join(_NOTES_DIR, rel)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     mode = "a" if params.append else "w"
     try:
@@ -8393,7 +8001,7 @@ async def create_ticket(params: CreateTicketParams) -> str:
     ticket_id = output.strip()
 
     # Fetch the created ticket for confirmation
-    ok2, details = _run_cmd(["tk", "show", ticket_id], timeout=5, cwd=_coding_working_dir)
+    ok2, details = _run_cmd(["tk", "show", ticket_id], timeout=5, cwd=wd)
     if ok2:
         return f"Created ticket {ticket_id}\n{details}"
     return f"Created ticket: {ticket_id}"
@@ -8409,7 +8017,7 @@ class TicketDepParams(BaseModel):
     "The dependent ticket is blocked until the dependency is closed."
 )
 async def ticket_add_dep(params: TicketDepParams) -> str:
-    ok, out = _run_cmd(["tk", "dep", params.ticket_id, params.depends_on], timeout=5, cwd=_coding_working_dir)
+    ok, out = _run_cmd(["tk", "dep", params.ticket_id, params.depends_on], timeout=5, cwd=wd)
     return out.strip() if ok else f"Failed: {out}"
 
 
@@ -8421,7 +8029,7 @@ class TicketStatusParams(BaseModel):
     description="Mark a ticket as in_progress (started). Use when beginning work on a ticket."
 )
 async def ticket_start(params: TicketStatusParams) -> str:
-    ok, out = _run_cmd(["tk", "start", params.ticket_id], timeout=5, cwd=_coding_working_dir)
+    ok, out = _run_cmd(["tk", "start", params.ticket_id], timeout=5, cwd=wd)
     return out.strip() if ok else f"Failed: {out}"
 
 
@@ -8429,7 +8037,7 @@ async def ticket_start(params: TicketStatusParams) -> str:
     description="Close a ticket (mark as done). Use when a task is fully complete."
 )
 async def ticket_close(params: TicketStatusParams) -> str:
-    ok, out = _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=_coding_working_dir)
+    ok, out = _run_cmd(["tk", "close", params.ticket_id], timeout=5, cwd=wd)
     return out.strip() if ok else f"Failed: {out}"
 
 
@@ -8443,6 +8051,7 @@ class TicketNoteParams(BaseModel):
     "blockers, or any important information about the task."
 )
 async def ticket_add_note(params: TicketNoteParams) -> str:
+    ok, out = _run_cmd(["tk", "add-note", params.ticket_id, params.note], timeout=5, cwd=wd)
     return out.strip() if ok else f"Failed: {out}"
 
 
@@ -8450,7 +8059,7 @@ async def ticket_add_note(params: TicketNoteParams) -> str:
     description="Show full details of a ticket including description, notes, dependencies, and status."
 )
 async def ticket_show(params: TicketStatusParams) -> str:
-    ok, out = _run_cmd(["tk", "show", params.ticket_id], timeout=10, cwd=_coding_working_dir)
+    ok, out = _run_cmd(["tk", "show", params.ticket_id], timeout=10, cwd=wd)
     return out if ok else f"Failed: {out}"
 
 
@@ -8468,7 +8077,7 @@ async def ticket_list(params: TicketListParams) -> str:
         cmd += [f"--status={params.status}"]
     if params.tags:
         cmd += ["-T", params.tags]
-    ok, out = _run_cmd(cmd, timeout=10, cwd=_coding_working_dir)
+    ok, out = _run_cmd(cmd, timeout=10, cwd=wd)
     return out if ok else f"Failed: {out}"
 
 
@@ -8480,7 +8089,7 @@ class TicketTreeParams(BaseModel):
     description="Show the dependency tree for a ticket — all its children, their deps, and status."
 )
 async def ticket_dep_tree(params: TicketTreeParams) -> str:
-    ok, out = _run_cmd(["tk", "dep", "tree", params.ticket_id], timeout=10, cwd=_coding_working_dir)
+    ok, out = _run_cmd(["tk", "dep", "tree", params.ticket_id], timeout=10, cwd=wd)
     return out if ok else f"Failed: {out}"
 
 
@@ -10330,7 +9939,7 @@ def _build_all_tools():
         set_working_dir, get_working_dir,
         create_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
-        run_command, install_packages, launch_agent, tk,
+        run_command, install_packages, launch_agent,
         # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,
@@ -10824,7 +10433,7 @@ async def _run_non_interactive():
 
     # --design-first: bypass LLM orchestration, call launch_agent directly
     if design_first:
-        ok, out = _run_cmd(["tk", "create", prompt_text, "-t", "epic", "-p", "0"], timeout=5, cwd=_coding_working_dir)
+        ok, out = _run_cmd(["tk", "create", prompt_text[:80]], timeout=5, cwd=_coding_working_dir)
         ticket_id = out.strip().split()[-1] if ok and out else "no-ticket"
         params = LaunchAgentParams(
             ticket_id=ticket_id,
@@ -10840,10 +10449,6 @@ async def _run_non_interactive():
         return
 
     all_tools = _build_all_tools()
-    # MARVIN_READONLY: block write tools so review agents cannot modify files
-    if os.environ.get("MARVIN_READONLY") == "1":
-        _WRITE_TOOLS = {"create_file", "apply_patch", "file_apply_patch", "git_commit", "git_checkout", "run_command"}
-        all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _WRITE_TOOLS]
     if _SUBAGENT_TOOL_LOG:
         all_tools = _wrap_tools_with_logging(all_tools)
     system_msg = _build_system_message()
@@ -10884,12 +10489,6 @@ async def _run_non_interactive():
                     sys.stdout.flush()
                 elif etype == "assistant.message":
                     _usage.record_llm_turn(sdk_model)
-                    # Some models (e.g. Gemini) don't stream deltas — full content arrives here
-                    msg_content = getattr(getattr(event, "data", None), "content", "") or ""
-                    if msg_content and msg_content not in ("", None):
-                        chunks.append(msg_content)
-                        sys.stdout.write(msg_content)
-                        sys.stdout.flush()
                 elif etype == "session.idle":
                     done.set()
 
@@ -10926,31 +10525,8 @@ async def _run_non_interactive():
     print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
 
 
-def _print_help() -> None:
-    print(
-        "Local Finder (Marvin)\n\n"
-        "Usage:\n"
-        "  python app.py                 # curses UI (default)\n"
-        "  python app.py --plain         # plain terminal UI\n"
-        "  python app.py 'your prompt'   # single-shot\n\n"
-        "Options:\n"
-        "  -h, --help                    Show this help\n"
-        "  --plain                       Disable curses UI\n"
-        "  --curses                      Force curses UI\n"
-        "  --provider <name>             LLM provider override\n"
-        "  --ntfy [topic]                Override ntfy topic (or auto-generate)\n\n"
-        "Sub-agent (non-interactive) mode:\n"
-        "  python app.py --non-interactive --prompt '...' [--working-dir DIR] [--ntfy TOPIC]\n"
-        "  python app.py --non-interactive --design-first --prompt '...' [--working-dir DIR]\n"
-    )
-
-
 async def main():
     global _profile_switch_requested, _compact_session_requested, _coding_mode, _coding_working_dir, _ntfy_override_topic
-
-    if "--help" in sys.argv or "-h" in sys.argv:
-        _print_help()
-        return
 
     # Non-interactive sub-agent mode
     if "--non-interactive" in sys.argv:

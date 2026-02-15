@@ -41,6 +41,104 @@ except ImportError:
 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY", "")
 
+# ── Sub-agent tool call logging ─────────────────────────────────────────────
+# When MARVIN_SUBAGENT_LOG env var is set (by the parent pipeline), every tool
+# call is appended as a JSONL line to that file.  This gives the parent full
+# visibility into what the sub-agent did — which files it read/wrote, which
+# commands it ran, how long each call took, etc.
+
+_SUBAGENT_TOOL_LOG: str | None = os.environ.get("MARVIN_SUBAGENT_LOG")
+
+def _log_tool_call(name: str, args: dict, result: str, elapsed_s: float) -> None:
+    """Append a single tool-call record to the sub-agent JSONL log."""
+    if not _SUBAGENT_TOOL_LOG:
+        return
+    try:
+        # Summarise large args/results to keep the log readable
+        def _trunc(v, limit=500):
+            s = str(v)
+            return s[:limit] + f"… ({len(s)} chars)" if len(s) > limit else s
+
+        entry = json.dumps({
+            "ts": _time.time(),
+            "tool": name,
+            "args": {k: _trunc(v, 200) for k, v in args.items()},
+            "result_preview": _trunc(result, 400),
+            "result_len": len(result),
+            "elapsed_s": round(elapsed_s, 2),
+        })
+        with open(_SUBAGENT_TOOL_LOG, "a") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass  # never crash the agent over logging
+
+import time as _time
+
+def _wrap_tools_with_logging(tools: list) -> list:
+    """Wrap each tool function so every call is logged to the JSONL file.
+
+    Works with both SDK-decorated tools (_original_fn) and plain functions.
+    Preserves all attributes the SDK needs (name, _original_fn, _tool_description, etc).
+    """
+    if not _SUBAGENT_TOOL_LOG:
+        return tools
+
+    import functools, inspect
+
+    wrapped = []
+    for tool in tools:
+        orig_fn = getattr(tool, "_original_fn", tool)
+        fn_name = getattr(tool, "name", None) or orig_fn.__name__
+
+        @functools.wraps(orig_fn)
+        async def _logged_fn(_params=None, *, _orig=orig_fn, _name=fn_name):
+            args = {}
+            if _params is not None:
+                try:
+                    args = _params.__dict__ if hasattr(_params, "__dict__") else {"value": str(_params)}
+                except Exception:
+                    args = {"value": str(_params)}
+            t0 = _time.time()
+            try:
+                result = await _orig(_params) if _params is not None else await _orig()
+                elapsed = _time.time() - t0
+                _log_tool_call(_name, args, str(result), elapsed)
+                return result
+            except Exception as e:
+                elapsed = _time.time() - t0
+                _log_tool_call(_name, args, f"ERROR: {e}", elapsed)
+                raise
+
+        # Preserve SDK attributes on the wrapper
+        _logged_fn._original_fn = _logged_fn  # non-SDK path calls _original_fn directly
+        if hasattr(tool, "name"):
+            _logged_fn.name = tool.name
+        if hasattr(tool, "_tool_description"):
+            _logged_fn._tool_description = tool._tool_description
+        # Copy any other SDK attributes (schema, etc.)
+        for attr in ("__tool_schema__", "__tool_params__", "schema", "parameters"):
+            if hasattr(tool, attr):
+                setattr(_logged_fn, attr, getattr(tool, attr))
+
+        # If the original is an SDK-decorated tool, we need to re-wrap it so the
+        # SDK sees our logged version.  The SDK calls the tool object directly
+        # (tool(params)), so we create a callable that delegates to _logged_fn.
+        if hasattr(tool, "_original_fn") and tool is not orig_fn and CopilotClient is not None:
+            # SDK tool — need to produce a new SDK-compatible wrapper
+            try:
+                # Re-decorate with the SDK define_tool
+                desc = getattr(tool, "_tool_description", "")
+                new_tool = _orig_define_tool(description=desc)(_logged_fn)
+                new_tool._original_fn = _logged_fn
+                wrapped.append(new_tool)
+            except Exception:
+                # Fallback: just replace _original_fn on a copy
+                wrapped.append(_logged_fn)
+        else:
+            wrapped.append(_logged_fn)
+
+    return wrapped
+
 
 # ── Usage tracking ──────────────────────────────────────────────────────────
 
@@ -2692,12 +2790,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
 
-        # Set up log file for this sub-agent run
+        # Set up log files for this sub-agent run
         log_dir = os.path.join(wd, ".marvin", "logs")
         os.makedirs(log_dir, exist_ok=True)
         safe_label = (label or "sub").replace(" ", "-").replace("/", "-")[:40]
         import time as _time
-        log_path = os.path.join(log_dir, f"{safe_label}-{int(_time.time())}.log")
+        ts = int(_time.time())
+        log_path = os.path.join(log_dir, f"{safe_label}-{ts}.log")
+        tool_log_path = os.path.join(log_dir, f"{safe_label}-{ts}.tools.jsonl")
+        sub_env["MARVIN_SUBAGENT_LOG"] = tool_log_path
 
         proc = None
         try:
@@ -2709,11 +2810,37 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             stdout_text = (sout or b"").decode(errors="replace").strip()
             stderr_text = (serr or b"").decode(errors="replace").strip()
 
-            # Write log
+            # Read tool call log if it exists
+            tool_log_text = ""
+            try:
+                if os.path.isfile(tool_log_path):
+                    with open(tool_log_path) as tf:
+                        tool_log_text = tf.read().strip()
+            except Exception:
+                pass
+
+            # Write combined log
             try:
                 with open(log_path, "w") as lf:
                     lf.write(f"=== {label} | model={model} | rc={proc.returncode} ===\n")
                     lf.write(f"=== PROMPT ===\n{prompt[:500]}\n...\n\n")
+                    if tool_log_text:
+                        lf.write(f"=== TOOL CALLS ({tool_log_text.count(chr(10)) + 1} calls) ===\n")
+                        # Write human-readable summary of each tool call
+                        for line in tool_log_text.splitlines():
+                            try:
+                                entry = json.loads(line)
+                                lf.write(f"  [{entry.get('elapsed_s', '?')}s] {entry['tool']}(")
+                                args_brief = ", ".join(f"{k}={v}" for k, v in entry.get("args", {}).items())
+                                lf.write(f"{args_brief[:120]})")
+                                rlen = entry.get("result_len", 0)
+                                preview = entry.get("result_preview", "")[:80]
+                                lf.write(f" → {rlen} chars: {preview}\n")
+                            except Exception:
+                                lf.write(f"  {line}\n")
+                        lf.write("\n")
+                    else:
+                        lf.write("=== TOOL CALLS: none logged ===\n\n")
                     lf.write(f"=== STDOUT ===\n{stdout_text}\n\n")
                     lf.write(f"=== STDERR ===\n{stderr_text}\n")
             except Exception:
@@ -2730,9 +2857,31 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         except asyncio.TimeoutError:
             if proc and proc.returncode is None:
                 proc.kill()
+            # Still try to read partial tool log on timeout
+            tool_log_text = ""
+            try:
+                if os.path.isfile(tool_log_path):
+                    with open(tool_log_path) as tf:
+                        tool_log_text = tf.read().strip()
+            except Exception:
+                pass
             try:
                 with open(log_path, "w") as lf:
                     lf.write(f"=== {label} | model={model} | TIMED OUT after {timeout_s}s ===\n")
+                    if tool_log_text:
+                        lf.write(f"=== TOOL CALLS ({tool_log_text.count(chr(10)) + 1} calls before timeout) ===\n")
+                        for line in tool_log_text.splitlines():
+                            try:
+                                entry = json.loads(line)
+                                lf.write(f"  [{entry.get('elapsed_s', '?')}s] {entry['tool']}(")
+                                args_brief = ", ".join(f"{k}={v}" for k, v in entry.get("args", {}).items())
+                                lf.write(f"{args_brief[:120]})")
+                                rlen = entry.get("result_len", 0)
+                                preview = entry.get("result_preview", "")[:80]
+                                lf.write(f" → {rlen} chars: {preview}\n")
+                            except Exception:
+                                lf.write(f"  {line}\n")
+                        lf.write("\n")
             except Exception:
                 pass
             return -1, "", f"{label or 'Sub-agent'} timed out after {timeout_s}s"
@@ -9911,6 +10060,8 @@ async def _run_non_interactive():
         return
 
     all_tools = _build_all_tools()
+    if _SUBAGENT_TOOL_LOG:
+        all_tools = _wrap_tools_with_logging(all_tools)
     system_msg = _build_system_message()
 
     # Route through Copilot SDK when available — it handles all model tiers.

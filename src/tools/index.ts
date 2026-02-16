@@ -15,6 +15,11 @@ import { gitCommitTool } from "./git/git_commit";
 import { gitLogTool } from "./git/git_log";
 import { gitCheckoutTool } from "./git/git_checkout";
 import { tkTool } from "./tk";
+import { webSearchTool } from "./web/web_search";
+import { browseWebTool } from "./web/browse_web";
+import { getMyLocationTool } from "./location/get_my_location";
+import { weatherForecastTool } from "./weather/weather_forecast";
+import { placesTextSearchTool } from "./places/places_text_search";
 
 export function buildToolRunner(params: {
   workingDir: string;
@@ -23,6 +28,14 @@ export function buildToolRunner(params: {
   log: Logger;
 }): ToolRunner {
   const tools: ToolDef<any>[] = [
+    // Core web/location utilities
+    getMyLocationTool(),
+    webSearchTool(),
+    browseWebTool(),
+    weatherForecastTool(),
+    placesTextSearchTool(),
+
+    // Coding + git
     readFileTool(),
     createFileTool(),
     appendFileTool(),
@@ -49,6 +62,12 @@ export function buildToolRunner(params: {
 export function buildToolPrompt(): string {
   // Keep concise; models will see detailed guidance in upstream TOOLS.md when available.
   const tools = [
+    "get_my_location()",
+    "web_search(query,max_results?,time_filter?)",
+    "browse_web(url,max_length?)",
+    "weather_forecast(latitude,longitude,days?)",
+    "places_text_search(text_query,latitude?,longitude?,radius?,max_results?,open_now?)",
+
     "read_file(path,start_line?,end_line?)",
     "create_file(path,content)",
     "append_file(path,content)",

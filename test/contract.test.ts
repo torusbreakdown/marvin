@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseArgs } from "../src/cli/args";
 import { CostTracker } from "../src/core/cost";
 import { tryParseToolCalls } from "../src/tools/registry";
+import { buildToolPrompt } from "../src/tools";
 
 describe("CLI contract basics", () => {
   it("parses non-interactive flags", () => {
@@ -39,6 +40,17 @@ describe("MARVIN_COST line", () => {
     expect(parsed).toHaveProperty("llm_turns");
     expect(parsed).toHaveProperty("model_turns");
     expect(parsed).toHaveProperty("model_cost");
+  });
+});
+
+describe("tool prompt", () => {
+  it("mentions core web/location tools", () => {
+    const prompt = buildToolPrompt();
+    expect(prompt).toContain("web_search");
+    expect(prompt).toContain("browse_web");
+    expect(prompt).toContain("get_my_location");
+    expect(prompt).toContain("weather_forecast");
+    expect(prompt).toContain("places_text_search");
   });
 });
 

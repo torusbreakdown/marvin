@@ -10372,6 +10372,42 @@ async def _ollama_chat(
     return final_msg, {}
 
 
+async def _kimi_chat(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    stream: bool = True,
+) -> tuple[dict, dict]:
+    """Kimi (Moonshot AI) via OpenRouter or local llama-server."""
+    thinking_disabled = os.environ.get("MARVIN_KIMI_THINKING", "1") == "0"
+    extra_body: dict | None = None
+    if not _kimi_is_local and not thinking_disabled:
+        extra_body = {"thinking": {"type": "enabled"}}
+    elif not _kimi_is_local and thinking_disabled:
+        extra_body = {"thinking": {"type": "disabled"}}
+
+    if _kimi_is_local:
+        clean = []
+        for m in messages:
+            m2 = {k: v for k, v in m.items() if k != "reasoning_content"}
+            clean.append(m2)
+        messages = clean
+
+    api_key = KIMI_API_KEY if KIMI_API_KEY else "no-key"
+    msg, usage = await _openai_chat(
+        messages, tools, stream,
+        api_url=KIMI_URL, api_key=api_key, model=KIMI_MODEL,
+        extra_body=extra_body,
+    )
+
+    rc = msg.get("reasoning_content")
+    if rc and msg.get("content"):
+        msg["content"] = f"<think>\n{rc}\n</think>\n\n{msg['content']}"
+    elif rc and not msg.get("content"):
+        msg["content"] = f"<think>\n{rc}\n</think>"
+
+    return msg, usage
+
+
 async def _provider_chat(
     messages: list[dict],
     tools: list[dict] | None = None,
@@ -10397,8 +10433,10 @@ async def _provider_chat(
         )
     elif prov == "ollama":
         return await _ollama_chat(messages, tools, stream)
+    elif prov == "kimi":
+        return await _kimi_chat(messages, tools, stream)
     else:
-        raise ValueError(f"Unknown provider: {prov} (use gemini/groq/ollama/openai/copilot)")
+        raise ValueError(f"Unknown provider: {prov} (use gemini/groq/ollama/openai/kimi/copilot)")
 
 
 async def _run_tool_loop(

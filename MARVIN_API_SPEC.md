@@ -106,9 +106,29 @@ Bypasses the LLM conversation loop entirely. Creates a ticket and launches a
 multi-phase TDD pipeline (spec → UX → architecture → tests → implementation →
 debug → E2E → QA).  See §4.
 
----
+### 2.5 Wrapper Script
 
-## 3. Non-Interactive Mode — The Integration Contract
+A `marvin` executable shell script is provided in the project root. This is the
+**correct** way to invoke Marvin from your server code — it handles the virtual
+environment and working directory automatically:
+
+```bash
+./marvin                    # interactive mode
+./marvin --plain            # interactive, plain terminal
+./marvin --non-interactive --prompt "..."   # non-interactive
+```
+
+Your server MUST check for this script first when resolving how to spawn Marvin.
+Resolution order:
+1. `./marvin` executable in the project root (preferred)
+2. `python app.py` if `app.py` exists in the project root
+3. `node dist/app.js` if it exists (Node.js reimplementation)
+
+The wrapper script handles `uv run`, virtual environments, and correct working
+directory. Do NOT hardcode `python app.py` — always check for the `marvin`
+script first.
+
+---
 
 This is the primary integration surface.
 

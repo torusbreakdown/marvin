@@ -4441,6 +4441,66 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 await _notify_pipeline(f"⚠️ Phase 4b: E2E smoke test exhausted ({max_e2e_rounds} rounds)")
         _save_state("4b")
 
+    # ── Phase 4c: Frontend validation loop ───────────────────────────────
+    if params.tdd:
+        if _phase_done("4c"):
+            await _notify_pipeline("⏭️ Phase 4c skipped — frontend validation already done")
+        else:
+            await _notify_pipeline("🖥️ Phase 4c: Frontend validation — checking served assets")
+
+            max_fe_rounds = int(os.environ.get("MARVIN_FE_ROUNDS", "10"))
+            for fe_round in range(1, max_fe_rounds + 1):
+                fe_prompt = (
+                    "You are doing FRONTEND VALIDATION (round {round}/{max}). "
+                    "Your job is to verify that the served frontend assets actually work "
+                    "in a browser — not just that backend tests pass.\n\n"
+                    "STEPS:\n"
+                    "1. Read .marvin/spec.md and .marvin/ux.md to understand the expected UI\n"
+                    "2. Start the application server on a high port (e.g. 18299) with run_command\n"
+                    "3. Validate EVERY served JavaScript file:\n"
+                    "   - Fetch each JS URL with curl and save to /tmp\n"
+                    "   - Run 'node --check /tmp/<file>.js' to verify syntax\n"
+                    "   - If syntax errors exist, the served JS is BROKEN and must be fixed\n"
+                    "4. Validate served CSS:\n"
+                    "   - Fetch each CSS URL with curl\n"
+                    "   - Check for obvious issues (unclosed braces, invalid properties)\n"
+                    "5. Validate served HTML:\n"
+                    "   - Fetch the root page\n"
+                    "   - Verify all <script src> and <link href> URLs return 200 (not 404)\n"
+                    "   - Verify the HTML has the expected structure from ux.md\n"
+                    "6. Test frontend-backend integration:\n"
+                    "   - Create a conversation via API\n"
+                    "   - Verify the frontend would render it (check API response shapes)\n"
+                    "7. Kill the server when done\n"
+                    "8. If everything works, respond with exactly 'FRONTEND_VALID'\n"
+                    "9. If something is broken, fix the SOURCE code and rebuild if needed\n\n"
+                    "COMMON ISSUES TO CHECK:\n"
+                    "- JS embedded in string literals (template strings, inline scripts) where "
+                    "backslash escapes like \\n get interpreted by the host language — must be "
+                    "double-escaped as \\\\n\n"
+                    "- Missing static files (CSS/JS referenced in HTML but not served)\n"
+                    "- API response shapes that don't match what the frontend JS expects\n"
+                    "- CORS or Content-Type headers missing on static assets\n\n"
+                    "After fixing, re-run 'pytest -v' to make sure backend tests still pass. "
+                    "Commit each fix with a message like 'Frontend fix: <what>'. "
+                    "Make MINIMAL changes."
+                ).format(round=fe_round, max=max_fe_rounds)
+
+                fe_prompt = _project_context() + "\n\n" + fe_prompt
+                fe_prompt += _marvin_interface_context()
+
+                rc, fe_out, fe_err = await _run_sub_with_retry(
+                    fe_prompt, _AGENT_MODELS["plan"], base_timeout=1800, label=f"Frontend validation round {fe_round}")
+
+                if "FRONTEND_VALID" in (fe_out or ""):
+                    await _notify_pipeline(f"🎉 Frontend validation passed after {fe_round} round(s)!")
+                    break
+                if rc != 0:
+                    await _notify_pipeline(f"⚠️ Frontend validation round {fe_round} failed (exit {rc})")
+            else:
+                await _notify_pipeline(f"⚠️ Phase 4c: Frontend validation exhausted ({max_fe_rounds} rounds)")
+        _save_state("4c")
+
     # ── Phase 5: Adversarial QA ──────────────────────────────────────────
     if params.tdd:
         if _phase_done("5"):

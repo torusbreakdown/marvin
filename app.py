@@ -10075,6 +10075,22 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
+# ── Kimi (Moonshot AI / OpenRouter) config ──
+_kimi_key_path = os.path.expanduser("~/.ssh/MOONSHOT_API_KEY")
+_or_key_path = os.path.expanduser("~/.ssh/OPENROUTER_API_KEY")
+if not os.environ.get("KIMI_API_KEY"):
+    for _p in [_or_key_path, _kimi_key_path]:
+        if os.path.isfile(_p):
+            with open(_p) as _f:
+                _key = _f.read().strip()
+                if _key:
+                    os.environ["KIMI_API_KEY"] = _key
+                    break
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "moonshotai/kimi-k2.5")
+KIMI_URL = os.environ.get("KIMI_URL", "https://openrouter.ai/api/v1/chat/completions")
+_kimi_is_local = "localhost" in KIMI_URL or "127.0.0.1" in KIMI_URL
+
 # ── Provider metadata ──
 PROVIDER_EMOJI = {
     "gemini": "✨",
@@ -10082,6 +10098,7 @@ PROVIDER_EMOJI = {
     "ollama": "🏠",
     "openai": "🌐",
     "copilot": "💲",
+    "kimi": "🌙",
 }
 PROVIDER_LABEL = {
     "gemini": f"Gemini ({GEMINI_MODEL})",
@@ -10089,6 +10106,7 @@ PROVIDER_LABEL = {
     "ollama": f"Ollama ({OLLAMA_MODEL})",
     "openai": f"OpenAI-compat ({OPENAI_MODEL})",
     "copilot": None,  # dynamic — computed in _copilot_label()
+    "kimi": f"Kimi ({KIMI_MODEL})",
 }
 
 
@@ -10245,6 +10263,7 @@ async def _openai_chat(
     api_url: str,
     api_key: str,
     model: str,
+    extra_body: dict | None = None,
 ) -> dict:
     """OpenAI-compatible chat completion (works with Groq, OpenRouter, etc.)."""
     headers = {
@@ -10276,6 +10295,8 @@ async def _openai_chat(
         body["tools"] = tools
         body["stream"] = False
         stream = False
+    if extra_body:
+        body.update(extra_body)
 
     timeout = httpx.Timeout(300.0, connect=10.0)
 
@@ -10286,7 +10307,10 @@ async def _openai_chat(
                 print(f"API error {r.status_code}: {r.text[:500]}", file=sys.stderr)
             r.raise_for_status()
             rjson = r.json()
-            choice = rjson["choices"][0]
+            choices = rjson.get("choices", [])
+            if not choices:
+                return {"role": "assistant", "content": ""}, rjson.get("usage", {})
+            choice = choices[0]
             usage = rjson.get("usage", {})
             msg = choice["message"]
             # Gemini thinking models may return None content
@@ -10380,9 +10404,10 @@ async def _kimi_chat(
     """Kimi (Moonshot AI) via OpenRouter or local llama-server."""
     thinking_disabled = os.environ.get("MARVIN_KIMI_THINKING", "1") == "0"
     extra_body: dict | None = None
-    if not _kimi_is_local and not thinking_disabled:
+    _is_moonshot = "moonshot.ai" in KIMI_URL
+    if _is_moonshot and not thinking_disabled:
         extra_body = {"thinking": {"type": "enabled"}}
-    elif not _kimi_is_local and thinking_disabled:
+    elif _is_moonshot and thinking_disabled:
         extra_body = {"thinking": {"type": "disabled"}}
 
     if _kimi_is_local:
@@ -10399,11 +10424,19 @@ async def _kimi_chat(
         extra_body=extra_body,
     )
 
-    rc = msg.get("reasoning_content")
-    if rc and msg.get("content"):
-        msg["content"] = f"<think>\n{rc}\n</think>\n\n{msg['content']}"
-    elif rc and not msg.get("content"):
-        msg["content"] = f"<think>\n{rc}\n</think>"
+    # Strip reasoning fields — they break tool call round-trips
+    msg.pop("reasoning", None)
+    msg.pop("reasoning_details", None)
+    msg.pop("refusal", None)
+    rc = msg.pop("reasoning_content", None)
+    # Only merge reasoning into content when there are NO tool calls
+    if rc and not msg.get("tool_calls"):
+        if msg.get("content"):
+            msg["content"] = f"<think>\n{rc}\n</think>\n\n{msg['content']}"
+        else:
+            msg["content"] = f"<think>\n{rc}\n</think>"
+    if not msg.get("content") and not msg.get("tool_calls"):
+        msg["content"] = ""
 
     return msg, usage
 
@@ -10444,7 +10477,7 @@ async def _run_tool_loop(
     tool_funcs: list,
     system_message: str,
     provider: str | None = None,
-    max_rounds: int = 10,
+    max_rounds: int = 50,
     history: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Run a full tool-calling loop via any OpenAI-compatible provider.
@@ -11122,7 +11155,7 @@ async def _run_non_interactive():
             design_first=True,
             tdd=True,
         )
-        result = await launch_agent._original_fn(params)
+        result = await launch_agent(params)
         print(result)
         print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
         return

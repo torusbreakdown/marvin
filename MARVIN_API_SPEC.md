@@ -191,7 +191,7 @@ pipeline.  Each phase writes artifacts under `.marvin/` in the working directory
 ### 4.1 Phase Ordering
 
 ```
-1a  → 1a_review → 1b → 1b_review → 2a → 2b → 3 → 4a → 4b → 5
+1a  → 1a_review → 1b → 1b_review → 2a → 2b → 3 → 4a → 4b → 4c → 5
 ```
 
 Completed phases are recorded in `.marvin/pipeline_state`.  Re-running the same
@@ -210,6 +210,7 @@ command resumes from the first incomplete phase.
 | **3** | Implementation | Parallel agents implement the codebase to pass the tests.  Followed by a code review pass. |
 | **4a** | Debug Loop | Runs tests in a loop; on failure, dispatches a fix agent.  TDD-aware: fixes implementation, not tests (unless the test itself is wrong).  Configurable via `MARVIN_DEBUG_ROUNDS` (default 50). |
 | **4b** | E2E Smoke Test | Starts the application, makes real HTTP requests, verifies end-to-end behavior.  Configurable via `MARVIN_E2E_ROUNDS` (default 10). |
+| **4c** | Frontend Validation | Fetches served JS/CSS/HTML assets, runs `node --check` on JavaScript, validates all asset URLs return 200, checks inline code escaping.  Catches bugs that backend tests miss (e.g. broken regex in served JS).  Configurable via `MARVIN_FE_ROUNDS` (default 10). |
 | **5** | Adversarial QA | Parallel read-only QA agents try to break the app (security, data integrity, edge cases).  Findings are dispatched to a fixer agent.  Configurable via `MARVIN_QA_ROUNDS` (default 3). |
 
 After phases 2a, 2b, 3, and 4a, an automated **code review** pass runs using
@@ -534,6 +535,7 @@ Can also be set via the `--provider` CLI flag in interactive mode.
 | `MARVIN_DEPTH` | `0` | Sub-agent recursion depth |
 | `MARVIN_DEBUG_ROUNDS` | `50` | Max debug loop iterations (Phase 4a) |
 | `MARVIN_E2E_ROUNDS` | `10` | Max E2E smoke-test iterations (Phase 4b) |
+| `MARVIN_FE_ROUNDS` | `10` | Max frontend validation iterations (Phase 4c) |
 | `MARVIN_QA_ROUNDS` | `3` | Max adversarial QA iterations (Phase 5) |
 | `MARVIN_READONLY` | *(unset)* | Set to `1` to strip write tools |
 | `MARVIN_SUBAGENT_LOG` | *(none)* | Path for JSONL tool-call logging |

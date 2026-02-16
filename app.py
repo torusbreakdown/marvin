@@ -2762,8 +2762,22 @@ async def run_command(params: RunCommandParams) -> str:
     if gate:
         return gate
 
-    # Block tk via run_command — force use of the tk tool instead
+    # Block destructive file operations
     cmd_stripped = params.command.strip()
+    import shlex as _shlex
+    try:
+        _cmd_parts = _shlex.split(cmd_stripped)
+    except ValueError:
+        _cmd_parts = cmd_stripped.split()
+    _cmd_base = _cmd_parts[0] if _cmd_parts else ""
+    if _cmd_base in ("rm", "rmdir", "unlink") or cmd_stripped.startswith("rm "):
+        return (
+            "❌ File deletion is not allowed. Use apply_patch to edit files, "
+            "or create_file to create new ones. If you need to remove generated "
+            "artifacts, explain what you want to remove and why."
+        )
+
+    # Block tk via run_command — force use of the tk tool instead
     if cmd_stripped.startswith("tk ") or cmd_stripped == "tk":
         return (
             "❌ Do not run tk via run_command. Use the dedicated tk tool instead.\n"

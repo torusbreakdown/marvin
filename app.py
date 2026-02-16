@@ -2323,6 +2323,24 @@ async def get_working_dir(params: GetWorkingDirParams) -> str:
     return f"Working directory: {_coding_working_dir}"
 
 
+def _writable_files_check(rel_path: str) -> str | None:
+    """If MARVIN_WRITABLE_FILES is set, only allow writes to those paths."""
+    allowed = os.environ.get("MARVIN_WRITABLE_FILES", "")
+    if not allowed:
+        return None  # no restriction
+    allowed_set = {p.strip() for p in allowed.split(",") if p.strip()}
+    # Normalize the path for comparison
+    norm = os.path.normpath(rel_path)
+    for a in allowed_set:
+        if os.path.normpath(a) == norm:
+            return None
+    return (
+        f"❌ WRITE RESTRICTED: This agent may only write to: {', '.join(sorted(allowed_set))}.\n"
+        f"You tried to write to: {rel_path}\n"
+        f"Focus on editing ONLY the document you were assigned to fix."
+    )
+
+
 def _ticket_gate_check() -> str | None:
     """If MARVIN_TICKET is set (sub-agent) and no ticket has been created yet, reject."""
     if os.environ.get("MARVIN_READONLY") == "1":
@@ -2357,6 +2375,9 @@ async def create_file(params: CreateFileParams) -> str:
             "Usage: create_file(path='path/to/file.md', content='full file content here')\n"
             "You must include the entire file content as a string in the 'content' field."
         )
+    wgate = _writable_files_check(params.path)
+    if wgate:
+        return wgate
     gate = _ticket_gate_check()
     if gate:
         return gate
@@ -2399,6 +2420,9 @@ async def append_file(params: AppendFileParams) -> str:
             "append_file requires BOTH 'path' and 'content' parameters.\n"
             "Usage: append_file(path='path/to/file.md', content='content to append')"
         )
+    wgate = _writable_files_check(params.path)
+    if wgate:
+        return wgate
     gate = _ticket_gate_check()
     if gate:
         return gate
@@ -2438,6 +2462,9 @@ async def apply_patch(params: ApplyPatchParams) -> str:
             "Use read_file first to see the exact content, then copy the exact "
             "string (whitespace-sensitive) into old_str."
         )
+    wgate = _writable_files_check(params.path)
+    if wgate:
+        return wgate
     gate = _ticket_gate_check()
     if gate:
         return gate
@@ -3046,7 +3073,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
 
     async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "",
-                       readonly: bool = False) -> tuple[int, str, str]:
+                       readonly: bool = False, writable_files: list[str] | None = None) -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
@@ -3060,6 +3087,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["PYTHONUNBUFFERED"] = "1"
         if readonly:
             sub_env["MARVIN_READONLY"] = "1"
+        if writable_files:
+            sub_env["MARVIN_WRITABLE_FILES"] = ",".join(writable_files)
 
         # Inject ticket creation instruction into prompt for non-readonly agents
         ticket_preamble = ""
@@ -3184,6 +3213,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     async def _run_sub_with_retry(
         prompt: str, model: str, base_timeout: int = 600, label: str = "",
         allow_questions: int = 3, readonly: bool = False,
+        writable_files: list[str] | None = None,
     ) -> tuple[int, str, str]:
         """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
 
@@ -3199,7 +3229,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
             full_prompt = prompt + qa_context
-            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly)
+            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly, writable_files=writable_files)
 
             # Check if sub-agent is asking questions instead of finishing
             if questions_asked < allow_questions and "QUESTIONS_FOR_PARENT:" in (out or ""):
@@ -3541,7 +3571,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
             await _run_sub_with_retry(
                 fix_prompt, _AGENT_MODELS["codex"], base_timeout=900,
-                label=f"Spec fixer: {doc_label} R{review_round}")
+                label=f"Spec fixer: {doc_label} R{review_round}",
+                writable_files=[rel_doc])
 
             if review_round >= _MAX_SPEC_REVIEW_ROUNDS:
                 await _notify_pipeline(f"⚠️ Spec review: {doc_label} — max rounds reached")
@@ -3798,7 +3829,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
         return ""
 
-    _phase_order = ["1a", "1a_review", "1b", "1b_review", "2a", "2b", "3", "4a", "4b", "5"]
+    _phase_order = ["1a", "1a_review", "1b", "1b_review", "2a", "2b", "3", "4a", "4b", "4c", "5"]
     def _phase_done(phase: str) -> bool:
         current = _load_state()
         if not current:
@@ -3927,7 +3958,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 # Run spec — retry until file exists
                 for _spec_attempt in range(1, _MAX_RETRIES + 1):
-                    spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Product spec")
+                    spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Product spec",
+                        writable_files=[".marvin/spec.md"])
                     if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000:
                         spec_size = os.path.getsize(spec_path)
                         await _notify_pipeline(f"✅ spec.md ready ({spec_size} bytes)")
@@ -3978,7 +4010,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Run UX after spec (sequential — UX reads spec.md) — retry until file exists
             for _ux_attempt in range(1, _MAX_RETRIES + 1):
-                ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="UX design")
+                ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="UX design",
+                    writable_files=[".marvin/ux.md"])
                 if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 1000:
                     ux_size = os.path.getsize(ux_path)
                     await _notify_pipeline(f"✅ ux.md ready ({ux_size} bytes)")
@@ -4080,7 +4113,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             )
 
             for _arch_attempt in range(1, _MAX_RETRIES + 1):
-                rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Architecture pass")
+                rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Architecture pass",
+                    writable_files=[".marvin/design.md"])
                 if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
                     design_size = os.path.getsize(design_path)
                     await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
@@ -10663,7 +10697,7 @@ def _build_all_tools():
         steam_player_stats, steam_user_games, steam_user_summary,
         # Coding agent tools
         set_working_dir, get_working_dir,
-        create_file, apply_patch, code_grep, tree, read_file,
+        create_file, append_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
         run_command, install_packages, launch_agent, tk,
         # Knowledge tools
@@ -11179,6 +11213,10 @@ async def _run_non_interactive():
     if os.environ.get("MARVIN_READONLY") == "1":
         _WRITE_TOOLS = {"create_file", "apply_patch", "file_apply_patch", "git_commit", "git_checkout", "run_command"}
         all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _WRITE_TOOLS]
+    # MARVIN_WRITABLE_FILES: strip run_command and other write tools entirely (file writes gated per-file in the tools themselves)
+    if os.environ.get("MARVIN_WRITABLE_FILES"):
+        _BLOCKED = {"run_command", "git_commit", "git_checkout", "write_note", "install_packages", "launch_agent"}
+        all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _BLOCKED]
     if _SUBAGENT_TOOL_LOG:
         all_tools = _wrap_tools_with_logging(all_tools)
     system_msg = _build_system_message()

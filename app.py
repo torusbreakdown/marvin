@@ -21,13 +21,73 @@ from pydantic import BaseModel, Field
 try:
     from copilot import CopilotClient, define_tool as _orig_define_tool
 
+    def _apply_codex_patch(patch_str: str) -> dict:
+        """Handle Codex-style *** Begin Patch format by applying it to disk."""
+        try:
+            from codex_apply_patch import apply_patch as _codex_apply
+            # apply_patch works on cwd-relative paths; chdir if needed
+            saved_cwd = os.getcwd()
+            if _coding_working_dir:
+                os.chdir(_coding_working_dir)
+            try:
+                _codex_apply(patch_str)
+            finally:
+                os.chdir(saved_cwd)
+            return {
+                "textResultForLlm": "✅ Applied Codex-style patch successfully.",
+                "resultType": "success",
+            }
+        except Exception as e:
+            return {
+                "textResultForLlm": f"❌ Failed to apply Codex-style patch: {e}\n"
+                    "Try using apply_patch with named parameters instead: "
+                    '{\"path\": \"...\", \"old_str\": \"...\", \"new_str\": \"...\"}',
+                "resultType": "failure",
+            }
+
     def define_tool(description=""):
-        """Wrapper that stores description for Ollama tool schema generation."""
+        """Wrapper that stores description for Ollama tool schema generation.
+
+        Also patches the SDK handler to deserialize string arguments —
+        some LLMs send tool args as a JSON *string* instead of a dict,
+        which causes Pydantic model_validate to fail with an opaque error.
+        """
         decorator = _orig_define_tool(description=description)
         def wrapper(fn):
             fn._tool_description = description
             tool = decorator(fn)
             tool._original_fn = fn  # preserve for non-SDK providers
+
+            # Patch handler to fix string-args bug: some LLMs send tool args
+            # as a JSON string or raw text instead of a parsed dict.
+            _real_handler = tool.handler
+            _tool_name = tool.name
+            async def _fixup_handler(invocation, _orig=_real_handler, _tname=_tool_name):
+                args = invocation.get("arguments") if isinstance(invocation, dict) else getattr(invocation, "arguments", None)
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args)
+                        if isinstance(parsed, dict):
+                            if isinstance(invocation, dict):
+                                invocation["arguments"] = parsed
+                            else:
+                                invocation.arguments = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        # Check if it's a Codex-style patch (*** Begin Patch)
+                        if "*** Begin Patch" in args and _tname == "apply_patch":
+                            return _apply_codex_patch(args)
+                        return {
+                            "textResultForLlm": (
+                                "❌ ERROR: arguments must be a JSON object with named parameters, "
+                                "not a raw string. For apply_patch, pass: "
+                                '{\"path\": \"...\", \"old_str\": \"...\", \"new_str\": \"...\"}. '
+                                "Do NOT use unified-diff or *** Begin Patch format."
+                            ),
+                            "resultType": "failure",
+                        }
+                return await _orig(invocation)
+            tool.handler = _fixup_handler
+
             return tool
         return wrapper
 except ImportError:
@@ -2023,6 +2083,32 @@ _coding_working_dir: str | None = None
 _LOCK_EXPIRE_SECONDS = 300  # 5 minutes
 
 
+def _quick_tree(directory: str, max_depth: int = 2, max_entries: int = 40) -> str:
+    """Return a compact tree listing for error messages."""
+    lines = [os.path.basename(directory) + "/"]
+    count = 0
+    for root, dirs, files in os.walk(directory):
+        depth = root.replace(directory, "").count(os.sep)
+        if depth >= max_depth:
+            dirs.clear()
+            continue
+        indent = "  " * (depth + 1)
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") or d == ".marvin")
+        for d in dirs:
+            if count >= max_entries:
+                lines.append(f"{indent}... (truncated)")
+                return "\n".join(lines)
+            lines.append(f"{indent}{d}/")
+            count += 1
+        for f in sorted(files)[:10]:
+            if count >= max_entries:
+                lines.append(f"{indent}... (truncated)")
+                return "\n".join(lines)
+            lines.append(f"{indent}{f}")
+            count += 1
+    return "\n".join(lines)
+
+
 def _resolve_coding_path(rel_path: str) -> str:
     """Resolve a path relative to coding working directory.
     Absolute paths are rejected — all paths must be relative to the working dir.
@@ -2031,16 +2117,24 @@ def _resolve_coding_path(rel_path: str) -> str:
     if not _coding_working_dir:
         raise ValueError("No working directory set. Use set_working_dir first.")
     if os.path.isabs(rel_path):
-        # Strip leading path components to make it relative to working dir
-        # e.g. /home/user/project/foo.py → foo.py (best effort)
-        stripped = os.path.relpath(rel_path, _coding_working_dir)
-        if stripped.startswith(".."):
-            raise ValueError(f"Absolute path '{rel_path}' is outside the working directory. Use a relative path instead.")
-        rel_path = stripped
+        tree = _quick_tree(_coding_working_dir)
+        raise ValueError(
+            f"❌ Absolute paths are not allowed. All paths must be relative to "
+            f"your working directory.\n\n"
+            f"Your working directory is: {_coding_working_dir}\n"
+            f"You tried to access: {rel_path}\n\n"
+            f"Use relative paths like: .marvin/upstream/MARVIN_API_SPEC.md\n\n"
+            f"Here is your project tree:\n{tree}"
+        )
     resolved = os.path.normpath(os.path.join(_coding_working_dir, rel_path))
     # Ensure resolved path is within working dir
     if not resolved.startswith(os.path.normpath(_coding_working_dir) + os.sep) and resolved != os.path.normpath(_coding_working_dir):
-        raise ValueError(f"Path '{rel_path}' resolves outside the working directory.")
+        tree = _quick_tree(_coding_working_dir)
+        raise ValueError(
+            f"❌ Path '{rel_path}' escapes your working directory. You can only "
+            f"access files inside: {_coding_working_dir}\n\n"
+            f"Here is your project tree:\n{tree}"
+        )
     # Block direct edits to .tickets/ — use the tk tool instead
     rel_resolved = os.path.relpath(resolved, _coding_working_dir)
     if rel_resolved == ".tickets" or rel_resolved.startswith(".tickets" + os.sep):
@@ -2139,7 +2233,7 @@ class TreeParams(BaseModel):
 
 
 class ReadFileParams(BaseModel):
-    path: str = Field(description="File path (relative to working dir or absolute)")
+    path: str = Field(description="Relative path to file (e.g. 'src/app.ts', '.marvin/upstream/README.md'). NO absolute paths.")
     start_line: int | None = Field(default=None, description="Start line (1-based)")
     end_line: int | None = Field(default=None, description="End line (1-based, inclusive)")
 
@@ -2250,7 +2344,8 @@ def _ticket_gate_check() -> str | None:
 @define_tool(
     description=(
         "Create a new file with the given content. Fails if the file already exists (use apply_patch to edit). "
-        "Parameters: path (relative to working dir), content (the full file text — REQUIRED, must not be empty). "
+        "Parameters: path (RELATIVE to working dir, e.g. 'src/app.ts' — NO absolute paths), "
+        "content (the full file text — REQUIRED, must not be empty). "
         "For large files (>3000 words), write the first section with create_file, then use append_file for remaining sections."
     )
 )
@@ -2328,8 +2423,9 @@ async def append_file(params: AppendFileParams) -> str:
 @define_tool(
     description=(
         "Edit a file by replacing an exact string match with new content. "
-        "Requires 3 parameters: path (file to edit), old_str (exact text to find — "
-        "copy/paste from the file, whitespace-sensitive), new_str (replacement text). "
+        "Requires 3 parameters: path (RELATIVE to working dir — NO absolute paths), "
+        "old_str (exact text to find — copy/paste from the file, whitespace-sensitive), "
+        "new_str (replacement text). "
         "old_str must match exactly ONE location. Use read_file first to get the exact text."
     )
 )
@@ -2499,7 +2595,8 @@ async def tree(params: TreeParams) -> str:
 @define_tool(
     description=(
         "Read a file's contents with line numbers. "
-        "Parameters: path (relative to working dir), start_line (optional, 1-based), end_line (optional, 1-based inclusive). "
+        "Parameters: path (RELATIVE to working dir, e.g. 'src/app.ts' or '.marvin/upstream/README.md' — NO absolute paths), "
+        "start_line (optional, 1-based), end_line (optional, 1-based inclusive). "
         "Use start_line/end_line to read specific sections of large files. "
         "Tip: read the exact lines you need before calling apply_patch, so you can copy the precise old_str."
     )
@@ -3565,18 +3662,42 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Dispatch a fixer agent with the combined review findings
             combined_findings = "\n\n".join(all_findings)
+
+            # TDD-aware: during test phases, fixer must NOT write implementation
+            # or try to make tests pass — tests are SUPPOSED to fail.
+            is_test_phase = any(kw in phase_label.lower() for kw in ("test", "tdd"))
+            if is_test_phase:
+                fix_instructions = (
+                    "INSTRUCTIONS (TDD RED PHASE — tests are supposed to fail):\n"
+                    "1. Read the files mentioned in each finding\n"
+                    "2. Fix ONLY test code quality issues: wrong assertions, missing edge cases, "
+                    "bad test structure, missing fixtures, incorrect imports\n"
+                    "3. Do NOT write ANY implementation code — no server.py, no app.ts, no source modules\n"
+                    "4. Do NOT try to make the tests pass — they MUST fail because the implementation "
+                    "does not exist yet. This is TDD: tests define the interface BEFORE code is written.\n"
+                    "5. Do NOT run pytest — the tests will fail and that is CORRECT.\n"
+                    "6. If a reviewer says 'module X not found' or 'import error', that is EXPECTED "
+                    "behavior in TDD. Do NOT create the module. Do NOT fix the import. Leave it.\n"
+                    "7. Commit fixes with message 'Test review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
+                    "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
+                )
+            else:
+                fix_instructions = (
+                    "INSTRUCTIONS:\n"
+                    "1. Read the files mentioned in each finding\n"
+                    "2. Fix each critical/major issue with the smallest possible change\n"
+                    "3. Run 'pytest -v' after fixing to verify no regressions\n"
+                    f"4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
+                    "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
+                )
+
             fix_prompt = (
                 _project_context() + "\n\n"
                 f"CODE REVIEW FINDINGS (round {review_round}/{_MAX_REVIEW_ROUNDS}):\n"
                 "The following issues were found by parallel code reviewers. "
                 "Fix ALL critical and major issues. Minor issues are optional.\n\n"
                 f"{combined_findings}\n\n"
-                "INSTRUCTIONS:\n"
-                "1. Read the files mentioned in each finding\n"
-                "2. Fix each critical/major issue with the smallest possible change\n"
-                "3. Run 'pytest -v' after fixing to verify no regressions\n"
-                "4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
-                "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
+                f"{fix_instructions}"
             )
             await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
 
@@ -10207,6 +10328,10 @@ async def _run_tool_loop(
                 try:
                     fn_args = json.loads(fn_args)
                 except json.JSONDecodeError:
+                    # Handle Codex-style patch format
+                    if "*** Begin Patch" in fn_args and fn_name == "apply_patch":
+                        result_dict = _apply_codex_patch(fn_args)
+                        return tc.get("id", ""), fn_name, result_dict.get("textResultForLlm", "")
                     fn_args = {}
             func = tool_map.get(fn_name)
             if not func:

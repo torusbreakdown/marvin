@@ -1,2 +1,8 @@
 __pycache__/
 .venv/
+node_modules/
+dist/
+coverage/
+.vitest/
+.DS_Store
+.marvin/notes/

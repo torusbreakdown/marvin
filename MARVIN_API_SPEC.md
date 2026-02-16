@@ -1,13 +1,12 @@
-# Marvin CLI — Interface & Integration Specification
+# Marvin CLI — Interface Reference
 
-> **Purpose**: This document is the authoritative reference for any software that
-> integrates with Marvin (app.py). It describes every interaction mode, every
-> input/output contract, every piece of state Marvin manages, and how an
-> integrator (like a web bridge) must behave to replicate the full interactive
-> experience.
+> **Purpose**: Authoritative reference for the Marvin CLI's external interface.
+> Describes every invocation mode, I/O contract, environment variable, tool,
+> exit code, and state boundary.  Language-agnostic — useful whether your
+> integrator is written in TypeScript, Go, Rust, or anything else.
 >
-> **Audience**: LLM coding agents building bridges, web UIs, API wrappers, or
-> any other consumer of the Marvin CLI.
+> **Audience**: Any developer building software that spawns, wraps, or
+> orchestrates the Marvin CLI.
 
 ---
 
@@ -15,49 +14,51 @@
 
 1. [Architecture Overview](#1-architecture-overview)
 2. [Invocation Modes](#2-invocation-modes)
-3. [Non-Interactive Mode — The Bridge Contract](#3-non-interactive-mode--the-bridge-contract)
-4. [State Management — What Marvin Handles vs What the Bridge Handles](#4-state-management)
-5. [Conversation History Format](#5-conversation-history-format)
-6. [User Profile System](#6-user-profile-system)
-7. [Stdout Streaming Format](#7-stdout-streaming-format)
-8. [Stderr Output Format](#8-stderr-output-format)
-9. [Tool Calling Behavior](#9-tool-calling-behavior)
-10. [Interactive Commands & Slash Commands](#10-interactive-commands)
-11. [Environment Variables](#11-environment-variables)
-12. [Complete Tool Catalog](#12-complete-tool-catalog)
-13. [Exit Codes](#13-exit-codes)
-14. [Integration Patterns](#14-integration-patterns)
+3. [Non-Interactive Mode — The Integration Contract](#3-non-interactive-mode--the-integration-contract)
+4. [Design-First Pipeline](#4-design-first-pipeline)
+5. [State Boundaries](#5-state-boundaries)
+6. [Conversation History Format](#6-conversation-history-format)
+7. [User Profile System](#7-user-profile-system)
+8. [Stdout Streaming Format](#8-stdout-streaming-format)
+9. [Stderr Output Format](#9-stderr-output-format)
+10. [Tool Calling Behavior](#10-tool-calling-behavior)
+11. [Interactive Slash Commands](#11-interactive-slash-commands)
+12. [Environment Variables](#12-environment-variables)
+13. [Complete Tool Catalog](#13-complete-tool-catalog)
+14. [Exit Codes](#14-exit-codes)
+15. [Integration Notes](#15-integration-notes)
 
 ---
 
 ## 1. Architecture Overview
 
-Marvin is a single-file Python CLI assistant (`app.py`) with 70+ tools, multiple
-LLM provider backends, a user profile system, persistent conversation history,
-and a coding agent pipeline. It runs locally — no cloud deployment, no Docker.
+Marvin is a single-process CLI assistant with 70+ local tools, multiple LLM
+provider back-ends, a user profile system, persistent conversation history, and
+a multi-phase coding-agent pipeline.  It runs locally — no containers, no cloud
+deployment.
 
 ```
-┌─────────────────────────────────────────────────┐
-│                    Marvin CLI                    │
-│                                                 │
-│  ┌───────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │  Profile   │  │   Chat   │  │    Tools     │  │
-│  │  System    │  │   Log    │  │  (70+ local  │  │
-│  │            │  │          │  │   & web)     │  │
-│  └───────────┘  └──────────┘  └──────────────┘  │
-│  ┌───────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Preferences│  │  Notes   │  │  LLM Router  │  │
-│  │  (YAML)   │  │ ~/Notes  │  │ Copilot/Gem/ │  │
-│  │           │  │          │  │ Groq/Ollama  │  │
-│  └───────────┘  └──────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│                    Marvin CLI                      │
+│                                                   │
+│  ┌────────────┐  ┌───────────┐  ┌──────────────┐  │
+│  │  Profile    │  │   Chat    │  │   Tools      │  │
+│  │  System     │  │   Log     │  │  (70+ local  │  │
+│  │            │  │           │  │   & web)     │  │
+│  └────────────┘  └───────────┘  └──────────────┘  │
+│  ┌────────────┐  ┌───────────┐  ┌──────────────┐  │
+│  │ Preferences│  │  Notes    │  │  LLM Router  │  │
+│  │  (YAML)    │  │ ~/Notes   │  │ Copilot/Gem/ │  │
+│  │            │  │           │  │ Groq/Ollama  │  │
+│  └────────────┘  └───────────┘  └──────────────┘  │
+└───────────────────────────────────────────────────┘
 ```
 
-**Key principle**: Marvin is a *stateful local assistant*. In interactive mode,
-it maintains conversation history, user preferences, saved places, alarms, and
-session context across prompts. Any integration that wants to replicate the
-interactive experience must either (a) let Marvin manage its own state files, or
-(b) provide equivalent context in each invocation.
+**Key principle**: Marvin is *stateful* in interactive mode (conversation
+history, preferences, alarms, session context persist across prompts) and
+*stateless* in non-interactive mode (one prompt in, one response out, process
+exits).  An integrator that needs multi-turn conversation must manage history
+externally and inject it into each `--prompt` invocation.
 
 ---
 
@@ -67,158 +68,182 @@ interactive experience must either (a) let Marvin manage its own state files, or
 
 ```bash
 python app.py              # curses TUI (default)
-python app.py --plain      # readline-based plain text
-python app.py --curses     # explicitly curses
-python app.py --provider gemini   # use specific LLM provider
+python app.py --plain      # readline-based plain terminal
+python app.py --curses     # explicitly request curses
+python app.py --provider gemini   # override LLM provider
 ```
 
-Full-featured mode. Loads chat history, preferences, saved places. Maintains
-conversation across prompts. Has slash commands, shell mode, voice mode.
+Full-featured mode.  Loads chat history, preferences, saved places.  Maintains
+conversation across prompts.  Supports slash commands, shell mode, voice input.
 
-### 2.2 Non-Interactive (Single-Shot)
+### 2.2 Single-Shot (Inline Prompt)
+
+```bash
+python app.py "What's the weather in Tokyo?"
+```
+
+Runs one prompt through the interactive UI, displays the response, then returns
+to the prompt loop.
+
+### 2.3 Non-Interactive (Sub-Agent / Integration)
 
 ```bash
 python app.py --non-interactive --prompt "What's the weather?"
 python app.py --non-interactive --prompt "Build me a web app" --working-dir /path/to/project
-python app.py --non-interactive --prompt "..." --design-first --ntfy my-topic
+python app.py --non-interactive --prompt "..." --ntfy my-topic
 ```
 
 Executes one prompt, streams the response to stdout, emits cost data to stderr,
-and exits. **This mode is stateless by default** — it does NOT load conversation
-history from disk. It DOES load:
-- User preferences (from the active profile)
-- System message (personality, tool instructions, coding rules)
-- Spec/design docs (if `--working-dir` points to a project with `.marvin/` files)
-- All tools
+then exits.  See §3.
 
-### 2.3 Design-First Pipeline
+### 2.4 Design-First Pipeline
 
 ```bash
 python app.py --non-interactive --design-first --prompt "Build a chat web UI" --working-dir /path
 ```
 
-Bypasses the LLM conversation entirely. Creates a ticket, then launches a
-multi-phase TDD pipeline (spec → architecture → tests → implementation → debug).
+Bypasses the LLM conversation loop entirely. Creates a ticket and launches a
+multi-phase TDD pipeline (spec → UX → architecture → tests → implementation →
+debug → E2E → QA).  See §4.
 
 ---
 
-## 3. Non-Interactive Mode — The Bridge Contract
+## 3. Non-Interactive Mode — The Integration Contract
 
-This is the most important section for web UI / bridge integrators.
+This is the primary integration surface.
 
-### 3.1 Input
+### 3.1 CLI Flags
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
+| Flag | Required | Description |
+|------|----------|-------------|
 | `--non-interactive` | Yes | Enables single-shot mode |
 | `--prompt TEXT` | Yes | The user's message |
 | `--working-dir PATH` | No | Sets coding working directory |
-| `--design-first` | No | Triggers TDD pipeline instead of chat |
-| `--ntfy TOPIC` | No | Push notification topic for alerts |
-| `--provider NAME` | No | LLM provider: `copilot`, `gemini`, `groq`, `ollama`, `openai` |
+| `--design-first` | No | Triggers design-first TDD pipeline (§4) |
+| `--ntfy TOPIC` | No | Push notification topic for pipeline alerts |
 
-### 3.2 What Non-Interactive Mode Does NOT Do
+### 3.2 What Non-Interactive Mode Does
 
-- ❌ Does NOT seed conversation history into the LLM message array (the way
-  interactive mode does with the last 20 entries as user/assistant messages)
-- ❌ Does NOT persist the conversation to `chat_log.json`
-- ❌ Does NOT display usage summaries
-- ❌ Does NOT handle slash commands (`!code`, `!shell`, etc.)
-- ❌ Does NOT support multi-turn conversation within a single invocation
+- Loads user preferences from the active profile
+- Builds the full system message (personality, tool instructions, coding rules)
+- Loads all 70+ tools; auto-approves every tool call (no user confirmation)
+- Embeds compact conversation history into the system message (last 20 entries,
+  each truncated to 200 chars) — enough for topic awareness, not full context
+- Loads `.marvin/spec.md`, `.marvin/design.md`, `.marvin/ux.md` if present in
+  the working directory
+- Streams response tokens to stdout in real-time
+- Runs the tool loop (up to 50 rounds; always in coding mode)
+- Emits cost data to stderr on exit
 
-> **Note**: Non-interactive mode DOES load compact conversation history into the
-> *system message* (via `_compact_history()` — last 20 entries, truncated to 200
-> chars each). This provides some background context about what the user has been
-> asking about recently, but it is NOT the same as full conversation seeding. The
-> bridge should still include full recent messages in the prompt for proper
-> conversational continuity.
+### 3.3 What Non-Interactive Mode Does NOT Do
 
-### 3.3 What Non-Interactive Mode DOES Do
+- Does NOT seed full conversation history into the LLM message array
+- Does NOT persist the conversation to disk
+- Does NOT display usage summaries
+- Does NOT handle slash commands
+- Does NOT support multi-turn conversation within a single invocation
 
-- ✅ Loads user preferences from the active profile
-- ✅ Builds the full system message (personality, tool instructions, coding rules)
-- ✅ Loads all 70+ tools
-- ✅ Auto-approves all tool calls (no user confirmation prompts)
-- ✅ Streams response tokens to stdout in real-time
-- ✅ Runs the tool loop (always 50 rounds — non-interactive is always coding mode)
-- ✅ Emits cost data to stderr on exit
-- ✅ Loads `.marvin/spec.md` and `.marvin/design.md` if present in working-dir
+### 3.4 Providing Conversation Context
 
-### 3.4 The Bridge's Responsibility
+The compact history embedded in the system message is truncated to 200 chars per
+entry — too short for follow-ups like *"tell me more about that second option."*
+For proper conversational flow, the integrator should prepend recent messages to
+the `--prompt` value:
 
-**Because non-interactive mode only has compact history in the system message
-(truncated to 200 chars per entry), the bridge SHOULD provide full conversation
-context in the prompt for best results.** The compact history gives Marvin
-background awareness of recent topics, but for proper conversational flow — 
-follow-ups, corrections, multi-step tasks — the bridge should include the full
-last 20 messages:
+```
+Previous conversation (for context):
+  User: Find pizza near me
+  Marvin: I found 3 pizza places nearby…
+  User: What about the second one?
 
-```python
-# Bridge builds the prompt with history context
-prompt = ""
-if conversation_history:
-    prompt += "CONVERSATION HISTORY (most recent messages):\n"
-    for msg in conversation_history[-20:]:
-        role = "User" if msg["role"] == "user" else "Marvin"
-        prompt += f"{role}: {msg['text']}\n"
-    prompt += "\n---\nCURRENT MESSAGE:\n"
-prompt += user_message
+Current message:
+Can you show me the menu?
 ```
 
-**Why include history in the prompt?** While Marvin embeds compact history in
-the system message, those entries are truncated to 200 chars each — too short
-for follow-up questions like "tell me more about that second option" or "use
-the recipe from earlier." Full history in the prompt gives Marvin the detail
-needed for natural conversation.
+Pass the assembled text as a single `--prompt` argument.  Include the last ≤20
+messages.
 
-### 3.5 Subprocess Invocation Pattern
+### 3.5 Subprocess Lifecycle (Language-Agnostic)
 
-```python
-import asyncio
-import subprocess
+1. Build the prompt string (history + current message).
+2. Spawn `python app.py --non-interactive --prompt "<PROMPT>"` as a child
+   process with separate stdout and stderr pipes.
+3. Read stdout incrementally — each chunk is a fragment of the response (see §8).
+   **Strip the trailing `\n`** from each read or you will get doubled newlines.
+4. When the process exits, read stderr and parse the `MARVIN_COST:` line (see §9).
+5. Store the user message and Marvin's assembled response in your own persistent
+   store for future context injection.
 
-async def send_to_marvin(user_message: str, history: list[dict]) -> AsyncIterator[str]:
-    # Build prompt with conversation context
-    prompt_parts = []
-    if history:
-        prompt_parts.append("Previous conversation (for context):")
-        for msg in history[-20:]:
-            speaker = "User" if msg["role"] == "user" else "Marvin"
-            prompt_parts.append(f"  {speaker}: {msg['text']}")
-        prompt_parts.append("")
-        prompt_parts.append("Current message:")
-    prompt_parts.append(user_message)
-    full_prompt = "\n".join(prompt_parts)
+### 3.6 Read-Only Mode
 
-    proc = await asyncio.create_subprocess_exec(
-        "python", "/path/to/app.py",
-        "--non-interactive",
-        "--prompt", full_prompt,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    # Stream stdout token by token
-    async for chunk in proc.stdout:
-        token = chunk.decode("utf-8").rstrip("\n")  # IMPORTANT: strip trailing newline
-        yield token
-
-    # Parse cost from stderr
-    stderr = (await proc.stderr.read()).decode("utf-8")
-    for line in stderr.splitlines():
-        if line.startswith("MARVIN_COST:"):
-            cost_data = json.loads(line[len("MARVIN_COST:"):])
-```
-
-> **⚠️ CRITICAL**: `async for chunk in proc.stdout` yields lines that include a
-> trailing `\n`. You MUST strip it with `.rstrip("\n")` or you will get corrupted
-> output with doubled newlines in every token.
+Set `MARVIN_READONLY=1` in the subprocess environment to strip all write tools
+(`create_file`, `apply_patch`, `file_apply_patch`, `git_commit`,
+`git_checkout`, `run_command`).  Used internally for review agents; useful any
+time you need a read-only analysis pass.
 
 ---
 
-## 4. State Management
+## 4. Design-First Pipeline
 
-### What Marvin Manages Internally (Do NOT Replicate)
+Triggered by `--design-first`.  Runs a multi-phase, checkpoint-resumable TDD
+pipeline.  Each phase writes artifacts under `.marvin/` in the working directory.
+
+### 4.1 Phase Ordering
+
+```
+1a  → 1a_review → 1b → 1b_review → 2a → 2b → 3 → 4a → 4b → 5
+```
+
+Completed phases are recorded in `.marvin/pipeline_state`.  Re-running the same
+command resumes from the first incomplete phase.
+
+### 4.2 Phase Descriptions
+
+| Phase | Name | Description |
+|-------|------|-------------|
+| **1a** | Spec + UX | *Sequential*, not parallel.  First a spec agent writes `.marvin/spec.md`, then a UX agent reads the spec and writes `.marvin/ux.md`. |
+| **1a_review** | Spec/UX Review | A read-only reviewer (high-tier model) checks spec and UX docs against upstream references.  Up to 2 review rounds with automated fix cycles. |
+| **1b** | Architecture + Test Plan | Writes `.marvin/design.md` — file structure, data models, API routes, dependency list, exhaustive test plan. |
+| **1b_review** | Design Review | Read-only review of `design.md` against spec and upstream docs. |
+| **2a** | Functional Tests (TDD) | Parallel agents write failing unit tests from the test plan. |
+| **2b** | Integration Tests (TDD) | Agent writes failing integration/E2E test stubs. |
+| **3** | Implementation | Parallel agents implement the codebase to pass the tests.  Followed by a code review pass. |
+| **4a** | Debug Loop | Runs tests in a loop; on failure, dispatches a fix agent.  TDD-aware: fixes implementation, not tests (unless the test itself is wrong).  Configurable via `MARVIN_DEBUG_ROUNDS` (default 50). |
+| **4b** | E2E Smoke Test | Starts the application, makes real HTTP requests, verifies end-to-end behavior.  Configurable via `MARVIN_E2E_ROUNDS` (default 10). |
+| **5** | Adversarial QA | Parallel read-only QA agents try to break the app (security, data integrity, edge cases).  Findings are dispatched to a fixer agent.  Configurable via `MARVIN_QA_ROUNDS` (default 3). |
+
+After phases 2a, 2b, 3, and 4a, an automated **code review** pass runs using
+the high-tier model in read-only mode.
+
+### 4.3 Model Tiers
+
+The pipeline uses three model tiers, each configurable via environment variable:
+
+| Tier | Env Var | Default | Used For |
+|------|---------|---------|----------|
+| High | `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | Code reviews, QA (read-only) |
+| Low | `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Tests, implementation, review fixes |
+| Plan | `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Spec, architecture, debugging |
+
+### 4.4 Ticket System (`tk`)
+
+The pipeline uses an external `tk` CLI for ticket tracking.  On launch, Marvin
+creates an epic ticket and tracks sub-tasks through it.  Sub-agents can create
+child tickets with `tk create`, mark progress with `tk start`/`tk close`, and
+query dependencies with `tk blocked`.  The `.tickets/` directory is protected —
+file tools reject direct edits; agents must use the `tk` tool.
+
+### 4.5 Pipeline Notifications
+
+When `--ntfy TOPIC` is provided, phase transitions and results are pushed to
+the given [ntfy.sh](https://ntfy.sh) topic.  Useful for monitoring long-running
+pipelines from a phone or dashboard.
+
+---
+
+## 5. State Boundaries
+
+### What Marvin Manages (Do NOT Replicate)
 
 | State | Location | Description |
 |-------|----------|-------------|
@@ -228,63 +253,60 @@ async def send_to_marvin(user_message: str, history: list[dict]) -> AsyncIterato
 | Alarms | In-memory + `at` daemon | Timer/alarm scheduling |
 | OAuth tokens | `~/.config/local-finder/profiles/{name}/tokens.json` | Spotify, Google Calendar |
 | Notes | `~/Notes/` | Auto-saved knowledge base |
+| Pipeline state | `.marvin/pipeline_state` (in working dir) | Checkpoint for design-first pipeline |
 | Tool state | Various | Working directory, ntfy subscriptions, etc. |
 
-### What the Bridge Must Manage
+### What the Integrator Must Manage
 
-| State | Description | How |
-|-------|-------------|-----|
-| **Conversation history** | What was said in this conversation | Store messages, pass last 20 in the prompt |
-| **Conversation list** | All conversations the user has had | SQLite or similar persistent store |
-| **Conversation titles** | Human-readable names for conversations | Generate from first message or let user rename |
-| **Active conversation** | Which conversation is currently shown | Session/UI state |
-| **Theme preference** | Dark/light mode | `localStorage` or user settings |
+| State | Description |
+|-------|-------------|
+| Conversation history | Messages exchanged in the current conversation |
+| Conversation list | All conversations the user has had (your persistent store) |
+| Conversation metadata | Titles, timestamps, active conversation tracking |
 
-### What the Bridge Should NOT Do
+### What the Integrator Should NOT Do
 
-- ❌ Do NOT manage Marvin's chat_log.json — that's for interactive mode only
-- ❌ Do NOT try to set Marvin's active profile — it reads `last_profile` itself
-- ❌ Do NOT mock or fake any Marvin tool — all tools work locally
-- ❌ Do NOT parse Marvin's stdout for structured data — it's free-form text
+- Do NOT manage Marvin's `chat_log.json` — that's for interactive mode only
+- Do NOT try to set Marvin's active profile — it reads `last_profile` itself
+- Do NOT mock or fake any Marvin tool — all tools run locally
+- Do NOT parse Marvin's stdout for structured data — it's free-form text
   (except for `MARVIN_COST:` on stderr)
 
 ---
 
-## 5. Conversation History Format
+## 6. Conversation History Format
 
-### Marvin's Internal Format (chat_log.json)
+### Marvin's Internal Format (`chat_log.json`)
 
 ```json
 [
     {"role": "you", "text": "Find pizza near me", "time": "14:30"},
-    {"role": "assistant", "text": "I found 3 pizza places nearby...", "time": "14:30"},
-    {"role": "you", "text": "What about the second one?", "time": "14:31"},
-    {"role": "assistant", "text": "Tony's Pizza is located at...", "time": "14:31"}
+    {"role": "assistant", "text": "I found 3 pizza places nearby...", "time": "14:30"}
 ]
 ```
 
-Note: `role` values are `"you"`, `"assistant"`, or `"system"` — NOT the standard
-OpenAI `"user"` / `"assistant"`. The bridge can use whatever format it wants
-internally; just map to `User:` / `Marvin:` labels when building the prompt for
-non-interactive mode.
+Note: `role` values are `"you"`, `"assistant"`, or `"system"` — not the
+standard OpenAI `"user"` / `"assistant"`.
 
 ### How Interactive Mode Uses History
 
-On startup, the last 20 entries are loaded into the LLM conversation as
-`{"role": "user", "content": text}` and `{"role": "assistant", "content": text}`
-messages. This gives Marvin context continuity across sessions.
+On startup, the last 20 entries are loaded as LLM user/assistant messages,
+giving Marvin context continuity across sessions.  This does NOT happen in
+non-interactive mode.
 
-The bridge must replicate this by including history in the `--prompt` text.
+The integrator should replicate this by including history in the `--prompt`
+text (see §3.4).
 
 ---
 
-## 6. User Profile System
+## 7. User Profile System
 
-### Profile Structure
+### Profile Directory Structure
 
 ```
 ~/.config/local-finder/
-├── last_profile          # Text file: "main"
+├── last_profile          # Text file containing the active profile name
+├── usage.json            # Lifetime cost tracking
 └── profiles/
     ├── main/
     │   ├── preferences.yaml
@@ -296,7 +318,7 @@ The bridge must replicate this by including history in the `--prompt` text.
         └── ...
 ```
 
-### Preferences (preferences.yaml)
+### Preferences (`preferences.yaml`)
 
 ```yaml
 dietary: [vegetarian]
@@ -309,21 +331,21 @@ transport: car
 notes: "Allergic to shellfish"
 ```
 
-Marvin reads this on every prompt and includes it in the system message.
-The bridge does NOT need to pass preferences — Marvin loads them automatically.
+Marvin reads this on every prompt and injects it into the system message.  The
+integrator does NOT need to pass preferences — Marvin loads them automatically.
 
 ### Profile Switching
 
-Marvin has a `switch_profile` tool. When the user says "I'm Alex", Marvin calls
-it and switches all state files. The bridge should just let this happen — the
-tool handles everything.
+Marvin has a `switch_profile` tool.  When the user says "I'm Alex", Marvin
+calls it and switches all state files.  The integrator should let this happen
+transparently.
 
 ---
 
-## 7. Stdout Streaming Format
+## 8. Stdout Streaming Format
 
 In non-interactive mode, stdout is a raw stream of text tokens — NOT structured
-data. Each line from `process.stdout` is a chunk of the response.
+data.
 
 ```
 Here             ← chunk 1
@@ -335,126 +357,150 @@ Here             ← chunk 1
 ```
 
 **Key behaviors:**
+
 - Tokens arrive as fast as the LLM generates them
-- Each read from `process.stdout` may contain partial words, full sentences, or
-  just whitespace
-- Newlines within the response are part of the content (Marvin's responses are
-  often multi-line with markdown formatting)
+- Each read may contain partial words, full sentences, or just whitespace
+- Newlines within the response are part of the content (responses are often
+  multi-line with markdown formatting)
 - There is NO structured framing (no JSON, no SSE, no length prefixes)
 - The stream ends when the process exits
+- **Strip trailing `\n`** from each read or output will have doubled newlines
 
-**Tool call output**: When Marvin calls tools internally, tool names are printed
-to stdout as `  🔧 tool1, tool2, tool3` before each tool execution round. The
-final synthesized response also streams to stdout. The bridge will see these
-tool-call lines interleaved with response text — they can be detected by the
-`🔧` prefix and optionally converted to "thinking" indicators for the UI.
+**Tool-call markers**: When Marvin calls tools internally, tool names appear on
+stdout as `  🔧 tool1, tool2, tool3` before each tool-execution round.  These
+can be detected by the `🔧` prefix and optionally converted to "thinking"
+indicators in the UI.
 
 ---
 
-## 8. Stderr Output Format
+## 9. Stderr Output Format
 
-Stderr contains two types of output:
+Stderr contains two categories of output:
 
-### 8.1 Debug/Log Messages
+### 9.1 Debug/Log Messages
 
-These may appear during execution. They are informational and can be ignored or
-logged.
+Informational messages may appear during execution.  Safe to ignore or log.
 
-### 8.2 Cost Data (Final Line)
+### 9.2 Cost Data (Final Line)
 
-The last line of stderr (always, on both success and error) is:
+The last meaningful line of stderr (on both success and error) is:
 
 ```
 MARVIN_COST:{"session_cost": 0.12, "llm_turns": 3, "model_turns": {"gpt-5.2": 2, "claude-opus-4.6": 1}, "model_cost": {"gpt-5.2": 0.08, "claude-opus-4.6": 0.04}}
 ```
 
-**Parsing:**
+**Parsing**: scan stderr lines for the prefix `MARVIN_COST:` and JSON-decode
+everything after it.
 
-```python
-for line in stderr.splitlines():
-    if line.startswith("MARVIN_COST:"):
-        cost = json.loads(line[len("MARVIN_COST:"):])
-        # cost["session_cost"]  → float, total USD
-        # cost["llm_turns"]     → int, total LLM roundtrips
-        # cost["model_turns"]   → dict[str, int], turns per model
-        # cost["model_cost"]    → dict[str, float], USD per model
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_cost` | float | Total USD for this invocation |
+| `llm_turns` | int | Total LLM roundtrips |
+| `model_turns` | dict[string, int] | Roundtrips per model |
+| `model_cost` | dict[string, float] | USD per model |
 
 ---
 
-## 9. Tool Calling Behavior
+## 10. Tool Calling Behavior
 
-From the bridge's perspective, tool calling is **invisible**. The bridge sends a
-prompt, and Marvin handles tool selection, execution, and response synthesis
-internally. The bridge receives only the final textual response.
+From the integrator's perspective, tool calling is **invisible**.  The
+integrator sends a prompt; Marvin handles tool selection, execution, and
+response synthesis internally.  The integrator receives only the final textual
+response on stdout.
 
-**What happens internally:**
-1. LLM receives the prompt + system message + tool definitions
+**Internal flow:**
+
+1. LLM receives prompt + system message + tool definitions
 2. LLM decides to call 0 or more tools
 3. Marvin executes the tools locally (web search, file I/O, API calls, etc.)
 4. Tool results are fed back to the LLM
-5. LLM generates the next response (possibly calling more tools)
-6. Steps 2-5 repeat for up to 50 rounds (non-interactive always uses coding mode).
-   When using the Copilot SDK path, round limits are managed by the SDK itself.
-7. The final response streams to stdout
+5. Steps 2–4 repeat for up to 50 rounds (non-interactive always uses coding
+   mode).  When using the Copilot SDK path, round limits are managed by the SDK.
+6. The final response streams to stdout
 
-**Implications for the bridge:**
+**Implications for integrators:**
+
 - Long pauses in stdout are normal — tools are executing
-- Some responses take 30+ seconds (web scraping, code execution, multi-tool chains)
-- The bridge should show a "thinking" or "working" indicator during pauses
-- There is no way to know WHICH tools are being called from the bridge's
-  perspective (stdout is just the response text)
-- The bridge should set a generous timeout (≥ 300s for coding mode)
+- Some responses take 30+ seconds (web scraping, code execution, multi-tool
+  chains)
+- The integrator should show a "thinking" or "working" indicator during pauses
+- Set a generous timeout (≥ 300s for coding mode; hours for `--design-first`)
+
+### Path Security
+
+All file-manipulation tools (`create_file`, `read_file`, `apply_patch`,
+`append_file`, `code_grep`, `tree`, etc.) enforce path security:
+
+- **Absolute paths are rejected** — all paths must be relative to the working
+  directory.
+- **Path traversal (`..`) is rejected** if the resolved path escapes the
+  working directory.
+- **`.tickets/` is protected** — direct edits are rejected; agents must use the
+  `tk` tool.
+
+### `apply_patch` Formats
+
+The primary `apply_patch` tool uses search-and-replace semantics:
+
+| Parameter | Description |
+|-----------|-------------|
+| `path` | Relative path to file |
+| `old_str` | Exact string to find (must match exactly one location) |
+| `new_str` | Replacement string (empty string = delete) |
+
+When an LLM sends a Codex-style `*** Begin Patch` diff as the arguments,
+Marvin detects it and routes it through a Codex patch applier automatically.
+The integrator does not need to handle this — it is transparent.
+
+A separate `file_apply_patch` tool (restricted to `~/Notes/`) supports
+unified-diff hunks and simple `REPLACE`/`INSERT`/`DELETE` commands.
 
 ---
 
-## 10. Interactive Commands
+## 11. Interactive Slash Commands
 
-These commands are available only in interactive mode (plain or curses). They are
-NOT available in non-interactive mode and the bridge should NOT try to pass them
-as prompts.
+These commands are available **only** in interactive mode.  They are NOT
+available in non-interactive mode and the integrator should NOT pass them as
+prompts.
 
 | Command | Description |
 |---------|-------------|
-| `!shell` / `!sh` | Toggle shell mode (commands execute as bash, not sent to LLM) |
-| `!code` | Toggle coding mode (more tool rounds, higher context cap) |
+| `!shell` / `!sh` | Toggle shell mode (commands execute as bash) |
+| `!code` | Toggle coding mode |
 | `!voice` | Toggle continuous voice input mode |
 | `!v [N]` | One-shot voice recording (N seconds, default 5) |
 | `!blender` | Check Blender MCP connection status |
 | `!pro PROMPT` | Force Copilot SDK for one query |
-| `!COMMAND` | Execute COMMAND as a shell command (any `!` prefix except `!pro`) |
-| `preferences` | Open preferences.yaml in editor |
+| `!COMMAND` | Execute COMMAND as a shell command |
+| `preferences` | Open `preferences.yaml` in editor |
 | `profiles` | List available profiles |
 | `usage` | Show cost summary |
 | `saved` | List saved places |
 | `quit` / `exit` | Exit application |
 
-**Bridge equivalent**: If the bridge wants to support coding mode, it should set
-`MARVIN_DEPTH` and related env vars, or simply always run in coding mode (which
-`_run_non_interactive` does by default — it sets `_coding_mode = True`).
-
 > **Note**: Non-interactive mode always runs with coding mode enabled and
-> auto-approves all tool calls. This is by design — sub-agents and bridges need
-> full tool access without user confirmation.
+> auto-approves all tool calls.
 
 ---
 
-## 11. Environment Variables
+## 12. Environment Variables
 
 ### Provider Selection
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `copilot` | LLM backend: `copilot`, `gemini`, `groq`, `ollama`, `openai` |
+| `LLM_PROVIDER` | `copilot` | LLM back-end: `copilot`, `gemini`, `groq`, `ollama`, `openai` |
+
+Can also be set via the `--provider` CLI flag in interactive mode.
 
 ### Model Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MARVIN_MODEL` | (none) | Override model for non-interactive mode |
-| `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | Complex tasks (code review, QA, Q&A) |
-| `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Simple tasks (tests, impl, debug) |
-| `MARVIN_CODE_MODEL_PLAN` | (falls back to HIGH) | Planning tasks (spec, architecture) |
+| `MARVIN_MODEL` | *(none)* | Override model for non-interactive mode |
+| `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | High tier: complex tasks (code review, QA) |
+| `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Low tier: routine tasks (tests, impl, fixes) |
+| `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Plan tier: spec, architecture, debugging |
 
 ### Provider API Keys
 
@@ -462,9 +508,9 @@ as prompts.
 |----------|----------|----------|
 | `GROQ_API_KEY` | `~/.ssh/GROQ_API_KEY` | Groq |
 | `GEMINI_API_KEY` | `~/.ssh/GEMINI_API_KEY` | Gemini |
-| `OPENAI_COMPAT_API_KEY` | (none) | OpenAI-compatible endpoints |
+| `OPENAI_COMPAT_API_KEY` | *(none)* | OpenAI-compatible endpoints |
 
-### Provider Models
+### Provider-Specific Models & URLs
 
 | Variable | Default | Provider |
 |----------|---------|----------|
@@ -480,10 +526,11 @@ as prompts.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MARVIN_DEPTH` | `0` | Sub-agent recursion depth |
-| `MARVIN_DEBUG_ROUNDS` | `50` | Max debug loop iterations |
-| `MARVIN_E2E_ROUNDS` | `10` | Max end-to-end test iterations |
-| `MARVIN_QA_ROUNDS` | `3` | Max QA fix iterations |
-| `MARVIN_SUBAGENT_LOG` | (none) | Path for JSONL tool call logging |
+| `MARVIN_DEBUG_ROUNDS` | `50` | Max debug loop iterations (Phase 4a) |
+| `MARVIN_E2E_ROUNDS` | `10` | Max E2E smoke-test iterations (Phase 4b) |
+| `MARVIN_QA_ROUNDS` | `3` | Max adversarial QA iterations (Phase 5) |
+| `MARVIN_READONLY` | *(unset)* | Set to `1` to strip write tools |
+| `MARVIN_SUBAGENT_LOG` | *(none)* | Path for JSONL tool-call logging |
 | `WHISPER_MODEL` | `whisper-large-v3` | Groq Whisper model for speech-to-text |
 | `EDITOR` | `nano` | Editor for opening preferences |
 
@@ -497,150 +544,98 @@ as prompts.
 | `OMDB_API_KEY` | OMDB for movie details |
 | `RAWG_API_KEY` | RAWG for game details |
 | `STEAM_API_KEY` | Steam Web API |
-| `BLENDER_MCP_HOST` | Blender MCP server host (default: 127.0.0.1) |
-| `BLENDER_MCP_PORT` | Blender MCP server port (default: 9876) |
+| `BLENDER_MCP_HOST` | Blender MCP server host (default `127.0.0.1`) |
+| `BLENDER_MCP_PORT` | Blender MCP server port (default `9876`) |
 
 ---
 
-## 12. Complete Tool Catalog
+## 13. Complete Tool Catalog
 
-Marvin has 70+ tools organized into categories. The bridge does NOT need to know
-about these — Marvin handles all tool calling internally. This list is for
+Marvin has 70+ tools organized into categories.  The integrator does NOT need to
+know about these — Marvin handles all tool calling internally.  This list is for
 reference only.
 
 ### Location & Places
-- `get_my_location` — Get user's current location via IP geolocation
-- `setup_google_auth()` — Set up Google Places/Calendar OAuth
-- `places_text_search(query, location?)` — Search for places by name/type
+- `get_my_location` — IP geolocation
+- `places_text_search(query, location?)` — Search for places
 - `places_nearby_search(lat, lng, radius, type)` — Search near coordinates
-- `save_place(name, data)` — Bookmark a place
-- `remove_place(name)` — Remove a bookmark
-- `list_places()` — List all bookmarked places
+- `save_place(name, data)` / `remove_place(name)` / `list_places()` — Bookmarks
 
 ### Travel & Directions
-- `estimate_travel_time(origin, destination, mode?)` — Travel time estimate
-- `estimate_traffic_adjusted_time(origin, dest)` — Traffic-aware estimate
-- `get_directions(origin, destination, mode?)` — Turn-by-turn directions
+- `estimate_travel_time(origin, destination, mode?)`
+- `estimate_traffic_adjusted_time(origin, dest)`
+- `get_directions(origin, destination, mode?)`
 
 ### Web & Search
-- `web_search(query)` — DuckDuckGo web search
-- `search_news(query)` — News search (GNews/NewsAPI)
-- `scrape_page(url)` — Fetch and extract page content
-- `browse_web(url)` — Render page with Lynx browser
+- `web_search(query)` — DuckDuckGo
+- `search_news(query)` — GNews / NewsAPI
+- `scrape_page(url)` — Fetch & extract content
+- `browse_web(url)` — Render with Lynx
 
 ### Knowledge & Research
-- `search_papers(query)` — Semantic Scholar search
-- `search_arxiv(query)` — arXiv paper search
-- `wiki_search(query)` — Wikipedia search
-- `wiki_summary(title)` — Wikipedia article summary
-- `wiki_full(title)` — Save full Wikipedia article to disk
-- `wiki_grep(pattern)` — Search within saved Wikipedia articles
-- `stack_search(query, site?)` — Stack Exchange search
-- `stack_answers(question_id, site?)` — Get Stack Exchange answers
+- `search_papers(query)` — Semantic Scholar
+- `search_arxiv(query)` — arXiv
+- `wiki_search(query)` / `wiki_summary(title)` / `wiki_full(title)` / `wiki_grep(pattern)`
+- `stack_search(query, site?)` / `stack_answers(question_id, site?)`
 
 ### Entertainment
-- `search_movies(query)` — OMDB movie search
-- `get_movie_details(imdb_id)` — Movie details
-- `search_games(query)` — RAWG game search
-- `get_game_details(id)` — Game details
-- `steam_search/app_details/featured/player_stats/user_games/user_summary` — Steam
-- `recipe_search(query, search_type?)` — TheMealDB recipe search
-- `recipe_lookup(id)` — Full recipe details
-- `music_search(query, type)` — MusicBrainz search
-- `music_lookup(mbid, type)` — MusicBrainz details
+- `search_movies(query)` / `get_movie_details(imdb_id)` — OMDB
+- `search_games(query)` / `get_game_details(id)` — RAWG
+- `steam_search` / `steam_app_details` / `steam_featured` / `steam_player_stats` / `steam_user_games` / `steam_user_summary`
+- `recipe_search(query, search_type?)` / `recipe_lookup(id)` — TheMealDB
+- `music_search(query, type)` / `music_lookup(mbid, type)` — MusicBrainz
 
 ### Spotify
-- `spotify_auth()` — Initiate Spotify OAuth
-- `spotify_search(query, type)` — Search Spotify catalog
-- `spotify_create_playlist(name, description?)` — Create playlist
-- `spotify_add_tracks(playlist_id, track_uris)` — Add tracks
+- `spotify_auth()` / `spotify_search(query, type)` / `spotify_create_playlist(name, description?)` / `spotify_add_tracks(playlist_id, track_uris)`
 
 ### Coding & Files
-- `set_working_dir(path)` — Set working directory
-- `get_working_dir()` — Get current working directory
-- `create_file(path, content)` — Create a new file
-- `read_file(path)` — Read file contents
-- `apply_patch(path, old_str, new_str)` — Search-replace edit
-- `file_read_lines(path, start, end)` — Read specific lines
-- `file_apply_patch(path, patches)` — Multi-hunk patch
-- `code_grep(pattern, path?, glob?)` — Ripgrep search
+- `set_working_dir(path)` / `get_working_dir()`
+- `create_file(path, content)` — Create new file (fails if exists)
+- `append_file(path, content)` — Append to existing file
+- `read_file(path, start_line?, end_line?)` — Read file (or line range)
+- `apply_patch(path, old_str, new_str)` — Search-and-replace edit
+- `file_apply_patch(path, patch)` — Multi-hunk patch (Notes only)
+- `code_grep(pattern, glob?, context_lines?, max_results?)` — Ripgrep search
 - `tree(path?, depth?)` — Directory tree
 - `run_command(command)` — Execute shell command
 - `install_packages(packages, manager?)` — Install packages
 
 ### Git
-- `git_status()` — Repository status
-- `git_diff(path?)` — Show changes
-- `git_commit(message, files?)` — Commit changes
-- `git_log(n?)` — Recent commits
-- `git_checkout(ref)` — Checkout branch/file
+- `git_status()` / `git_diff(staged?, path?)` / `git_commit(message, add_all?)` / `git_log(n?)` / `git_checkout(ref)`
 
 ### GitHub
-- `github_search(query)` — Search GitHub repos
-- `github_clone(url)` — Clone a repository
-- `github_read_file(repo, path)` — Read file from cloned repo
-- `github_grep(pattern, path?)` — Search cloned repos
+- `github_search(query)` / `github_clone(url)` / `github_read_file(repo, path)` / `github_grep(pattern, path?)`
 
 ### Notes & Calendar
-- `write_note(filename, content)` — Save note to ~/Notes
-- `read_note(filename)` — Read a note
-- `notes_mkdir(dirname)` — Create notes subdirectory
-- `notes_ls(path?)` — List notes
-- `calendar_add_event(title, start, end?, description?)` — Add calendar event
-- `calendar_delete_event(event_id)` — Delete event
-- `calendar_view(date?)` — View day's events
-- `calendar_list_upcoming(days?)` — List upcoming events
+- `write_note(filename, content)` / `read_note(filename)` / `notes_mkdir(dirname)` / `notes_ls(path?)`
+- `calendar_add_event(...)` / `calendar_delete_event(event_id)` / `calendar_view(date?)` / `calendar_list_upcoming(days?)`
 
 ### Notifications & Alarms
-- `set_alarm(seconds, message?)` — Set a timer/alarm
-- `list_alarms()` — List active alarms
-- `cancel_alarm(alarm_id)` — Cancel an alarm
-- `generate_ntfy_topic()` — Generate random ntfy topic
-- `ntfy_subscribe(topic)` — Subscribe to push notifications
-- `ntfy_unsubscribe(topic)` — Unsubscribe
-- `ntfy_publish(topic, message, title?)` — Send push notification
-- `ntfy_list()` — List subscribed topics
+- `set_alarm(seconds, message?)` / `list_alarms()` / `cancel_alarm(alarm_id)`
+- `generate_ntfy_topic()` / `ntfy_subscribe(topic)` / `ntfy_unsubscribe(topic)` / `ntfy_publish(topic, message, title?)` / `ntfy_list()`
 
 ### Profile & Session
-- `switch_profile(name)` — Switch user profile
-- `update_preferences(text)` — Update preferences YAML
-- `compact_history()` — Summarize old messages to save tokens
-- `search_history_backups()` — Find chat log backups
-- `get_usage()` — Session & lifetime cost summary
-- `exit_app()` — Exit Marvin
+- `switch_profile(name)` / `update_preferences(text)` / `compact_history()` / `search_history_backups()` / `get_usage()` / `exit_app()`
 
 ### Utilities
-- `weather_forecast(location?)` — Open-Meteo weather
-- `convert_units(value, from_unit, to_unit)` — Unit conversion
-- `dictionary_lookup(word)` — Dictionary definition
-- `translate_text(text, target_lang, source_lang?)` — Translation
-- `timer_start(name?)` — Start a stopwatch
-- `timer_check(name?)` — Check elapsed time
-- `timer_stop(name?)` — Stop and report time
-- `system_info()` — System information
-- `read_rss(url)` — Read RSS feed
-- `download_file(url, filename?)` — Download a file
-- `bookmark_save/list/search` — URL bookmarks
-- `yt_dlp_download(url, audio_only?)` — Download media via yt-dlp
+- `weather_forecast(location?)` — Open-Meteo
+- `convert_units(value, from_unit, to_unit)` / `dictionary_lookup(word)` / `translate_text(text, target_lang, source_lang?)`
+- `timer_start(name?)` / `timer_check(name?)` / `timer_stop(name?)`
+- `system_info()` / `read_rss(url)` / `download_file(url, filename?)` / `yt_dlp_download(url, audio_only?)`
+- `bookmark_save` / `bookmark_list` / `bookmark_search`
 
 ### Blender (MCP)
-- `blender_get_scene/get_object/create_object/modify_object/delete_object`
-- `blender_set_material/execute_code/screenshot`
+- `blender_get_scene` / `blender_get_object` / `blender_create_object` / `blender_modify_object` / `blender_delete_object` / `blender_set_material` / `blender_execute_code` / `blender_screenshot`
 
 ### Agent Dispatch & Tickets
 - `launch_agent(ticket_id, prompt, model?, working_dir?, design_first?, tdd?)` — Spawn sub-agent
-- `create_ticket(title)` — Create a task ticket
-- `ticket_add_dep(ticket_id, depends_on)` — Add dependency between tickets
-- `ticket_start(ticket_id)` — Mark ticket in-progress
-- `ticket_close(ticket_id)` — Close a ticket
-- `ticket_add_note(ticket_id, note)` — Add note to ticket
-- `ticket_show(ticket_id)` — Show ticket details
-- `ticket_list()` — List all tickets
-- `ticket_dep_tree()` — Show ticket dependency tree
+- `tk(args)` — Run the `tk` ticket CLI (create, start, close, show, ls, dep, add-note, blocked, dep-tree)
+- `create_ticket(title, type?, priority?, parent?)` — Create a task ticket (wrapper around `tk create`)
+- `ticket_add_dep(ticket_id, depends_on)` / `ticket_start(ticket_id)` / `ticket_close(ticket_id)` / `ticket_add_note(ticket_id, note)` / `ticket_show(ticket_id)` / `ticket_list()` / `ticket_dep_tree()`
 
 ---
 
-## 13. Exit Codes
+## 14. Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -649,107 +644,78 @@ reference only.
 
 ---
 
-## 14. Integration Patterns
+## 15. Integration Notes
 
-### 14.1 Web Chat Bridge (Recommended Architecture)
+### 15.1 Subprocess Architecture
+
+The recommended integration pattern is:
 
 ```
-Browser  ←→  FastAPI Server  ←→  Marvin subprocess
-              (bridge.py)         (app.py --non-interactive)
-                 │
-                 ├── SQLite (conversations, messages)
-                 ├── SSE streaming to browser
-                 └── Manages conversation history
+Your Application  ←→  Your Server  ←→  Marvin subprocess
+                      (any language)   (python app.py --non-interactive)
+                         │
+                         ├── Persistent Store (conversations, messages)
+                         ├── Streaming transport to client (SSE, WebSocket, etc.)
+                         └── Manages conversation history
 ```
 
-**The bridge's job:**
-1. Store conversations and messages in its own database
-2. On each user message, build a prompt with the last 20 messages as context
-3. Spawn `app.py --non-interactive --prompt ...` as a subprocess
-4. Stream stdout to the browser via SSE
+**The integrator's job:**
+1. Store conversations and messages in its own persistent store
+2. On each user message, build a prompt with the last ≤20 messages as context
+3. Spawn `python app.py --non-interactive --prompt ...` as a subprocess
+4. Stream stdout to the client via whatever transport fits your stack
 5. Parse `MARVIN_COST:` from stderr and store it
 6. Handle conversation CRUD (create, rename, delete, list)
 
-**The bridge does NOT:**
+**The integrator does NOT:**
 - Manage Marvin's profile, preferences, or saved places
 - Parse or intercept tool calls
 - Handle slash commands (those are interactive-only)
 - Maintain LLM state — Marvin's process exits after each message
 
-### 14.2 Subprocess Lifecycle
+### 15.2 Subprocess Lifecycle
 
 ```
-Bridge receives user message
+Integrator receives user message
   │
-  ├─ Load last 20 messages from conversation
+  ├─ Load last ≤20 messages from conversation
   ├─ Build prompt: history + current message
   ├─ Spawn: python app.py --non-interactive --prompt "$PROMPT"
   │
-  ├─ Stream stdout → SSE to browser (strip trailing \n from each chunk!)
+  ├─ Stream stdout → client (strip trailing \n from each chunk)
   ├─ Wait for process exit
   ├─ Read stderr → parse MARVIN_COST: line
   │
-  ├─ Save user message to DB
-  ├─ Save Marvin's response to DB
+  ├─ Save user message to persistent store
+  ├─ Save Marvin's response to persistent store
   └─ Return to idle
 ```
 
-### 14.3 SSE Event Format (Bridge → Browser)
+### 15.3 Timeout Guidance
 
-The bridge should translate Marvin's raw stdout into structured SSE events:
+| Mode | Suggested Timeout |
+|------|-------------------|
+| Regular prompt | ≥ 300 seconds |
+| `--design-first` | Hours (full TDD pipeline) |
 
-```
-data: {"type": "token", "content": "Here are"}
+### 15.4 Conversation Title Generation
 
-data: {"type": "token", "content": " three pizza"}
+After the first exchange, generate a title by:
+- Truncating the first user message to ~60 characters, or
+- Asking the LLM to summarize, or
+- Using a simple heuristic (first sentence, stripped of punctuation)
 
-data: {"type": "token", "content": " places near you:"}
+### 15.5 Coding Mode via Integration
 
-data: {"type": "done"}
-```
+Non-interactive mode always runs with coding mode enabled, so all coding tools
+are available.  To use the design-first pipeline:
 
-Optionally, the bridge can detect tool activity by monitoring for pauses:
-
-```
-data: {"type": "thinking"}         ← after 2s of no tokens
-data: {"type": "token", "content": "I found..."}  ← tokens resume
-```
-
-### 14.4 Error Handling
-
-```
-data: {"type": "error", "message": "Marvin process exited with code 1"}
+```bash
+python app.py --non-interactive --design-first --working-dir /path/to/project --prompt "Build a REST API for a todo app"
 ```
 
-If the subprocess crashes or times out, send an error event and close the SSE
-connection.
-
-### 14.5 Conversation Title Generation
-
-After the first exchange in a conversation, the bridge can generate a title by:
-- Truncating the first user message to 60 characters
-- Or asking the LLM to generate a title (separate non-interactive call)
-- Or using a simple heuristic (first sentence, stripped of punctuation)
-
-### 14.6 Coding Mode via Bridge
-
-Non-interactive mode always runs with `_coding_mode = True`, so all coding tools
-are available. To use the design-first pipeline via the bridge:
-
-```python
-proc = await asyncio.create_subprocess_exec(
-    "python", "app.py",
-    "--non-interactive",
-    "--design-first",
-    "--working-dir", "/path/to/project",
-    "--prompt", "Build a REST API for a todo app",
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-)
-```
-
-This will run for potentially hours (the full TDD pipeline). The bridge should
-set appropriate timeouts or stream progress.
+This may run for hours.  The integrator should set appropriate timeouts or
+stream progress via the `--ntfy` mechanism.
 
 ---
 
@@ -767,35 +733,37 @@ set appropriate timeouts or stream progress.
 | `~/.config/local-finder/profiles/{name}/tokens.json` | OAuth tokens |
 | `~/.config/local-finder/profiles/{name}/history` | Input history |
 | `~/Notes/` | Auto-saved notes directory |
+| `.marvin/spec.md` | Product specification (in working dir) |
+| `.marvin/ux.md` | UX design document (in working dir) |
+| `.marvin/design.md` | Architecture & test plan (in working dir) |
+| `.marvin/pipeline_state` | Pipeline checkpoint (in working dir) |
+| `.marvin/upstream/` | Upstream reference docs copied for sub-agents |
+| `.marvin-instructions` | Project-specific instructions (in working dir) |
+| `.marvin/instructions.md` | Alternative project instructions location |
+| `~/.marvin/instructions/{path}.md` | Global per-project instructions |
+| `.tickets/` | Ticket system data (managed by `tk`, not editable directly) |
 
-## Appendix B: Marvin's System Context
+## Appendix B: System Context Injection
 
-Every prompt — interactive or non-interactive — includes this context automatically:
+Every prompt — interactive or non-interactive — automatically includes:
 
-1. **Personality & rules** (always): "You are Marvin, a helpful local-business
-   and general-purpose assistant..."
-2. **User preferences** (always): Dietary, spice, cuisines, budget from YAML
-3. **Active profile name** (always): "Active profile: main"
-4. **Saved places** (always): All bookmarked locations with labels, addresses,
-   and coordinates — so the LLM can resolve references like "near home"
-5. **Compact conversation history** (always): Last 20 chat log entries
-   (truncated to 200 chars each) embedded in the system message. This gives
-   background context about recent topics. Present in BOTH interactive and
-   non-interactive modes.
-6. **Coding mode instructions** (when coding): Working directory, tool rules,
-   auto-notes behavior
-7. **Project instructions** (when working-dir has `.marvin-instructions`,
-   `.marvin/instructions.md`, or `~/.marvin/instructions/<path>.md`):
-   Project-specific rules
-8. **Spec & design docs** (when working-dir has `.marvin/spec.md` or
-   `.marvin/design.md`): Full product spec and architecture
+1. **Personality & rules**: Marvin's identity, behavioral constraints
+2. **User preferences**: Dietary, spice, cuisines, budget from YAML
+3. **Active profile name**: e.g. "Active profile: main"
+4. **Saved places**: All bookmarked locations (so the LLM can resolve "near home")
+5. **Compact conversation history**: Last 20 chat log entries (truncated to
+   200 chars each).  Present in both interactive and non-interactive modes.
+6. **Coding mode instructions** (when coding): Working directory, tool rules
+7. **Project instructions** (when `.marvin-instructions`, `.marvin/instructions.md`,
+   or `~/.marvin/instructions/{path}.md` exists)
+8. **Spec & design docs** (when `.marvin/spec.md` or `.marvin/design.md` exists
+   in the working directory)
 
-**Note on conversation history**: In addition to the compact history in the
-system message (#5), interactive mode (non-Copilot providers) also seeds the
-last 20 chat log entries as full user/assistant messages in the LLM conversation.
-This does NOT happen in non-interactive mode. The bridge should include full
-recent messages in the prompt for proper conversational flow.
+In addition to compact history (#5), interactive mode also seeds the last 20
+chat log entries as full user/assistant messages in the LLM conversation.  This
+does NOT happen in non-interactive mode — the integrator should include full
+recent messages in the `--prompt` for proper conversational flow.
 
-The bridge does NOT need to provide any of the above context — Marvin builds it
-internally. The bridge only needs to provide conversation history and the current
-message.
+The integrator does NOT need to provide any of the above context — Marvin builds
+it internally.  The integrator only needs to provide conversation history and
+the current message.

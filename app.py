@@ -3445,6 +3445,21 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             "- If the design.md or any other document contradicts this policy, THIS POLICY WINS.\n"
         )
 
+        # Memory index from prior agents
+        mem_index = os.path.join(wd, ".marvin", "memories", "INDEX.md")
+        if os.path.isfile(mem_index):
+            try:
+                idx_text = open(mem_index).read()
+                if len(idx_text) > 100:
+                    parts.append(
+                        "PRIOR AGENT MEMORIES (from .marvin/memories/INDEX.md):\n"
+                        "Previous agents indexed their findings. Read .marvin/memories/INDEX.md "
+                        "to find keywords and backup file locations. Use read_file on the backup "
+                        "paths to recover specific content without re-reading entire source files.\n"
+                    )
+            except Exception:
+                pass
+
         return "\n".join(parts)
 
     # ── Spec/design review helper ────────────────────────────────────
@@ -10541,7 +10556,182 @@ async def _run_tool_loop(
         messages.extend(history)
     messages.append({"role": "user", "content": prompt})
 
+    # Context budget management
+    _CTX_WARN_TOKENS = 180_000    # start warning
+    _CTX_COMPACT_TOKENS = 200_000  # trigger compaction
+    _CTX_MAX_TOKENS = 226_000      # hard limit (kimi k2.5 ≈ 228K)
+    _context_backup_path = None
+
+    def _estimate_tokens(msgs):
+        return sum(len(json.dumps(m)) for m in msgs) // 4
+
+    def _compact_context(msgs):
+        """Dump full context to backup file, replace old messages with summary."""
+        nonlocal _context_backup_path
+        import time as _t
+        log_dir = os.path.join(_coding_working_dir or ".", ".marvin", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        _context_backup_path = os.path.join(log_dir, f"context-backup-{int(_t.time())}.jsonl")
+        with open(_context_backup_path, "w") as bf:
+            for i, m in enumerate(msgs):
+                bf.write(json.dumps({"index": i, **m}) + "\n")
+
+        # Keep system message and last 8 messages, summarize the middle
+        system_msg_item = msgs[0]
+        recent = msgs[-8:]
+        middle = msgs[1:-8]
+
+        # Build a compact summary of what happened
+        summary_parts = []
+        for m in middle:
+            role = m.get("role", "?")
+            if role == "tool":
+                name = m.get("name", "?")
+                content = str(m.get("content", ""))
+                summary_parts.append(f"[tool:{name}] {content[:200]}")
+            elif role == "assistant":
+                tc = m.get("tool_calls", [])
+                if tc:
+                    names = [t.get("function", {}).get("name", "?") for t in tc]
+                    summary_parts.append(f"[called: {', '.join(names)}]")
+                else:
+                    content = str(m.get("content", ""))
+                    if content:
+                        summary_parts.append(f"[assistant] {content[:300]}")
+            elif role == "user":
+                content = str(m.get("content", ""))
+                summary_parts.append(f"[user] {content[:200]}")
+
+        compact_summary = "\n".join(summary_parts[-30:])  # keep last 30 entries
+        summary_msg = {
+            "role": "user",
+            "content": (
+                f"⚠️ CONTEXT COMPACTED — {len(middle)} messages summarized to save space.\n"
+                f"Full context backed up to: {_context_backup_path}\n"
+                f"A keyword index is available at .marvin/memories/INDEX.md — read it to find "
+                f"specific content from your earlier work without re-reading entire files.\n"
+                f"Use read_file on the backup path with line ranges to recover specific sections.\n\n"
+                f"SUMMARY OF PRIOR WORK:\n{compact_summary}\n\n"
+                f"Continue with your task. Focus on PRODUCING OUTPUT, not re-reading."
+            ),
+        }
+        return [system_msg_item, summary_msg] + recent
+
+    def _index_context_backup(backup_path: str, label: str = ""):
+        """Deterministic indexer: parse context backup, extract keywords, build index.
+        Stores per-agent context and a running cross-agent index in .marvin/memories/."""
+        mem_dir = os.path.join(_coding_working_dir or ".", ".marvin", "memories")
+        os.makedirs(mem_dir, exist_ok=True)
+        index_path = os.path.join(mem_dir, "INDEX.md")
+
+        if not os.path.isfile(backup_path):
+            return
+
+        # Parse the backup and extract keywords from tool results
+        import re as _re
+        keyword_index: dict[str, list[str]] = {}  # keyword → list of "line:context"
+        files_read: dict[str, list[int]] = {}  # filename → line numbers where content appeared
+        findings: list[str] = []
+
+        try:
+            with open(backup_path) as bf:
+                for line_no, line in enumerate(bf, 1):
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    role = entry.get("role", "")
+                    content = str(entry.get("content", ""))
+
+                    # Track read_file results — extract filename
+                    if role == "tool" and entry.get("name") == "read_file":
+                        # Content often starts with file path or contains it
+                        for match in _re.finditer(r'[\w./\-]+\.\w{1,5}', content[:500]):
+                            fname = match.group()
+                            if fname not in files_read:
+                                files_read[fname] = []
+                            files_read[fname].append(line_no)
+
+                    # Extract significant keywords (function names, class names, constants)
+                    if role == "tool" and len(content) > 100:
+                        # Find identifiers: CamelCase, UPPER_CASE, function_name patterns
+                        identifiers = set()
+                        for m in _re.finditer(r'\b([A-Z][a-zA-Z]{3,}(?:[A-Z][a-z]+)+)\b', content):
+                            identifiers.add(m.group())  # CamelCase
+                        for m in _re.finditer(r'\b([A-Z][A-Z_]{3,})\b', content):
+                            identifiers.add(m.group())  # UPPER_CASE
+                        for m in _re.finditer(r'\b((?:def|function|class|interface|type|export)\s+(\w+))', content):
+                            identifiers.add(m.group(2))  # definitions
+                        for ident in identifiers:
+                            if ident not in keyword_index:
+                                keyword_index[ident] = []
+                            keyword_index[ident].append(f"L{line_no}")
+
+                    # Capture assistant findings/decisions
+                    if role == "assistant" and content and not entry.get("tool_calls"):
+                        # Grab first meaningful sentence
+                        first_line = content.strip().split("\n")[0][:200]
+                        if len(first_line) > 20:
+                            findings.append(f"L{line_no}: {first_line}")
+
+        except Exception:
+            return
+
+        # Write per-agent context file
+        safe_label = (label or "agent").replace(" ", "-").replace("/", "-")[:40]
+        agent_ctx_path = os.path.join(mem_dir, f"AGENT_CONTEXT_{safe_label}.md")
+        with open(agent_ctx_path, "w") as af:
+            af.write(f"# Agent Context: {label}\n")
+            af.write(f"Backup: {backup_path}\n\n")
+            if files_read:
+                af.write("## Files Read\n")
+                for fname, lines in sorted(files_read.items()):
+                    af.write(f"- `{fname}` — lines {', '.join(f'L{l}' for l in lines[:5])}\n")
+                af.write("\n")
+            if findings:
+                af.write("## Key Findings/Decisions\n")
+                for f in findings[:20]:
+                    af.write(f"- {f}\n")
+                af.write("\n")
+            if keyword_index:
+                af.write("## Keyword Index (top 50)\n")
+                # Sort by frequency, keep top 50
+                sorted_kw = sorted(keyword_index.items(), key=lambda x: -len(x[1]))[:50]
+                for kw, locs in sorted_kw:
+                    af.write(f"- `{kw}` — {', '.join(locs[:5])}\n")
+
+        # Update running INDEX.md
+        existing_index = ""
+        if os.path.isfile(index_path):
+            try:
+                existing_index = open(index_path).read()
+            except Exception:
+                pass
+
+        with open(index_path, "w") as idx:
+            idx.write("# Memory Index\n\n")
+            idx.write("Cross-agent keyword index. Use `read_file` on backup paths to retrieve full context.\n\n")
+            # Append new entry
+            idx.write(existing_index.replace("# Memory Index\n\n", "").replace(
+                "Cross-agent keyword index. Use `read_file` on backup paths to retrieve full context.\n\n", ""))
+            idx.write(f"\n## {label} ({os.path.basename(backup_path)})\n")
+            idx.write(f"Agent context: `.marvin/memories/{os.path.basename(agent_ctx_path)}`\n")
+            idx.write(f"Full backup: `{backup_path}`\n")
+            if files_read:
+                idx.write(f"Files read: {', '.join(f'`{f}`' for f in sorted(files_read)[:10])}\n")
+            top_kw = sorted(keyword_index.items(), key=lambda x: -len(x[1]))[:10]
+            if top_kw:
+                idx.write(f"Top keywords: {', '.join(f'`{k}`' for k, _ in top_kw)}\n")
+
     for _round in range(max_rounds):
+        # Context budget check before each LLM call
+        _ctx_tokens = _estimate_tokens(messages)
+        if _ctx_tokens > _CTX_COMPACT_TOKENS:
+            messages = _compact_context(messages)
+            if _context_backup_path:
+                _index_context_backup(_context_backup_path, label=f"round-{_round}")
+            _ctx_tokens = _estimate_tokens(messages)
+
         response, resp_usage = await _provider_chat(messages, tools=tools_schema, stream=False, provider=prov)
         _usage.record_local_turn(prov, resp_usage)
 
@@ -10605,11 +10795,23 @@ async def _run_tool_loop(
 
         for call_id, fn_name, result in results:
             _usage.record(fn_name)
+            result_str = str(result)
+            # Inject context budget warning
+            _ctx_tokens = _estimate_tokens(messages)
+            if _ctx_tokens > _CTX_WARN_TOKENS:
+                remaining = _CTX_COMPACT_TOKENS - _ctx_tokens
+                pct = int((_ctx_tokens / _CTX_MAX_TOKENS) * 100)
+                result_str += (
+                    f"\n\n⏳ CONTEXT BUDGET: ~{_ctx_tokens // 1000}K / {_CTX_MAX_TOKENS // 1000}K tokens used ({pct}%). "
+                    f"~{max(0, remaining) // 1000}K until auto-compaction. "
+                    f"STOP READING and START PRODUCING OUTPUT NOW. "
+                    f"Summarize what you've learned and write your deliverable."
+                )
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": fn_name,
-                "content": str(result),
+                "content": result_str,
             })
 
     # Max rounds — final summary
@@ -11225,7 +11427,7 @@ async def _run_non_interactive():
     # Fall back to _run_tool_loop only for explicit non-SDK providers.
     use_sdk = CopilotClient is not None and LLM_PROVIDER == "copilot"
     # If MARVIN_MODEL is set to a known non-SDK provider, use the tool loop instead
-    _non_sdk_providers = {"gemini", "groq", "ollama", "openai"}
+    _non_sdk_providers = {"gemini", "groq", "ollama", "openai", "kimi"}
     if model_override and model_override in _non_sdk_providers:
         use_sdk = False
 

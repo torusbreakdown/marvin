@@ -7522,6 +7522,8 @@ class ListPlacesParams(BaseModel):
     )
 )
 async def save_place(params: SavePlaceParams) -> str:
+    from datetime import datetime, timezone
+
     places = _load_saved_places()
 
     entry = {k: v for k, v in {
@@ -7533,6 +7535,7 @@ async def save_place(params: SavePlaceParams) -> str:
         "lat": params.lat,
         "lng": params.lng,
         "notes": params.notes,
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }.items() if v}
 
     # Update if label exists, otherwise append

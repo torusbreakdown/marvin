@@ -2940,10 +2940,11 @@ async def install_packages(params: InstallPackagesParams) -> str:
 # ── Sub-agent dispatch ───────────────────────────────────────────────────────
 
 _AGENT_MODELS = {
-    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),       # tests, implementation, review fixes
+    "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),       # implementation, review fixes
     "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),      # code reviews (readonly), plan review
     "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", "gpt-5.2"),             # debugging, QA fixes
     "plan_gen": os.environ.get("MARVIN_CODE_MODEL_PLAN_GEN", "gemini-3-pro-preview"),  # spec/architecture generation
+    "test_writer": os.environ.get("MARVIN_CODE_MODEL_TEST_WRITER", "gemini-3-pro-preview"),  # TDD test writing
     "aux_reviewer": os.environ.get("MARVIN_CODE_MODEL_AUX_REVIEWER", "gpt-5.2"),  # second/third spec reviewer
 }
 
@@ -4167,7 +4168,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
                 test_prompt = _project_context() + "\n\n" + test_prompt
                 test_tasks.append(_run_sub_with_retry(
-                    test_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Test agent {i+1}"))
+                    test_prompt, _AGENT_MODELS["test_writer"], base_timeout=1200, label=f"Test agent {i+1}"))
 
             test_results = await asyncio.gather(*test_tasks)
             failures = []
@@ -4227,7 +4228,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             integ_prompt = _project_context() + "\n\n" + integ_prompt
 
             rc, out, err = await _run_sub_with_retry(
-                integ_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label="Integration test agent")
+                integ_prompt, _AGENT_MODELS["test_writer"], base_timeout=1200, label="Integration test agent")
             if rc != 0:
                 await _notify_pipeline(f"⚠️ Integration test agent failed (exit {rc})")
             await _notify_pipeline(f"✅ Phase 2b complete — integration tests written")

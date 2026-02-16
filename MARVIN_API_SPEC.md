@@ -217,13 +217,16 @@ the high-tier model in read-only mode.
 
 ### 4.3 Model Tiers
 
-The pipeline uses three model tiers, each configurable via environment variable:
+The pipeline uses six model tiers, each configurable via environment variable:
 
 | Tier | Env Var | Default | Used For |
 |------|---------|---------|----------|
-| High | `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | Code reviews, QA (read-only) |
-| Low | `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Tests, implementation, review fixes |
-| Plan | `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Spec, architecture, debugging |
+| High | `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | Code reviews, QA (read-only), plan review |
+| Low | `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Implementation, review fixes |
+| Plan | `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Debugging, QA fixes |
+| Plan Gen | `MARVIN_CODE_MODEL_PLAN_GEN` | `gemini-3-pro-preview` | Spec, UX, architecture generation |
+| Test Writer | `MARVIN_CODE_MODEL_TEST_WRITER` | `gemini-3-pro-preview` | TDD test writing (unit + integration) |
+| Aux Reviewer | `MARVIN_CODE_MODEL_AUX_REVIEWER` | `gpt-5.2` | Additional spec reviewers (parallel) |
 
 ### 4.4 Ticket System (`tk`)
 
@@ -498,9 +501,12 @@ Can also be set via the `--provider` CLI flag in interactive mode.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MARVIN_MODEL` | *(none)* | Override model for non-interactive mode |
-| `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | High tier: complex tasks (code review, QA) |
-| `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Low tier: routine tasks (tests, impl, fixes) |
-| `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Plan tier: spec, architecture, debugging |
+| `MARVIN_CODE_MODEL_HIGH` | `claude-opus-4.6` | High tier: code review, QA, plan review |
+| `MARVIN_CODE_MODEL_LOW` | `gpt-5.3-codex` | Low tier: implementation, review fixes |
+| `MARVIN_CODE_MODEL_PLAN` | `gpt-5.2` | Plan tier: debugging, QA fixes |
+| `MARVIN_CODE_MODEL_PLAN_GEN` | `gemini-3-pro-preview` | Plan gen tier: spec, UX, architecture |
+| `MARVIN_CODE_MODEL_TEST_WRITER` | `gemini-3-pro-preview` | Test writer tier: TDD test writing |
+| `MARVIN_CODE_MODEL_AUX_REVIEWER` | `gpt-5.2` | Aux reviewer: parallel spec reviewers |
 
 ### Provider API Keys
 

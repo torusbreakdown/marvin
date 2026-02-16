@@ -2941,8 +2941,10 @@ async def install_packages(params: InstallPackagesParams) -> str:
 
 _AGENT_MODELS = {
     "codex": os.environ.get("MARVIN_CODE_MODEL_LOW", "gpt-5.3-codex"),       # tests, implementation, review fixes
-    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),      # code reviews (readonly)
-    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", "gpt-5.2"),             # spec, architecture, debugging
+    "opus": os.environ.get("MARVIN_CODE_MODEL_HIGH", "claude-opus-4.6"),      # code reviews (readonly), plan review
+    "plan": os.environ.get("MARVIN_CODE_MODEL_PLAN", "gpt-5.2"),             # debugging, QA fixes
+    "plan_gen": os.environ.get("MARVIN_CODE_MODEL_PLAN_GEN", "gemini-3-pro-preview"),  # spec/architecture generation
+    "aux_reviewer": os.environ.get("MARVIN_CODE_MODEL_AUX_REVIEWER", "gpt-5.2"),  # second/third spec reviewer
 }
 
 
@@ -3427,10 +3429,11 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         spec_path = os.path.join(wd, ".marvin", "spec.md")
         also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
         review_prompt = (
-            f"You are a SPEC VERIFICATION REVIEWER. Your job is to verify that the "
-            f"generated document '{rel_doc}' is consistent with the upstream reference "
-            f"documents"
-            + (" and the product spec (.marvin/spec.md)" if also_check_spec else "")
+            f"You are a SPEC COMPLIANCE AUDITOR. The files in .marvin/upstream/ are the "
+            f"AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM. The generated "
+            f"document '{rel_doc}' must implement EVERY requirement from upstream EXACTLY "
+            f"as specified — no simplifications, no omissions, no reinterpretations"
+            + (" — and must also be consistent with the product spec (.marvin/spec.md)" if also_check_spec else "")
             + ".\n\n"
             "STEPS:\n"
             f"1. Read {rel_doc} completely with read_file.\n"
@@ -3438,19 +3441,24 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             + "\n".join(f"   - {f}" for f in upstream_files) + "\n"
             + (f"3. Read .marvin/spec.md — the generated product spec.\n" if also_check_spec else "")
             + f"{'4' if also_check_spec else '3'}. Cross-check EVERY claim in the generated document against the upstream "
-            "   references"
-            + (" and the spec" if also_check_spec else "")
+            "   specs"
+            + (" and the product spec" if also_check_spec else "")
             + ". Look for:\n"
+            "   - **Simplifications** — upstream describes X in detail but the generated doc "
+            "     says 'simplified version' or 'we can add later' — this is ALWAYS critical\n"
+            "   - **Omissions** — upstream specifies a feature/endpoint/format that the "
+            "     generated doc doesn't mention at all — this is ALWAYS critical\n"
             "   - **Contradictions** — the generated doc says X but upstream says Y\n"
             "   - **Wrong labels/names** — e.g. using 'Assistant:' when upstream says 'Marvin:'\n"
-            "   - **Missing critical details** — upstream specifies something important that "
-            "     the generated doc ignores or gets wrong\n"
             "   - **Format mismatches** — streaming formats, event names, field names, etc.\n"
             "   - **Invented behavior** — the generated doc describes behavior not in upstream\n"
             "   - **Missing newline/whitespace handling** — upstream often specifies exact "
             "     string processing rules\n"
             + ("   - **Spec inconsistency** — the design contradicts or omits requirements from spec.md\n" if also_check_spec else "")
             + "\n"
+            "CRITICAL RULE: If the generated document 'simplifies' or omits ANY upstream "
+            "requirement, that is a CRITICAL finding. The upstream docs describe a real system "
+            "that already works — every detail matters.\n\n"
             "OUTPUT FORMAT — for each finding:\n"
             "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
             "SEVERITY: critical/major/minor\n\n"
@@ -3462,25 +3470,55 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
             await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
 
-            rc, rev_out, rev_err = await _run_sub_with_retry(
-                review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
-                label=f"Spec review: {doc_label} R{review_round}", readonly=True)
+            if review_round == 1:
+                # First round: 3 parallel reviewers for maximum coverage
+                review_tasks = [
+                    _run_sub_with_retry(
+                        review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
+                        label=f"Spec review (plan): {doc_label} R1", readonly=True),
+                    _run_sub_with_retry(
+                        review_prompt, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
+                        label=f"Spec review (aux1): {doc_label} R1", readonly=True),
+                    _run_sub_with_retry(
+                        review_prompt, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
+                        label=f"Spec review (aux2): {doc_label} R1", readonly=True),
+                ]
+                results = await asyncio.gather(*review_tasks)
+                # Merge all reviewer outputs
+                all_outputs = []
+                all_verified = True
+                for rc, rev_out, rev_err in results:
+                    if rev_out and "SPEC_VERIFIED" not in rev_out:
+                        all_verified = False
+                        all_outputs.append(rev_out)
+                if all_verified:
+                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (all 3 reviewers agree)")
+                    break
+                rev_out = "\n\n---\n\n".join(all_outputs) if all_outputs else "(no output)"
+            else:
+                # Subsequent rounds: single opus reviewer
+                rc, rev_out, rev_err = await _run_sub_with_retry(
+                    review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
+                    label=f"Spec review: {doc_label} R{review_round}", readonly=True)
 
-            if "SPEC_VERIFIED" in (rev_out or ""):
-                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
-                break
+                if "SPEC_VERIFIED" in (rev_out or ""):
+                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
+                    break
 
             # Dispatch a fixer agent (plan tier) to update the document
             fix_prompt = (
                 _project_context() + "\n\n"
                 f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
-                "The following inconsistencies were found between the generated document "
-                "and the upstream reference specs. Fix ALL critical and major issues by "
-                "updating the generated document.\n\n"
+                "The following violations were found between the generated document "
+                "and the AUTHORITATIVE upstream specs. The upstream specs describe an "
+                "EXISTING SYSTEM — they are always right. Fix ALL critical and major "
+                "issues by updating the generated document to EXACTLY match upstream.\n\n"
+                "DO NOT 'simplify' — if upstream says it, the generated doc must say it.\n"
+                "DO NOT omit features — if upstream has it, the generated doc must have it.\n\n"
                 f"{rev_out or '(no output)'}\n\n"
                 "INSTRUCTIONS:\n"
                 f"1. Read {rel_doc} and ALL upstream files in .marvin/upstream/\n"
-                "2. Fix each SPEC_MISMATCH by updating the generated document to match upstream\n"
+                "2. Fix each SPEC_MISMATCH by updating the generated document to match upstream EXACTLY\n"
                 "3. Use apply_patch or edit the file to make corrections\n"
                 "4. Do NOT change upstream reference files — only update the generated document\n"
                 "5. Preserve the overall structure and completeness of the document\n"
@@ -3822,13 +3860,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             upstream_summary = _upstream_summary()
             if upstream_summary:
                 upstream_injection = (
-                    "UPSTREAM INTEGRATION SPECS:\n"
-                    "The following upstream reference documents define the integration contract "
-                    "for this project. READ THEM CAREFULLY with read_file before writing. "
-                    "Your output MUST be consistent with these documents — use the exact formats, "
-                    "field names, labels, and patterns they specify. If the upstream spec says to "
-                    "use specific labels (e.g. 'User:' / 'Marvin:'), use those exact labels. "
-                    "If it specifies a streaming format, match it exactly.\n\n"
+                    "MANDATORY UPSTREAM SPECIFICATIONS — EXISTING SYSTEM:\n"
+                    "The files in .marvin/upstream/ are NOT suggestions or recommendations. "
+                    "They are the AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM "
+                    "that you are building against. This system already exists, is deployed, "
+                    "and works. You CANNOT simplify, reinterpret, or omit anything from these "
+                    "specs — if you do, your code will not work with the real system.\n\n"
+                    "RULES:\n"
+                    "- Every format, label, field name, streaming protocol, and behavior "
+                    "described in upstream is a HARD REQUIREMENT, not a recommendation\n"
+                    "- If upstream says the format is X, you MUST use exactly X — not a 'simplified version'\n"
+                    "- If upstream describes 20 features, you must support all 20 — not 'the most important ones'\n"
+                    "- Do NOT say 'for simplicity we omit...' or 'we can add this later' — it must work NOW\n"
+                    "- When in doubt, re-read the upstream spec — it is always right\n\n"
                     "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing.\n\n"
                 )
             instructions_injection = f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n" if instructions_ctx else ""
@@ -3868,7 +3912,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 # Run spec — retry until file exists
                 for _spec_attempt in range(1, _MAX_RETRIES + 1):
-                    spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Product spec")
+                    spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Product spec")
                     if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000:
                         spec_size = os.path.getsize(spec_path)
                         await _notify_pipeline(f"✅ spec.md ready ({spec_size} bytes)")
@@ -3919,7 +3963,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Run UX after spec (sequential — UX reads spec.md) — retry until file exists
             for _ux_attempt in range(1, _MAX_RETRIES + 1):
-                ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="UX design")
+                ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="UX design")
                 if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 1000:
                     ux_size = os.path.getsize(ux_path)
                     await _notify_pipeline(f"✅ ux.md ready ({ux_size} bytes)")
@@ -4000,11 +4044,13 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             upstream_summary = _upstream_summary()
             if upstream_summary:
                 arch_prompt += (
-                    "UPSTREAM INTEGRATION SPECS:\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the design. "
-                    "Your architecture MUST be consistent with the upstream integration contract. "
-                    "Pay special attention to: subprocess invocation patterns, streaming formats, "
-                    "data formats, labels, and string processing rules.\n\n"
+                    "MANDATORY UPSTREAM SPECIFICATIONS — EXISTING SYSTEM:\n"
+                    "The files in .marvin/upstream/ document an EXISTING, RUNNING SYSTEM. "
+                    "These are not suggestions — they are hard requirements. Your architecture "
+                    "MUST implement every behavior, format, protocol, and endpoint described "
+                    "in upstream EXACTLY as specified. Do NOT simplify, omit, or reinterpret "
+                    "any upstream requirement. If you deviate, the system will not work.\n"
+                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the design.\n\n"
                 )
             if instructions_ctx:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
@@ -4019,7 +4065,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             )
 
             for _arch_attempt in range(1, _MAX_RETRIES + 1):
-                rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan"], base_timeout=1200, label="Architecture pass")
+                rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Architecture pass")
                 if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
                     design_size = os.path.getsize(design_path)
                     await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")

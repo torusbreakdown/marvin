@@ -11607,7 +11607,9 @@ async def _run_non_interactive():
             design_first=True,
             tdd=True,
         )
-        result = await launch_agent(params)
+        # Call the original function (not the Tool wrapper from SDK)
+        _launch_fn = getattr(launch_agent, '_original_fn', launch_agent)
+        result = await _launch_fn(params)
         print(result)
         print(f"MARVIN_COST:{_usage.cost_json()}", file=sys.stderr)
         return

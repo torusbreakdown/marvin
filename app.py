@@ -5167,6 +5167,7 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
         sub_env.pop("VIRTUAL_ENV", None)
         sub_env.pop("CONDA_PREFIX", None)
         sub_env.pop("GIT_DIR", None)
+        sub_env.pop("MARVIN_TICKET", None)  # review/fixer subs don't use tickets
         sub_env["GIT_DIR"] = git_dir
         sub_env["MARVIN_DEPTH"] = str(int(os.environ.get("MARVIN_DEPTH", "0")) + 1)
         sub_env["MARVIN_MODEL"] = model

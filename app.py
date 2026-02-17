@@ -4317,15 +4317,22 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 # Agent 1: Product spec — features, user stories, API contract, constraints
                 product_prompt = (
-                    "资深产品经理——编写产品规格文档。不写代码、不写架构、不写UX（另有专门代理负责UX）。\n\n用中文输出整个文档。\n\n"
-                    "包含：1) 概述——做什么/为谁/为什么 2) 用户故事及验收标准（正常+错误+边界情况）"
-                    "3) 功能需求及详细行为、API合约（路由/方法/数据结构/状态码）"
-                    "4) 集成合约——精确的子进程调用方式、流式格式、数据格式——"
-                    "从upstream文档中逐字复制关键细节 5) 约束与非功能需求 6) 信息架构\n\n"
+                    "You are a SENIOR PRODUCT MANAGER. Write a comprehensive product specification document. "
+                    "Do NOT write code, architecture, or UX design (a separate agent handles UX).\n\n"
+                    "Write the entire document in English.\n\n"
+                    "Include:\n"
+                    "1) Overview — what it does, who it's for, why it exists\n"
+                    "2) User stories with acceptance criteria (happy path + error + edge cases)\n"
+                    "3) Functional requirements with detailed behavior, API contracts "
+                    "(routes/methods/data structures/status codes)\n"
+                    "4) Integration contract — exact subprocess invocation, streaming format, "
+                    "data formats — COPY critical details VERBATIM from upstream documents\n"
+                    "5) Constraints and non-functional requirements\n"
+                    "6) Information architecture\n\n"
                     f"TASK:\n{params.prompt}\n\n"
                     + upstream_injection + instructions_injection +
-                    "保存为 .marvin/spec.md。分段写入：第一段用 create_file，后续段用 "
-                    "append_file（每次2000-4000词）。务必详尽。\n"
+                    "Save as .marvin/spec.md. Write in segments: first segment with create_file, "
+                    "subsequent segments with append_file (2000-4000 words each). Be exhaustive.\n"
                 )
 
                 # Run spec — retry until file exists
@@ -4343,24 +4350,28 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Agent 2: UX design — screens, components, style guide, visual polish
             ux_prompt = (
-                "资深UX设计师——编写UX设计文档。不写代码、不写架构。\n\n用中文输出整个文档。\n\n"
-                "先用read_file分段阅读.marvin/spec.md（每次200行——文件很大）。"
-                "阅读间用write_note保存关键发现。必须与规格一致。\n\n"
-                "包含：1) UX模式——每个屏幕/视图、组件、布局、交互、"
-                "状态（加载/空/错误/流式/成功）、过渡、断点 "
-                "2) 组件库——所有组件的状态/变体/尺寸 "
-                "3) 样式指南——精确的hex/rgba颜色（亮色+暗色）、排版、间距、"
-                "圆角、阴影、过渡 "
-                "4) 交互模式——悬停/聚焦/激活、键盘快捷键、动画 "
-                "5) 响应式——断点、布局变化、移动端交互 "
-                "6) 无障碍——ARIA、键盘导航、焦点管理、对比度\n\n"
+                "You are a SENIOR UX DESIGNER. Write a comprehensive UX design document. "
+                "Do NOT write code or architecture.\n\n"
+                "Write the entire document in English.\n\n"
+                "First, read .marvin/spec.md in chunks with read_file (200 lines at a time — "
+                "the file is large). Use write_note between reads to save key findings. "
+                "Your design MUST be consistent with the spec.\n\n"
+                "Include:\n"
+                "1) UX patterns — every screen/view, components, layout, interactions, "
+                "states (loading/empty/error/streaming/success), transitions, breakpoints\n"
+                "2) Component library — all components with states/variants/sizes\n"
+                "3) Style guide — exact hex/rgba colors (light+dark), typography, spacing, "
+                "border-radius, shadows, transitions\n"
+                "4) Interaction patterns — hover/focus/active, keyboard shortcuts, animations\n"
+                "5) Responsive — breakpoints, layout changes, mobile interactions\n"
+                "6) Accessibility — ARIA, keyboard navigation, focus management, contrast\n\n"
                 f"TASK:\n{params.prompt}\n\n"
                 + upstream_injection + instructions_injection +
-                "保存为 .marvin/ux.md。分段写入：第一段用create_file，后续用append_file"
-                "（每次2000-4000词）。务必详尽。\n\n"
-                "视觉品质：对标Linear/Vercel/Raycast级别——精确CSS值、微妙渐变、"
-                "多层阴影、流畅200-300ms过渡、恰当的留白节奏、"
-                "排版层次。不要平淡无格式的默认样式。"
+                "Save as .marvin/ux.md. Write in segments: first with create_file, "
+                "then append_file (2000-4000 words each). Be exhaustive.\n\n"
+                "Visual quality: Target Linear/Vercel/Raycast level — exact CSS values, "
+                "subtle gradients, layered shadows, smooth 200-300ms transitions, "
+                "proper whitespace rhythm, typographic hierarchy. No bland unstyled defaults."
             )
 
             # Run UX after spec (sequential — UX reads spec.md) — retry until file exists

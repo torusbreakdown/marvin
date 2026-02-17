@@ -11407,6 +11407,22 @@ async def _run_tool_loop(
                         result_dict = _apply_codex_patch(fn_args)
                         return tc.get("id", ""), fn_name, result_dict.get("textResultForLlm", "")
                     fn_args = {}
+            # Fix double-escaped unicode from models that output \\uXXXX
+            def _fix_unicode_escapes(obj):
+                if isinstance(obj, str) and '\\u' in obj:
+                    import re
+                    def _repl(m):
+                        try:
+                            return chr(int(m.group(1), 16))
+                        except ValueError:
+                            return m.group(0)
+                    return re.sub(r'\\u([0-9a-fA-F]{4})', _repl, obj)
+                elif isinstance(obj, dict):
+                    return {k: _fix_unicode_escapes(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [_fix_unicode_escapes(v) for v in obj]
+                return obj
+            fn_args = _fix_unicode_escapes(fn_args)
             func = tool_map.get(fn_name)
             if not func:
                 return tc.get("id", ""), fn_name, f"Unknown tool: {fn_name}"

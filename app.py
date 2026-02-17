@@ -5485,10 +5485,10 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     writable_code = [f for f in code_files if not f.startswith(params.ref_dir)]
 
     active_reviewers = [
-        ("plan", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
-        ("aux1", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
-        ("aux2", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
-        ("quality", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), True),
+        ("plan", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-opus-4.5"), False),
+        ("aux1", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-opus-4.5"), False),
+        ("aux2", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-opus-4.5"), False),
+        ("quality", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-opus-4.5"), True),
     ]
 
     import secrets as _secrets

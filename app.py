@@ -3536,11 +3536,11 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 continue
             try:
                 content = open(fp).read()
-                # Include first 3000 chars of each upstream doc inline
+                # Include full upstream docs inline — models with large context
+                # windows can handle 100K+ chars; critical for spec accuracy
                 summaries.append(
                     f"--- .marvin/upstream/{f} ({len(content)} bytes) ---\n"
-                    + content[:3000]
-                    + ("\n[... truncated — read full file for complete details]\n" if len(content) > 3000 else "\n")
+                    + content + "\n"
                 )
             except Exception:
                 pass

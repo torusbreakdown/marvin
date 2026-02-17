@@ -34,12 +34,20 @@ The LLM streams tool call arguments token-by-token. When a tool call argument is
 
 ---
 
-## 4. File Read Guard (10KB limit)
+## 4. File Read Guard (10KB limit) and Context Budget
 
 If an agent tries to `read_file` on a large file (>10KB) without specifying `start_line`/`end_line`, return an error with:
 - The total line count of the file
 - Examples of how to use line ranges
 - DO NOT read the whole file — it fills the context window and degrades LLM performance
+
+Additionally, `read_file` tracks cumulative characters returned per session:
+- **Warning at 200K chars**: Reads approaching the limit are truncated to fit,
+  with a warning telling the agent to use smaller ranges and produce output
+- **Hard block at 300K chars**: Content is dumped to `.marvin/memories/dump-{file}.txt`
+  and the agent receives an error directing it to read in small chunks
+- This is critical for the Copilot SDK path, which has ~128K token context
+  and no external budget management (the SDK drives its own tool loop)
 
 ---
 
@@ -115,6 +123,12 @@ When spawning sub-agents, these env vars MUST be set:
 - `MARVIN_TICKET`: Parent ticket ID. Agent must create a child ticket before writing files.
 - `MARVIN_READONLY`: `"1"` for review-only agents (blocks write tools).
 - `MARVIN_SUBAGENT_LOG`: Path to JSONL log file for tool call auditing.
+- `MARVIN_WRITABLE_FILES`: Comma-separated relative paths the agent may write to.
+  Agents with this set bypass the ticket gate (no `tk create` required) and have
+  dangerous tools (`run_command`, `git_commit`, etc.) stripped. Used for fixer agents.
+- `LLM_PROVIDER`: Provider to use (`copilot`, `kimi`, `gemini`, `groq`, `openai`, `ollama`).
+  Known Copilot SDK model names are auto-detected and routed through `copilot` provider.
+  OpenRouter models (containing `/`) are routed through `kimi` provider with `KIMI_MODEL` override.
 
 ---
 

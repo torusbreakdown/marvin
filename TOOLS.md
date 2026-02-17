@@ -216,6 +216,13 @@ All tool calls are JSON objects with named parameters. Arguments must NEVER be a
   - `start_line`: `int | None` (default: None) — Start line (1-based)
   - `end_line`: `int | None` (default: None) — End line (1-based, inclusive)
 
+**Budget guards**:
+  - Files >10KB without `start_line`/`end_line` return an error with line count
+  - Session-level budget tracks cumulative chars returned:
+    - **200K chars**: warning injected, reads truncated to fit
+    - **300K chars**: hard block, content dumped to `.marvin/memories/dump-{file}.txt`
+  - Works inside all providers including Copilot SDK (which has no external budget)
+
 
 ## Coding — Git Operations
 ### `git_status` (line 2654)

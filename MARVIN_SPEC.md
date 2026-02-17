@@ -131,13 +131,25 @@ Abort the pipeline if all retries are exhausted.
 
 ### 3.4 Review/Fix Loops
 
-After each document phase (1a, 1b), a review cycle runs:
+After each document phase (1a, 1b), a multi-round review cycle runs:
 
-1. **Spec conformance reviewer** (readonly, opus-tier model) checks the
-   generated documents against the original requirements
-2. Findings are compiled into a fix prompt
-3. **Fixer agent** (codex-tier model) applies the fixes
-4. Re-review if not exhausted (max 4 rounds)
+1. **4 parallel reviewers** run every round:
+   - 1 main reviewer (plan-tier model) — checks upstream compliance
+   - 2 auxiliary reviewers (aux_reviewer-tier model) — adversarial, independent
+   - 1 quality reviewer (aux_reviewer-tier model) — evaluates document merit
+2. **Round 1 is adversarial**: all reviewers told the doc is never perfect, must
+   end with `REVIEW_FAILED`. The pass keyword is not mentioned in R1 prompts.
+3. **Clean reviews filtered**: Reviews containing only clean keywords
+   (`SPEC_VERIFIED`, `no issues found`, etc.) are omitted from fixer input.
+   Satisfied reviewers are dropped from subsequent rounds.
+4. **Fixer agent** (fallback-tier model) applies fixes using hardened
+   `DOCUMENT EDITOR` prompt — read→patch→stop, no self-review or grading.
+5. **Git checkpoints**: `git commit` before each review round and after each
+   fixer round. R2+ reviewer prompts include the `git diff` showing what the
+   fixer changed, for accountability.
+6. Review passes only when ALL remaining reviewers are satisfied (max 4 rounds).
+
+Review substages (`_i` through `_iv`) are saved for restartability.
 
 **TDD awareness**: During test-writing phases (2a, 2b), the reviewer will see
 tests that import modules that don't exist yet. This is DESIRED behavior in
@@ -154,6 +166,7 @@ codex         gpt-5.3-codex             Implementation, review fixes
 opus          claude-opus-4.6           Code reviews, adversarial QA, plan review
 plan          gpt-5.2                   Debug loops, QA fixes
 plan_gen      gemini-3-pro-preview      Spec, UX, architecture generation
+fallback      claude-sonnet-4.5         All fixer agents (spec, code, QA)
 test_writer   gemini-3-pro-preview      TDD test writing (unit + integration)
 aux_reviewer  gpt-5.2                   Additional parallel spec reviewers
 ```
@@ -163,6 +176,7 @@ Overridable via environment variables:
 - `MARVIN_CODE_MODEL_HIGH` → opus tier
 - `MARVIN_CODE_MODEL_PLAN` → plan tier
 - `MARVIN_CODE_MODEL_PLAN_GEN` → plan_gen tier
+- `MARVIN_CODE_MODEL_FALLBACK` → fallback tier (fixers)
 - `MARVIN_CODE_MODEL_TEST_WRITER` → test_writer tier
 - `MARVIN_CODE_MODEL_AUX_REVIEWER` → aux_reviewer tier
 

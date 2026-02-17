@@ -662,38 +662,61 @@ stdout-to-file fallback. Ever.
 
 ### 6.13 Context Budget Management
 
-**Problem**: Sub-agents with large context models (e.g. Kimi K2.5 at 228K tokens)
-can exhaust their context window reading large files, leaving no room for output.
-The model produces "Let me continue reading..." instead of useful work.
+**Problem**: Sub-agents can exhaust their context window reading large files,
+leaving no room for output. Different providers have different limits
+(Copilot SDK ≈ 128K tokens, Kimi K2.5 ≈ 228K tokens).
 
-**Solution**: The tool loop implements a three-tier budget system:
-1. **Warning at 180K tokens**: Inject a warning into tool results telling the agent
-   to stop reading and start producing output
-2. **Compaction at 200K tokens**: Dump full context to `.marvin/logs/context-backup-{ts}.jsonl`,
-   replace with system message + compact summary + last 8 messages
-3. **read_file budget gating**: If a `read_file` result would push context past
-   the warning threshold, truncate the result and tell the agent to use smaller
-   `start_line`/`end_line` ranges
+**Solution**: Two independent budget systems ensure agents stay within limits:
+
+#### A. Tool-loop budget (non-SDK providers only)
+1. **Warning at 180K tokens**: Inject warning into tool results
+2. **Compaction at 200K tokens**: Dump full context to
+   `.marvin/logs/context-backup-{ts}.jsonl`, replace with system message +
+   compact summary + last 8 messages
+3. **read_file gating**: If result would push context past warning threshold,
+   truncate and tell agent to use smaller ranges
+
+#### B. read_file session budget (all providers, including Copilot SDK)
+The `read_file` tool itself tracks cumulative characters returned per session:
+- **`_READ_BUDGET_WARN` = 200K chars** (~50K tokens): Warning injected into
+  results, reads approaching limit are truncated to fit
+- **`_READ_BUDGET_MAX` = 300K chars** (~75K tokens): Hard block — content is
+  dumped to `.marvin/memories/dump-{filename}.txt` and an error returned
+  directing the agent to read in smaller ranges
+- This guard works inside the Copilot SDK's tool loop where the tool-loop
+  budget (A) cannot operate, since the SDK drives its own conversation
 
 After compaction, the deterministic memory indexer extracts keywords, file references,
 and findings from the backup and writes them to `.marvin/memories/INDEX.md` for
 cross-agent recovery.
 
-### 6.14 Review History and Adversarial R1
+### 6.14 Review History and Multi-Reviewer Rounds
 
 **Problem**: Spec reviewers rubber-stamp documents without finding real issues,
-especially when the model knows the "pass" keyword.
+especially when the model knows the "pass" keyword. Fixers cheat by writing
+themselves a clean review and declaring "REVIEW PASSED".
 
 **Solution**:
-- **Round 1 is adversarial**: 3 parallel reviewers are told the spec is NEVER
-  perfect and must end with `REVIEW_FAILED`. The pass keyword is not mentioned
-  in the R1 prompt so the model cannot accidentally (or deliberately) use it.
-- **Rounds 2–4 can pass**: Single reviewer checks if fixer addressed issues.
-  Can respond `SPEC_VERIFIED` to end the loop.
-- **All findings are collated**: Every round's output is appended to
-  `.marvin/review-history-{doc}.md`. Both reviewers and fixers are told where
-  to find prior round findings.
-- **Empty output crashes the pipeline**: If all 3 R1 reviewers return empty
+- **All rounds use 4 parallel reviewers**: Main plan-tier reviewer + 2 aux-tier
+  reviewers + 1 quality reviewer. All 4 run every round.
+- **Round 1 is adversarial**: Reviewers are told the doc is NEVER perfect and
+  must end with `REVIEW_FAILED`. The pass keyword is not mentioned in the R1
+  prompt so the model cannot accidentally (or deliberately) use it.
+- **Rounds 2+ can pass**: Reviewers check if fixer addressed prior issues.
+  A reviewer returning `SPEC_VERIFIED` (or equivalent clean keywords) is
+  dropped from subsequent rounds. Review passes only when ALL remaining
+  reviewers are satisfied.
+- **Clean reviews filtered**: Reviews containing only `SPEC_VERIFIED` / clean
+  keywords are omitted from fixer input — fixer sees only actionable issues.
+- **Git checkpoints**: `git add -A && git commit` runs before each review round
+  and after each fixer round, with descriptive messages. R2+ reviewer prompts
+  include the `git diff` of the fixer's changes for accountability.
+- **Hardened fixer prompts**: Fixers use a strict `DOCUMENT EDITOR` role:
+  read the file → apply patches → stop. No analysis, no self-review, no
+  grading, no summary. Must fix ALL cited issues in a single pass.
+- **All findings collated**: Every round's output is appended to
+  `.marvin/review-history-{doc}.md`. Both reviewers and fixers see prior rounds.
+- **Empty output crashes the pipeline**: If all reviewers return empty
   output, the pipeline aborts with `RuntimeError` rather than silently passing.
 
 ### 6.15 Write Restrictions for Design-Phase Agents
@@ -705,6 +728,10 @@ access and would create implementation files instead of just fixing docs.
 write to (comma-separated relative paths). Additionally, these agents have
 `run_command`, `git_commit`, `git_checkout`, `write_note`, `install_packages`,
 `launch_agent`, and `launch_research_agent` stripped from their tool set.
+
+Agents with `MARVIN_WRITABLE_FILES` set also bypass the ticket gate — they do
+not need to create a ticket before writing, since they are restricted to specific
+doc files and cannot cause side effects.
 
 ---
 

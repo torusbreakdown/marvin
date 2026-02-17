@@ -624,7 +624,11 @@ reference only.
 - `set_working_dir(path)` / `get_working_dir()`
 - `create_file(path, content)` — Create new file (fails if exists)
 - `append_file(path, content)` — Append to existing file
-- `read_file(path, start_line?, end_line?)` — Read file (or line range)
+- `read_file(path, start_line?, end_line?)` — Read file (or line range).
+  **Context budget**: tracks cumulative chars returned per session. Warning
+  injected at 200K chars; hard-blocked at 300K chars (content dumped to
+  `.marvin/memories/dump-{file}.txt` with error directing agent to use smaller
+  ranges). This guard operates inside all providers including Copilot SDK.
 - `apply_patch(path, old_str, new_str)` — Search-and-replace edit
 - `file_apply_patch(path, patch)` — Multi-hunk patch (Notes only)
 - `code_grep(pattern, glob?, context_lines?, max_results?)` — Ripgrep search

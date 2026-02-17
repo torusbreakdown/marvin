@@ -3834,6 +3834,16 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         _ROUND_NUMERALS = {1: "i", 2: "ii", 3: "iii", 4: "iv"}
 
+        # Initialize active reviewers (all 4 start active; dropped when SPEC_VERIFIED)
+        active_reviewers = [
+            ("plan", _AGENT_MODELS["opus"], False),
+            ("aux1", _AGENT_MODELS["aux_reviewer"], False),
+            ("aux2", _AGENT_MODELS["aux_reviewer"], False),
+            ("quality", _AGENT_MODELS["aux_reviewer"], True),
+        ]
+        def _reviewer_check_done(rc, out, err):
+            return len((out or "").strip()) > 200
+
         for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
             # Check if this substage is already done (allows restart from middle)
             substage = f"{phase_prefix}_{_ROUND_NUMERALS.get(review_round, str(review_round))}" if phase_prefix else ""
@@ -3867,15 +3877,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note + diff_note
 
             if review_round == 1:
-                # First round: 4 parallel adversarial reviewers (3 upstream compliance + 1 quality)
-                def _reviewer_check_done(rc, out, err):
-                    return len((out or "").strip()) > 200
-                active_reviewers = [
-                    ("plan", _AGENT_MODELS["opus"], False),
-                    ("aux1", _AGENT_MODELS["aux_reviewer"], False),
-                    ("aux2", _AGENT_MODELS["aux_reviewer"], False),
-                    ("quality", _AGENT_MODELS["aux_reviewer"], True),  # True = quality reviewer
-                ]
+                pass  # active_reviewers already initialized before loop
 
             # Build per-reviewer prompts (quality gets its own prompt, others get standard)
             review_tasks = []

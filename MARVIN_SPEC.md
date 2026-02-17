@@ -217,9 +217,28 @@ tickets.
 
 **Exemptions**:
 - Readonly agents (`MARVIN_READONLY=1`) are exempt from ticket gating
+- Agents with `MARVIN_WRITABLE_FILES` set bypass ticket gating (restricted to named files)
 - The ticket must be a child of the parent ticket (via `--parent` flag)
 
-### 4.3 Tool Call Logging
+### 4.3 Standalone Code Review (`review_codebase`)
+
+The `review_codebase` tool runs the same 4-stage review/fix loop used in the
+pipeline, but as a standalone tool against any existing codebase:
+
+1. Creates a unique git branch `review/YYYYMMDD-HHMMSS`
+2. Reads reference docs from a `ref/` directory (explanatory context — NOT
+   ground truth). The CODE is ground truth; ref docs explain intent.
+3. Runs 4 parallel reviewers per round (plan + 2 aux + quality)
+4. Dispatches a fixer for issues found (hardened DOCUMENT EDITOR prompt)
+5. Git checkpoint commits before each review and after each fixer
+6. R2+ reviewers receive git diff of fixer's changes
+7. Reviewers returning clean results are dropped from subsequent rounds
+8. Repeats until all reviewers satisfied or `max_rounds` exhausted
+
+Parameters: `working_dir`, `ref_dir` (default `.ref`), `focus`
+(`all`/`backend`/`frontend`/`tests`/glob), `max_rounds` (1-8, default 4).
+
+### 4.4 Tool Call Logging
 
 When `MARVIN_SUBAGENT_LOG` is set, every tool call is logged to the specified
 JSONL file. Each entry contains:

@@ -733,6 +733,25 @@ Agents with `MARVIN_WRITABLE_FILES` set also bypass the ticket gate — they do
 not need to create a ticket before writing, since they are restricted to specific
 doc files and cannot cause side effects.
 
+### 6.16 Standalone Code Review (`review_codebase`)
+
+**Problem**: The pipeline's review/fix loop is tightly coupled to the design-first
+pipeline phases. Users need the same review quality for existing codebases without
+running the full pipeline.
+
+**Solution**: A standalone `review_codebase` tool that:
+- Creates its own git branch (`review/YYYYMMDD-HHMMSS`) to isolate changes
+- Takes a `ref_dir/` with explanatory docs (spec, architecture, etc.) — these
+  explain intent but are NOT ground truth. The CODE is ground truth.
+- Runs the same 4 parallel reviewers per round (plan + 2 aux + quality)
+- Uses the same hardened fixer prompt (DOCUMENT EDITOR — patch only, no self-review)
+- Same git checkpoint logic (commit before review, after fixer)
+- Same reviewer drop logic (clean → dropped from subsequent rounds)
+- Same R2+ diff injection for accountability
+- Self-contained sub-agent dispatch (does not depend on `launch_agent` internals)
+- Uses the same model tiers: opus for plan reviewer, aux_reviewer for aux/quality,
+  fallback for fixer
+
 ---
 
 ## 7. Module Structure (Recommended for Node.js)

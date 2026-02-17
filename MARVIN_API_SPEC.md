@@ -665,6 +665,9 @@ reference only.
 
 ### Agent Dispatch & Tickets
 - `launch_agent(ticket_id, prompt, model?, working_dir?, design_first?, tdd?)` — Spawn sub-agent
+- `review_codebase(working_dir, ref_dir?, focus?, max_rounds?)` — Standalone 4-stage code review.
+  Creates git branch `review/YYYYMMDD-HHMMSS`, runs 4 parallel reviewers per round (plan + 2 aux
+  + quality), dispatches fixer, repeats until clean. CODE is ground truth; ref docs explain intent.
 - `tk(args)` — Run the `tk` ticket CLI (create, start, close, show, ls, dep, add-note, blocked, dep-tree)
 - `create_ticket(title, type?, priority?, parent?)` — Create a task ticket (wrapper around `tk create`)
 - `ticket_add_dep(ticket_id, depends_on)` / `ticket_start(ticket_id)` / `ticket_close(ticket_id)` / `ticket_add_note(ticket_id, note)` / `ticket_show(ticket_id)` / `ticket_list()` / `ticket_dep_tree()`

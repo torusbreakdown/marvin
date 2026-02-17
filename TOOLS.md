@@ -305,6 +305,41 @@ All tool calls are JSON objects with named parameters. Arguments must NEVER be a
   - Spawns a subprocess with MARVIN_READONLY=1, so all write tools are stripped
   - 600s timeout, depth-limited like launch_agent
 
+### `review_codebase`
+**Description**: Run a standalone 4-stage code review on an existing codebase. Creates a
+unique git branch, runs 4 parallel reviewers per round, dispatches a fixer for issues found,
+and repeats until clean or max rounds reached. Requires a ref/ directory with docs explaining
+the codebase intent. CODE is ground truth; ref docs are explanatory context only.
+**Parameters** (ReviewCodebaseParams):
+  - `working_dir`: `str` (required) — Root directory of the codebase to review
+  - `ref_dir`: `str` (default: '.ref') — Directory containing reference docs (relative to
+    working_dir). Any number of .md/.txt files — treated as explanatory context (NOT ground
+    truth). The CODE is ground truth; ref docs explain intent, spec, architecture.
+  - `focus`: `str` (default: 'all') — Review focus: 'all', 'backend', 'frontend', 'tests',
+    or a glob pattern to match specific files
+  - `max_rounds`: `int` (default: 4, range: 1-8) — Maximum review/fix rounds
+**Behavior**:
+  1. Creates git branch `review/YYYYMMDD-HHMMSS` for the review
+  2. Collects ref docs from ref_dir/ and code files from working_dir
+  3. Round 1: 4 parallel adversarial reviewers (plan + 2 aux + quality) — must find issues
+  4. Clean reviews (REVIEW_CLEAN/SPEC_VERIFIED) cause that reviewer to be dropped
+  5. Fixer agent applies patches (hardened DOCUMENT EDITOR prompt — no self-review)
+  6. Git checkpoint commits before each review round and after each fixer
+  7. R2+ reviewers receive git diff of fixer's changes for accountability
+  8. Repeats until all reviewers satisfied or max_rounds exhausted
+  9. Returns summary with per-round results
+**Reviewer model mapping**:
+  - plan reviewer: opus tier (`MARVIN_CODE_MODEL_HIGH`)
+  - aux1, aux2, quality: aux_reviewer tier (`MARVIN_CODE_MODEL_AUX_REVIEWER`)
+  - fixer: fallback tier (`MARVIN_CODE_MODEL_FALLBACK`)
+**Review criteria** (flags only genuine issues):
+  - Spec violations — code doesn't match ref doc behavior
+  - Security — XSS, injection, unsafe operations
+  - Logic bugs — wrong conditions, race conditions, data loss
+  - Missing error handling — unhandled exceptions
+  - Integration bugs — wrong API shapes, protocol mismatches
+  - Test gaps — untested critical paths, inappropriate mocking
+
 
 ## Steam Gaming
 ### `steam_search` (line 4546)

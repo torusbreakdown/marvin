@@ -5098,6 +5098,13 @@ class ReviewCodebaseParams(BaseModel):
         description="Review focus: 'all', 'backend', 'frontend', 'tests', or a glob pattern"
     )
     max_rounds: int = Field(default=4, description="Maximum review/fix rounds (1-8)", ge=1, le=8)
+    context: str = Field(
+        default="",
+        description="Additional context for reviewers. Use this to guide the review focus, "
+        "e.g. 'This is an early prototype — only physics and networking are implemented. "
+        "Focus on code quality of what exists, not missing features.' "
+        "Or 'Just finished the auth module — review that specifically.'"
+    )
 
 
 @define_tool(
@@ -5288,56 +5295,72 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     ref_listing = "\n".join(f"  - {f}" for f in ref_files)
     code_listing = "\n".join(f"  - {f}" for f in sorted(code_files))
 
+    context_block = ""
+    if params.context:
+        context_block = f"\nREVIEWER CONTEXT (from the developer):\n{params.context}\n\n"
+
     review_prompt_r1 = (
-        "CODE REVIEW AUDIT. Review the existing codebase against reference documents.\n\n"
-        f"Reference docs (explain intent/spec — read in chunks, 200 lines at a time):\n{ref_listing}\n\n"
-        f"Code files (ground truth — this is what is actually implemented):\n{code_listing}\n\n"
-        "The code is the ground truth. Reference docs explain what the code SHOULD do.\n"
-        "Your job: find where code deviates from documented intent, has bugs, security issues, "
-        "missing error handling, or spec violations.\n\n"
+        "CODE REVIEW AUDIT. Deep-dive into the existing source code.\n\n"
+        f"Reference docs (background context — NOT a checklist):\n{ref_listing}\n\n"
+        f"Code files to review (THIS IS THE GROUND TRUTH):\n{code_listing}\n\n"
+        f"{context_block}"
+        "⚠️ CRITICAL INSTRUCTION: The SOURCE CODE is what you are reviewing. "
+        "Reference docs provide context about the project's goals and architecture, "
+        "but do NOT treat them as a feature checklist. Many features may not be "
+        "implemented yet — that is expected and NOT a finding.\n\n"
+        "Your job: deeply review the code THAT EXISTS. Look for:\n"
+        "1. **Bugs in existing code** — logic errors, off-by-one, race conditions, data corruption\n"
+        "2. **Security issues** — XSS, injection, buffer overflows, unsafe operations\n"
+        "3. **Missing error handling** — unhandled exceptions, null derefs, resource leaks\n"
+        "4. **Architectural problems** — patterns in existing code that would block or "
+        "complicate planned features (ref docs explain what's planned)\n"
+        "5. **Integration risks** — existing APIs/interfaces that don't match the documented "
+        "contracts, making future integration harder\n"
+        "6. **Test gaps** — untested critical paths in code that EXISTS\n\n"
+        "Do NOT flag:\n"
+        "- Features described in docs but not yet implemented\n"
+        "- Missing modules, systems, or subsystems that don't exist yet\n"
+        "- Code style, naming conventions, minor refactors\n"
+        "- Missing comments or documentation\n\n"
         "Methodology:\n"
-        "1) Read reference docs first (in chunks — use start_line/end_line). Use write_note to save key findings.\n"
-        "2) Read each code file. Compare against reference doc expectations.\n"
-        "3) Report issues found.\n\n"
-        "Review criteria — only flag real issues:\n"
-        "1. **Spec violations** — code doesn't match documented behavior\n"
-        "2. **Security** — XSS, injection, unsafe operations, missing escaping\n"
-        "3. **Logic bugs** — wrong conditions, off-by-one, race conditions, data loss\n"
-        "4. **Missing error handling** — unhandled exceptions, missing null checks\n"
-        "5. **Integration bugs** — wrong API formats, protocol mismatches\n"
-        "6. **Test gaps** — untested critical paths, mocking things that shouldn't be mocked\n\n"
-        "Do NOT flag: code style, naming, minor refactors, missing comments.\n\n"
-        "Format for each issue: FILE:LINE — SEVERITY (critical/major/minor) — description\n\n"
-        "First pass review — code is never perfect. Find every issue. "
-        "End with REVIEW_FAILED + issue count.\n"
+        "1) Skim reference docs for architectural context (read in chunks). "
+        "Use write_note to save key architecture decisions.\n"
+        "2) Read EVERY code file thoroughly. This is the main event.\n"
+        "3) For each issue found in actual code, report it.\n\n"
+        "Format: FILE:LINE — SEVERITY (critical/major/minor) — description\n\n"
+        "End with REVIEW_FAILED + issue count, or REVIEW_CLEAN if no issues.\n"
         "Read only — do not edit files or run commands.\n"
     )
 
     review_prompt_quality = (
-        "CODE QUALITY REVIEW. Independently evaluate code quality.\n\n"
+        "CODE QUALITY REVIEW. Deep-dive into existing code quality.\n\n"
         f"Code files:\n{code_listing}\n\n"
-        "Evaluate:\n"
+        f"{context_block}"
+        "Review ONLY the code that exists. Do NOT flag missing features or unimplemented modules.\n\n"
+        "Evaluate the code that IS written:\n"
         "1) Maintainability — clear structure, reasonable complexity?\n"
-        "2) Robustness — error handling, edge cases?\n"
-        "3) Consistency — naming, patterns, conventions uniform?\n"
-        "4) Performance — obvious N+1 queries, blocking I/O, memory leaks?\n"
-        "5) Testability — can code be tested without excessive mocking?\n\n"
-        "Format for each issue: FILE:LINE — SEVERITY (critical/major/minor) — description\n\n"
-        "Find every issue. End with REVIEW_FAILED + count.\n"
+        "2) Robustness — error handling, edge cases in existing code?\n"
+        "3) Consistency — naming, patterns, conventions uniform across what exists?\n"
+        "4) Performance — obvious N+1 queries, blocking I/O, memory leaks in existing code?\n"
+        "5) Testability — can existing code be tested without excessive mocking?\n\n"
+        "Format: FILE:LINE — SEVERITY (critical/major/minor) — description\n\n"
+        "End with REVIEW_FAILED + count, or REVIEW_CLEAN if no issues.\n"
         "Read only — do not edit files or run commands.\n"
     )
 
     review_prompt_r2 = (
         "Follow-up code review after fixes were applied.\n\n"
-        f"Reference docs:\n{ref_listing}\n\n"
+        f"Reference docs (background context):\n{ref_listing}\n\n"
         f"Code files:\n{code_listing}\n\n"
+        f"{context_block}"
         "Read .marvin/review-history-code.md for all prior findings.\n\n"
         "CRITICAL: Check every prior finding. If any critical/major issue from "
-        "previous rounds still exists in the code, it is a FAILURE. Do not let anything slide.\n\n"
-        "The fixer agent may claim it fixed things — IGNORE its claims. "
+        "previous rounds still exists in the code, it is a FAILURE.\n\n"
+        "The fixer may claim it fixed things — IGNORE claims. "
         "Only actual code matters. Verify each fix by reading the relevant lines.\n\n"
-        "If all critical+major issues are fixed → respond: REVIEW_CLEAN\n"
-        "If any issues remain → list them with SEVERITY + REVIEW_FAILED. Be strict.\n"
+        "Remember: do NOT flag missing features — only issues in code that EXISTS.\n\n"
+        "If all critical+major issues are fixed → REVIEW_CLEAN\n"
+        "If any remain → list them with SEVERITY + REVIEW_FAILED.\n"
     )
 
     # ── Run review rounds ──

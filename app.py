@@ -3727,7 +3727,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             f"'{rel_doc}'的规格合规审计。.marvin/upstream/中的文件=现有系统的权威文档。"
             f"'{rel_doc}'必须与upstream精确匹配——不得简化/遗漏/重新解读"
             + ("，且必须与.marvin/spec.md一致" if also_check_spec else "")
-            + "。\n\n"
+            + "。\n\nOutput in English.\n\n"
             "重要：生成文档可以添加upstream中没有的有用功能、UX优化、无障碍特性、"
             "或改善体验的功能——这没问题，不应标记。"
             "只标记：1) upstream中有但生成文档中缺失/错误的功能 "
@@ -3751,7 +3751,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # R1 quality reviewer — evaluates doc independently, no upstream
         review_prompt_quality = (
-            f"'{rel_doc}'的质量审查。只用read_file读此文档。不要读.marvin/upstream/。\n\n"
+            f"'{rel_doc}'的质量审查。只用read_file读此文档。不要读.marvin/upstream/。\n\nOutput in English.\n\n"
             "评估：1) 清晰度——工程师能否无疑问地实现？2) 完整性——是否有缺口、未定义的边界？"
             "3) 内部一致性——是否有矛盾、错误的数量？4) 可操作性——是否有足够的具体细节？"
             "5) 组织结构——逻辑结构是否合理、易于查找？\n\n"
@@ -3898,7 +3898,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Dispatch a fixer — PATCH ONLY, no analysis, no self-review
             fix_prompt = (
-                f"文档编辑器。你只修复{rel_doc}，不做其他任何事。\n\n"
+                f"文档编辑器。你只修复{rel_doc}，不做其他任何事。\n\nOutput in English.\n\n"
                 f"1) read_file .marvin/review-history-{doc_label}.md——获取问题列表\n"
                 f"2) read_file {rel_doc}——找到需要修复的行\n"
                 "3) read_file相关的.marvin/upstream/文件——获取正确值\n"
@@ -3969,7 +3969,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             ctx = _project_context() + "\n\n"
             ctx += (
                 f"你是严格的代码审查者，审计'{phase_label}'阶段——"
-                f"仅审查**{area}**文件。\n\n"
+                f"仅审查**{area}**文件。\n\nOutput in English.\n\n"
                 "用read_file阅读下列每个文件。同时阅读.marvin/spec.md、"
                 ".marvin/ux.md和.marvin/design.md了解预期行为。\n\n"
                 "重要：不要审查.marvin/upstream/中的文件——那些是upstream参考代码。"
@@ -4026,7 +4026,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             spec_review_ctx = _project_context() + "\n\n"
             is_test_only_phase = "test" in phase_label.lower()
             spec_review_ctx += (
-                f"你是'{phase_label}'阶段的规格合规审计员。\n\n"
+                f"你是'{phase_label}'阶段的规格合规审计员。\n\nOutput in English.\n\n"
             )
             if is_test_only_phase:
                 spec_review_ctx += (
@@ -4108,7 +4108,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             is_test_phase = any(kw in phase_label.lower() for kw in ("test", "tdd"))
             if is_test_phase:
                 fix_instructions = (
-                    "指令（TDD红色阶段——测试应该失败）：\n"
+                    "指令（TDD红色阶段——测试应该失败）：\nOutput in English.\n"
                     "1. 读取每个发现中提到的文件\n"
                     "2. 只修复测试代码质量问题：错误的断言、缺少的边界情况、"
                     "不良的测试结构、缺少的fixture、错误的import\n"
@@ -4123,8 +4123,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 )
             else:
                 fix_instructions = (
-                    "指令：\n"
-                    "1. 读取每个发现中提到的文件\n"
+                    "指令：\nOutput in English.\n"                    "1. 读取每个发现中提到的文件\n"
                     "2. 用最小的改动修复每个critical/major问题\n"
                     "3. 修复后运行测试验证没有回归\n"
                     f"4. 用消息'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'提交修复\n"
@@ -4281,7 +4280,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 # Agent 1: Product spec — features, user stories, API contract, constraints
                 product_prompt = (
-                    "资深产品经理——编写产品规格文档。不写代码、不写架构、不写UX（另有专门代理负责UX）。\n\n"
+                    "资深产品经理——编写产品规格文档。不写代码、不写架构、不写UX（另有专门代理负责UX）。\n\n用中文输出整个文档。\n\n"
                     "包含：1) 概述——做什么/为谁/为什么 2) 用户故事及验收标准（正常+错误+边界情况）"
                     "3) 功能需求及详细行为、API合约（路由/方法/数据结构/状态码）"
                     "4) 集成合约——精确的子进程调用方式、流式格式、数据格式——"
@@ -4307,7 +4306,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Agent 2: UX design — screens, components, style guide, visual polish
             ux_prompt = (
-                "资深UX设计师——编写UX设计文档。不写代码、不写架构。"
+                "资深UX设计师——编写UX设计文档。不写代码、不写架构。\n\n用中文输出整个文档。\n\n"
                 "先用read_file分段阅读.marvin/spec.md（每次200行——文件很大）。"
                 "阅读间用write_note保存关键发现。必须与规格一致。\n\n"
                 "包含：1) UX模式——每个屏幕/视图、组件、布局、交互、"
@@ -4368,7 +4367,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             arch_prompt = (
                 "资深架构师——用read_file分段阅读.marvin/spec.md和.marvin/ux.md"
-                "（每次200行以控制上下文预算），然后编写架构和测试计划。不写代码。\n\n"
+                "（每次200行以控制上下文预算），然后编写架构和测试计划。不写代码。\n\nOutput in English.\n\n"
                 "⚠️ 上下文预算：这些文件很大（总计约200KB）。"
                 "策略性阅读——先浏览结构（第1-200行），然后读关键章节。"
                 "阅读间用write_note保存发现。不要尝试完整读取两个文件。\n\n"
@@ -4531,7 +4530,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             integ_prompt = (
                 "你正在为TDD工作流编写集成测试。读取规格.marvin/spec.md、"
-                "UX设计.marvin/ux.md、以及架构文档.marvin/design.md。\n\n"
+                "UX设计.marvin/ux.md、以及架构文档.marvin/design.md。\n\nOutput in English.\n\n"
                 "你在编写验证真实系统端到端工作的测试。"
                 "这些测试补充已有（或将要有）的功能测试。\n\n"
                 "关键规则——仔细阅读：\n"
@@ -4581,7 +4580,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         if os.path.isfile(design_path):
             impl_prompt = (
                 f"{params.prompt}\n\n"
-                "重要：编写任何代码之前先用read_file阅读这些文档：\n"
+                "重要：编写任何代码之前先用read_file阅读这些文档：\nOutput in English.\n"
             )
             if os.path.isfile(spec_path):
                 impl_prompt += "  - .marvin/spec.md（产品规格和功能需求）\n"
@@ -5204,7 +5203,7 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     code_listing = "\n".join(f"  - {f}" for f in sorted(code_files))
 
     review_prompt_r1 = (
-        "代码审查审计。根据参考文档审查现有代码库。\n\n"
+        "代码审查审计。根据参考文档审查现有代码库。\n\nOutput in English.\n\n"
         f"参考文档（解释意图/规格——分块阅读，每次200行）：\n{ref_listing}\n\n"
         f"代码文件（真实来源——这是实际实现的内容）：\n{code_listing}\n\n"
         "代码是真实来源。参考文档解释代码应该做什么。\n"
@@ -5229,7 +5228,7 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     )
 
     review_prompt_quality = (
-        "代码质量审查。独立评估代码质量。\n\n"
+        "代码质量审查。独立评估代码质量。\n\nOutput in English.\n\n"
         f"代码文件：\n{code_listing}\n\n"
         "评估：1) 可维护性——结构清晰、复杂度合理？"
         "2) 健壮性——错误处理、边界情况？"
@@ -5242,7 +5241,7 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     )
 
     review_prompt_r2 = (
-        "修复后的跟进代码审查。\n\n"
+        "修复后的跟进代码审查。\n\nOutput in English.\n\n"
         f"参考文档：\n{ref_listing}\n\n"
         f"代码文件：\n{code_listing}\n\n"
         "读取.marvin/review-history-code.md查看所有先前发现。\n\n"
@@ -5334,7 +5333,7 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
 
         # Fixer
         fix_prompt = (
-            f"文档编辑器/代码修复器。修复下列代码文件。\n\n"
+            f"文档编辑器/代码修复器。修复下列代码文件。\n\nOutput in English.\n\n"
             f"1) read_file .marvin/review-history-code.md——获取问题\n"
             "2) read_file问题中提到的每个文件——找到要修复的行\n"
             f"3) read_file {params.ref_dir}/中的相关参考文档了解正确行为\n"

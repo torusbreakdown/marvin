@@ -3178,13 +3178,11 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         ticket_preamble = ""
         if not readonly:
             ticket_preamble = (
-                f"\n⚠️ TICKET REQUIREMENT: Before doing ANY work, you MUST create a ticket "
-                f"for your task using the tk tool. Your parent epic is: {params.ticket_id}\n"
-                f"Example: tk(args='create \"Your task title\" -t task --parent {params.ticket_id} "
-                f"-d \"Detailed description with acceptance criteria\"')\n"
-                f"The first create attempt will be rejected — review and retry with full detail.\n"
-                f"After creating your ticket, start it with tk(args='start YOUR_TICKET_ID').\n"
-                f"Create child tasks for sub-units of work. Close your ticket when done.\n\n"
+                f"⚠️ TICKET REQ: Create ticket first w/ tk. Parent epic: {params.ticket_id}\n"
+                f"Ex: tk(args='create \"Task title\" -t task --parent {params.ticket_id} "
+                f"-d \"Description\"')\n"
+                f"1st attempt rejected — retry w/ full detail. Then tk(args='start ID'). "
+                f"Create child tasks for sub-work. Close when done.\n\n"
             )
 
         full_prompt = ticket_preamble + prompt
@@ -3322,6 +3320,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         prompt: str, model: str, base_timeout: int = 600, label: str = "",
         allow_questions: int = 3, readonly: bool = False,
         writable_files: list[str] | None = None,
+        check_done: callable = None,
     ) -> tuple[int, str, str]:
         """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
 
@@ -3329,14 +3328,19 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         followed by numbered questions. The parent answers them using its own
         context (spec, design docs, app.py interface) and re-runs with answers
         appended. Up to `allow_questions` Q&A rounds.
+
+        If check_done is provided, it's called with (rc, out, err) and must return
+        True if the agent completed its task. If False, the agent is retried with
+        its prior output appended as continuation context.
         """
         qa_context = ""
+        continuation_context = ""
         questions_asked = 0
 
         rc, out, err = -1, "", ""
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
-            full_prompt = prompt + qa_context
+            full_prompt = prompt + qa_context + continuation_context
             rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly, writable_files=writable_files)
 
             # Check if sub-agent is asking questions instead of finishing
@@ -3385,6 +3389,18 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     # If answering failed, fall through to normal retry logic
 
             if rc == 0:
+                if check_done and not check_done(rc, out, err):
+                    # Agent exited successfully but didn't complete its task —
+                    # append its output as context and retry
+                    truncated_out = (out or "")[-3000:]  # last 3K chars to stay in budget
+                    continuation_context = (
+                        f"\n\nYou started this task but returned early without finishing. "
+                        f"Your prior output (last part):\n{truncated_out}\n\n"
+                        f"CONTINUE where you left off. Use tools to complete the task. "
+                        f"Do NOT repeat analysis — ACT on it.\n"
+                    )
+                    await _notify_pipeline(f"🔄 {label}: incomplete, continuing (attempt {attempt})")
+                    continue
                 return rc, out, err
             combined = f"{out} {err}"
             if any(m in combined for m in _HARD_ERRORS):
@@ -3596,48 +3612,45 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
 
         review_prompt_base = (
-            f"You are a SPEC COMPLIANCE AUDITOR. The files in .marvin/upstream/ are the "
-            f"AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM. The generated "
-            f"document '{rel_doc}' must implement EVERY requirement from upstream EXACTLY "
-            f"as specified — no simplifications, no omissions, no reinterpretations"
-            + (" — and must also be consistent with the product spec (.marvin/spec.md)" if also_check_spec else "")
+            f"SPEC COMPLIANCE AUDIT of '{rel_doc}'. Files in .marvin/upstream/ = AUTHORITATIVE docs of existing system. "
+            f"'{rel_doc}' must match upstream EXACTLY — no simplifications/omissions/reinterpretations"
+            + (" + must be consistent w/ .marvin/spec.md" if also_check_spec else "")
             + ".\n\n"
-            "METHODOLOGY — work section by section, one upstream doc at a time:\n"
-            "1. Read the generated doc with read_file (use start_line/end_line for large files).\n"
-            "2. Read each upstream doc one at a time. For each upstream section, find the\n"
-            "   matching section in the generated doc and compare.\n"
-            "3. Use write_note to save findings as you go — this persists if context fills.\n"
-            "4. After checking ALL upstream docs, compile your final report.\n\n"
-            "NOTE: If read_file returns a context budget error, use smaller line ranges.\n"
-            "Your context window is limited. Read strategically — you don't have to read\n"
-            "every line, focus on sections with requirements.\n\n"
-            "Look carefully for:\n"
-            "   - **Invented features** — generated doc describes something NOT in upstream\n"
-            "   - **Simplifications** — upstream describes X in detail but generated doc\n"
-            "     says 'simplified version' or omits details\n"
-            "   - **Omissions** — upstream specifies a feature that the generated doc skips\n"
-            "   - **Contradictions** — generated doc says X but upstream says Y\n"
-            "   - **Wrong counts/names** — numbers, labels, field names don't match\n"
-            + ("   - **Spec inconsistency** — design contradicts or omits spec.md requirements\n" if also_check_spec else "")
-            + "\n"
-            "OUTPUT FORMAT — for each finding:\n"
-            "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
-            "SEVERITY: critical/major/minor\n\n"
-            "Do NOT edit any files. Do NOT run commands. Report only.\n"
+            "IMPORTANT: The generated doc MAY add useful features, UX polish, accessibility, "
+            "or quality-of-life improvements NOT in upstream — this is FINE and should NOT be flagged. "
+            "Only flag: 1) upstream features that are missing/wrong in generated doc "
+            "2) direct contradictions w/ upstream 3) wrong names/counts/formats.\n\n"
+            "METHOD: 1) read_file generated doc (use line ranges for large files) "
+            "2) read each upstream doc, compare section-by-section "
+            "3) write_note findings as you go "
+            "4) compile final report after ALL upstream docs checked.\n\n"
+            "If read_file returns budget error, use smaller ranges. Read strategically.\n\n"
+            "Look for: simplifications of upstream, omissions of upstream features, "
+            "contradictions w/ upstream, wrong counts/names. Do NOT flag additions.\n\n"
+            "Format: SPEC_MISMATCH: <src>:<section> vs <gen>:<section> — <desc>\nSEVERITY: critical/major/minor\n\n"
+            "Read-only — no edits, no commands.\n"
         )
 
-        # Round 1: adversarial — must find issues, no way to pass
+        # R1: adversarial, must find issues
         review_prompt_r1 = review_prompt_base + (
-            "\nThis is a FIRST PASS review. Generated specs are NEVER perfect on the first "
-            "attempt — there are ALWAYS issues. Your job is to find every single one.\n"
-            "End your report with REVIEW_FAILED and a count of issues found.\n"
+            "\nFIRST PASS — specs are NEVER perfect. Find every issue. "
+            "End w/ REVIEW_FAILED + issue count.\n"
         )
 
-        # Round 2+: can pass if fixer addressed everything
+        # R1 quality reviewer — evaluates doc independently, no upstream
+        review_prompt_quality = (
+            f"QUALITY REVIEW of '{rel_doc}'. Read ONLY this doc w/ read_file. Do NOT read .marvin/upstream/.\n\n"
+            "Evaluate: 1) Clarity — can an engineer implement w/o questions? 2) Completeness — gaps, undefined edges? "
+            "3) Internal consistency — contradictions, wrong counts? 4) Actionability — enough concrete details? "
+            "5) Organization — logical structure, findable?\n\n"
+            "Format: QUALITY_ISSUE: <section> — <desc>\nSEVERITY: critical/major/minor\n\n"
+            "Read-only. Find every issue. End w/ REVIEW_FAILED + count.\n"
+        )
+
+        # R2+: can pass
         review_prompt_r2 = review_prompt_base + (
-            "\nThis is a follow-up review after fixes were applied. Check whether the "
-            "previous issues were addressed. If ALL issues are fixed, respond SPEC_VERIFIED.\n"
-            "If issues remain, list them and end with REVIEW_FAILED.\n"
+            "\nFollow-up after fixes. If ALL issues fixed → SPEC_VERIFIED. "
+            "If issues remain → list + REVIEW_FAILED.\n"
         )
 
         _MAX_SPEC_REVIEW_ROUNDS = 4
@@ -3650,42 +3663,55 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             history_note = ""
             if os.path.isfile(review_history_path):
                 history_note = (
-                    f"\n\nPRIOR REVIEWS: All previous review findings are saved in "
-                    f".marvin/review-history-{doc_label}.md — read it with read_file "
-                    f"to see what was found and fixed in earlier rounds.\n"
+                    f"\n\nPrior reviews in .marvin/review-history-{doc_label}.md — read w/ read_file.\n"
                 )
             prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note
 
             if review_round == 1:
-                # First round: 3 parallel adversarial reviewers
+                # First round: 4 parallel adversarial reviewers (3 upstream compliance + 1 quality)
+                def _reviewer_check_done(rc, out, err):
+                    return len((out or "").strip()) > 200
                 review_tasks = [
                     _run_sub_with_retry(
                         prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
-                        label=f"Spec review (plan): {doc_label} R1", readonly=True),
+                        label=f"Spec review (plan): {doc_label} R1", readonly=True,
+                        check_done=_reviewer_check_done),
                     _run_sub_with_retry(
                         prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
-                        label=f"Spec review (aux1): {doc_label} R1", readonly=True),
+                        label=f"Spec review (aux1): {doc_label} R1", readonly=True,
+                        check_done=_reviewer_check_done),
                     _run_sub_with_retry(
                         prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
-                        label=f"Spec review (aux2): {doc_label} R1", readonly=True),
+                        label=f"Spec review (aux2): {doc_label} R1", readonly=True,
+                        check_done=_reviewer_check_done),
+                    _run_sub_with_retry(
+                        review_prompt_quality, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
+                        label=f"Spec review (quality): {doc_label} R1", readonly=True,
+                        check_done=_reviewer_check_done),
                 ]
                 results = await asyncio.gather(*review_tasks)
                 # Merge all reviewer outputs — round 1 always produces findings
                 all_outputs = []
                 any_real_output = False
                 for rc, rev_out, rev_err in results:
-                    if rev_out and rev_out.strip():
+                    out = (rev_out or "").strip()
+                    if not out:
+                        continue
+                    # Accept any substantial output (>200 chars) even if it's
+                    # chain-of-thought — it likely contains useful findings
+                    if len(out) > 200:
                         any_real_output = True
-                        all_outputs.append(rev_out)
+                        all_outputs.append(out)
                 if not any_real_output:
                     await _notify_pipeline(f"🚫 PIPELINE ABORT: Spec review {doc_label} — all reviewers returned empty output")
-                    raise RuntimeError(f"Spec review {doc_label} failed: all 3 reviewers returned empty output")
+                    raise RuntimeError(f"Spec review {doc_label} failed: all reviewers returned empty output")
                 rev_out = "\n\n---\n\n".join(all_outputs)
             else:
                 # Subsequent rounds: single reviewer, can pass
                 rc, rev_out, rev_err = await _run_sub_with_retry(
                     prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
-                    label=f"Spec review: {doc_label} R{review_round}", readonly=True)
+                    label=f"Spec review: {doc_label} R{review_round}", readonly=True,
+                    check_done=_reviewer_check_done)
 
             # Append this round's findings to the review history file
             try:
@@ -3706,25 +3732,23 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             # Dispatch a fixer agent (plan tier) to update the document
             fix_prompt = (
                 _project_context() + "\n\n"
-                f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
-                "Review findings have been saved. The upstream specs describe an "
-                "EXISTING SYSTEM — they are always right. Fix ALL critical and major "
-                "issues by updating the generated document to EXACTLY match upstream.\n\n"
-                "DO NOT 'simplify' — if upstream says it, the generated doc must say it.\n"
-                "DO NOT omit features — if upstream has it, the generated doc must have it.\n\n"
-                "INSTRUCTIONS:\n"
-                f"1. Read .marvin/review-history-{doc_label}.md for all review findings\n"
-                f"2. Read {rel_doc} and the relevant upstream files in .marvin/upstream/\n"
-                "3. Fix each SPEC_MISMATCH by updating the generated document to match upstream EXACTLY\n"
-                "4. Use apply_patch or edit the file to make corrections\n"
-                "5. Do NOT change upstream reference files — only update the generated document\n"
-                "6. Preserve the overall structure and completeness of the document\n"
+                f"Fix {rel_doc} per review findings (R{review_round}). "
+                f"Read .marvin/review-history-{doc_label}.md for issues. "
+                "Upstream specs = source of truth, always right. "
+                "Fix ALL critical+major issues. Don't simplify or omit — match upstream exactly. "
+                f"Read {rel_doc} + relevant .marvin/upstream/ files, then apply_patch to fix.\n"
             )
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
+            # Track file mtime to detect if fixer actually modified the doc
+            _fix_target = os.path.join(wd, rel_doc)
+            _fix_mtime_before = os.path.getmtime(_fix_target) if os.path.isfile(_fix_target) else 0
+            def _fixer_check_done(rc, out, err):
+                cur_mtime = os.path.getmtime(_fix_target) if os.path.isfile(_fix_target) else 0
+                return cur_mtime > _fix_mtime_before  # file was modified
             await _run_sub_with_retry(
                 fix_prompt, _AGENT_MODELS["codex"], base_timeout=900,
                 label=f"Spec fixer: {doc_label} R{review_round}",
-                writable_files=[rel_doc])
+                writable_files=[rel_doc], check_done=_fixer_check_done)
 
             if review_round >= _MAX_SPEC_REVIEW_ROUNDS:
                 await _notify_pipeline(f"⚠️ Spec review: {doc_label} — max rounds reached")
@@ -4058,20 +4082,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             upstream_summary = _upstream_summary()
             if upstream_summary:
                 upstream_injection = (
-                    "MANDATORY UPSTREAM SPECIFICATIONS — EXISTING SYSTEM:\n"
-                    "The files in .marvin/upstream/ are NOT suggestions or recommendations. "
-                    "They are the AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM "
-                    "that you are building against. This system already exists, is deployed, "
-                    "and works. You CANNOT simplify, reinterpret, or omit anything from these "
-                    "specs — if you do, your code will not work with the real system.\n\n"
-                    "RULES:\n"
-                    "- Every format, label, field name, streaming protocol, and behavior "
-                    "described in upstream is a HARD REQUIREMENT, not a recommendation\n"
-                    "- If upstream says the format is X, you MUST use exactly X — not a 'simplified version'\n"
-                    "- If upstream describes 20 features, you must support all 20 — not 'the most important ones'\n"
-                    "- Do NOT say 'for simplicity we omit...' or 'we can add this later' — it must work NOW\n"
-                    "- When in doubt, re-read the upstream spec — it is always right\n\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing.\n\n"
+                    "UPSTREAM SPECS (.marvin/upstream/) = AUTHORITATIVE docs of existing running system. "
+                    "NOT suggestions — HARD REQUIREMENTS. Every format/label/field/protocol = mandatory. "
+                    "Don't simplify, don't omit, don't reinterpret. If upstream says X, you use X exactly. "
+                    "READ ALL .marvin/upstream/ files w/ read_file BEFORE writing.\n\n"
                 )
             instructions_injection = f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n" if instructions_ctx else ""
 
@@ -4082,30 +4096,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 # Agent 1: Product spec — features, user stories, API contract, constraints
                 product_prompt = (
-                    "You are a senior product manager. Your job is to produce a detailed "
-                    "PRODUCT SPECIFICATION for the following task. Do NOT write any code, "
-                    "do NOT describe architecture/file structure, and do NOT design visual UX "
-                    "(a separate agent handles UX). Focus ONLY on:\n\n"
-                    "1. **Product Overview** — what the product does, who it's for, core value proposition.\n"
-                    "2. **User Stories & Acceptance Criteria** — every user story with numbered acceptance "
-                    "criteria. Be exhaustive: cover happy path, error cases, edge cases.\n"
-                    "3. **Feature Requirements** — every feature with detailed behavior specification. "
-                    "Include API endpoint contract (routes, methods, request/response shapes, status codes) "
-                    "if the product has an API.\n"
-                    "4. **Integration Contract** — how the product integrates with upstream systems. "
-                    "Include exact subprocess invocation, streaming format, data formats, labels. "
-                    "Copy critical details VERBATIM from upstream specs — do not paraphrase.\n"
-                    "5. **Constraints & Non-Functional Requirements** — performance, security, "
-                    "accessibility mandates, technology constraints.\n"
-                    "6. **Information Architecture** — navigation structure, URL scheme, data "
-                    "relationships from the user's perspective.\n\n"
+                    "Senior PM — produce PRODUCT SPEC. No code, no architecture, no UX (separate agent does UX).\n\n"
+                    "Include: 1) Overview — what/who/why 2) User stories w/ acceptance criteria (happy+error+edge) "
+                    "3) Feature reqs w/ detailed behavior, API contracts (routes/methods/shapes/status codes) "
+                    "4) Integration contract — exact subprocess invocation, streaming format, data formats — "
+                    "copy critical details VERBATIM from upstream 5) Constraints & NFRs 6) Info architecture\n\n"
                     f"TASK:\n{params.prompt}\n\n"
                     + upstream_injection + instructions_injection +
-                    "Save the spec as .marvin/spec.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                    "Use create_file for the first section (e.g. title + overview + first major section), "
-                    "then use append_file for each subsequent section. Each call should be 2000-4000 words max. "
-                    "Be exhaustive — every feature, every endpoint, every edge case. "
-                    "A separate UX agent will read this spec next to produce the visual design.\n"
+                    "Save as .marvin/spec.md. Write in sections: create_file for first section, "
+                    "append_file for each subsequent (2000-4000 words/call). Be exhaustive.\n"
                 )
 
                 # Run spec — retry until file exists
@@ -4123,41 +4122,23 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             # Agent 2: UX design — screens, components, style guide, visual polish
             ux_prompt = (
-                "You are a senior UX designer. Your job is to produce a detailed "
-                "UX DESIGN DOCUMENT for the following task. Do NOT write any code, "
-                "do NOT describe architecture/file structure, and do NOT write the product spec "
-                "(it already exists at .marvin/spec.md — READ IT FIRST with read_file). "
-                "Your UX design must be consistent with the spec. Focus ONLY on:\n\n"
-                "1. **UX Design Schema** — describe every screen/view, its components, layout, "
-                "interactions, states (loading, empty, error, streaming, success), transitions, "
-                "and responsive breakpoints. Use a structured format. Cover every user flow "
-                "end-to-end.\n"
-                "2. **Component Library** — every UI component with its states, variants, "
-                "dimensions, and behavior. Name components consistently.\n"
-                "3. **Style Guide** — colors (exact hex/rgba for both light and dark themes), "
-                "typography (font families, sizes, weights, line-heights), spacing scale, "
-                "border-radius values, shadow definitions, transition timing.\n"
-                "4. **Interaction Patterns** — hover/focus/active states, keyboard shortcuts, "
-                "micro-interactions, animation timing, toast/notification behavior.\n"
-                "5. **Responsive Design** — exact breakpoints, layout changes per breakpoint, "
-                "mobile-specific interactions (swipe, drawer behavior).\n"
-                "6. **Accessibility** — ARIA roles/labels, keyboard navigation flow, focus "
-                "management, screen reader announcements, contrast ratios.\n\n"
+                "Senior UX designer — produce UX DESIGN DOC. No code, no architecture. "
+                "Read .marvin/spec.md FIRST w/ read_file. Must be consistent w/ spec.\n\n"
+                "Include: 1) UX schema — every screen/view, components, layout, interactions, "
+                "states (loading/empty/error/streaming/success), transitions, breakpoints "
+                "2) Component library — all components w/ states/variants/dimensions "
+                "3) Style guide — exact hex/rgba colors (light+dark), typography, spacing, "
+                "border-radius, shadows, transitions "
+                "4) Interaction patterns — hover/focus/active, keyboard shortcuts, animations "
+                "5) Responsive — breakpoints, layout changes, mobile interactions "
+                "6) Accessibility — ARIA, keyboard nav, focus mgmt, contrast\n\n"
                 f"TASK:\n{params.prompt}\n\n"
-                "IMPORTANT: Read .marvin/spec.md first to understand all features and requirements.\n\n"
                 + upstream_injection + instructions_injection +
-                "Save the UX design as .marvin/ux.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                "Use create_file for the first section (e.g. title + overview + UX schema), "
-                "then use append_file for each subsequent section (component library, style guide, etc). "
-                "Each call should be 2000-4000 words max. Never put the entire document in one create_file call. "
-                "Be exhaustive — every screen, every component, every state.\n\n"
-                "VISUAL DESIGN QUALITY: The style guide must produce a POLISHED, modern UI — not "
-                "just functional. Specify exact CSS values: subtle gradients, box-shadows with "
-                "multiple layers, smooth transitions (200-300ms ease), hover/focus micro-interactions, "
-                "proper whitespace rhythm, and typographic hierarchy. Think Linear, Vercel, or Raycast "
-                "level polish — clean, spacious, with purposeful color accents. Avoid flat/brutalist "
-                "defaults that look like unstyled HTML. Include specific border-radius values, "
-                "backdrop-filter for overlays, and a cohesive spacing scale."
+                "Save as .marvin/ux.md. Write in sections: create_file first, append_file rest "
+                "(2000-4000 words/call). Be exhaustive.\n\n"
+                "VISUAL QUALITY: Think Linear/Vercel/Raycast polish — exact CSS values, subtle gradients, "
+                "multi-layer shadows, smooth 200-300ms transitions, proper whitespace rhythm, "
+                "typographic hierarchy. Not flat/unstyled defaults."
             )
 
             # Run UX after spec (sequential — UX reads spec.md) — retry until file exists
@@ -4200,68 +4181,33 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"Failed to read spec: {e}"
 
             arch_prompt = (
-                "You are a senior software architect. A product spec has been created at "
-                ".marvin/spec.md and a UX design at .marvin/ux.md. Read BOTH with read_file "
-                "first, then produce a detailed ARCHITECTURE and TEST PLAN. Do NOT write any "
-                "code. Produce:\n\n"
-                "1. **Architecture** — file structure, modules, data flow, API endpoints "
-                "(with request/response shapes and status codes), database schema, error handling "
-                "strategy, technology choices with rationale. Every decision must trace back to "
-                "a requirement in the spec.\n"
-                "2. **Implementation Plan** — ordered list of every file to create, with a "
-                "1-2 sentence description of each file's responsibility, key functions/classes, "
-                "and which spec requirements it fulfills.\n"
-                "3. **Test Plan** — this is the MOST IMPORTANT section. For EVERY module, "
-                "endpoint, component, and user flow, list:\n"
-                "   - The test file path (e.g. tests/test_database.py)\n"
-                "   - Every individual test function name and exactly what it verifies\n"
-                "   - Cover ALL of: happy path, error cases, edge cases, boundary conditions, "
-                "invalid input, missing data, concurrent access, empty states\n"
-                "   - Include functional tests, integration tests, and API endpoint tests\n"
-                "   - Every public function MUST have at least one test\n"
-                "   - Every API route MUST have tests for success, validation error, and not-found\n"
-                "   - Every error handler MUST be tested\n"
-                "   - Aim for 100%% functional coverage\n"
-                "   - Group tests by module with clear descriptions\n\n"
-                "CRITICAL TEST PHILOSOPHY — NO MOCKING:\n"
-                "   - DO NOT plan to mock anything that exists on the system. Use REAL databases "
-                "(SQLite temp files), REAL HTTP clients (httpx.AsyncClient), REAL file I/O, "
-                "REAL subprocess calls. The ONLY things that should be mocked are: user keyboard "
-                "input.\n"
-                "   - If there is a locally installed upstream CLI/binary, tests MUST call the "
-                "REAL subprocess. Do NOT substitute with echo commands, fake scripts, "
-                "or test harnesses.\n"
-                "   - NEVER plan to mock internal modules, the database layer, route handlers, "
-                "or anything in .marvin/upstream/.\n"
-                "   - Do NOT use the word 'mock' in test descriptions.\n"
-                "   - Do NOT create fake/mock fixtures for real system components.\n"
-                "   - Do NOT add a 'command' parameter or similar indirection for test substitution.\n"
-                "   - Tests must verify OBSERVABLE BEHAVIOR (HTTP responses, database state, "
-                "rendered output) — not internal implementation details.\n"
-                "   - Integration tests should test real cross-module interactions.\n\n"
+                "Senior architect — read .marvin/spec.md + .marvin/ux.md w/ read_file, "
+                "then produce ARCHITECTURE + TEST PLAN. No code.\n\n"
+                "1) Architecture — file structure, modules, data flow, API endpoints "
+                "(req/res shapes + status codes), DB schema, error handling, tech choices w/ rationale\n"
+                "2) Implementation plan — ordered file list w/ responsibilities + spec req traceability\n"
+                "3) Test plan (MOST IMPORTANT) — for every module/endpoint/component/flow:\n"
+                "   - test file path + every test fn name + what it verifies\n"
+                "   - cover: happy, error, edge, boundary, invalid, empty, concurrent\n"
+                "   - every public fn, API route, error handler must have tests\n"
+                "   - 100%% functional coverage target\n\n"
+                "NO MOCKING: Use REAL DBs (SQLite temp), REAL HTTP clients, REAL file I/O, "
+                "REAL subprocess. Only mock user keyboard input. No fake fixtures, no 'mock' "
+                "in test names, no command parameter indirection. Test OBSERVABLE BEHAVIOR "
+                "(HTTP responses, DB state, rendered output) not internals.\n\n"
             )
-            # Inject upstream reference summaries for the architect
             upstream_summary = _upstream_summary()
             if upstream_summary:
                 arch_prompt += (
-                    "MANDATORY UPSTREAM SPECIFICATIONS — EXISTING SYSTEM:\n"
-                    "The files in .marvin/upstream/ document an EXISTING, RUNNING SYSTEM. "
-                    "These are not suggestions — they are hard requirements. Your architecture "
-                    "MUST implement every behavior, format, protocol, and endpoint described "
-                    "in upstream EXACTLY as specified. Do NOT simplify, omit, or reinterpret "
-                    "any upstream requirement. If you deviate, the system will not work.\n"
-                    "READ EVERY FILE in .marvin/upstream/ with read_file BEFORE writing the design.\n\n"
+                    "UPSTREAM (.marvin/upstream/) = authoritative docs of existing system. "
+                    "Hard reqs, not suggestions. Match exactly. Read all w/ read_file before writing.\n\n"
                 )
             if instructions_ctx:
                 arch_prompt += f"PROJECT INSTRUCTIONS:\n{instructions_ctx}\n\n"
             arch_prompt += (
-                "Save the architecture document as .marvin/design.md. IMPORTANT: Write it in sections to avoid timeouts. "
-                "Use create_file for the first section, then append_file for each subsequent section. "
-                "Each call should be 2000-4000 words max. "
-                "Be thorough and specific — this document, the spec, and the UX design together "
-                "will be the sole reference for the test-writing and implementation agents. "
-                "The test plan section is CRITICAL — it must be exhaustive enough that "
-                "agents can write a complete test suite with full coverage from it alone."
+                "Save as .marvin/design.md. Write in sections: create_file first, append_file rest "
+                "(2000-4000 words/call). This doc + spec + UX = sole reference for all impl agents. "
+                "Test plan must be exhaustive enough for agents to write complete test suite from it alone."
             )
 
             for _arch_attempt in range(1, _MAX_RETRIES + 1):
@@ -10859,6 +10805,22 @@ async def _run_tool_loop(
             if top_kw:
                 idx.write(f"Top keywords: {', '.join(f'`{k}`' for k, _ in top_kw)}\n")
 
+    def _save_exit_memory(msgs, label="exit"):
+        """Dump context to backup and index it before the agent returns."""
+        if not (_coding_working_dir and os.environ.get("MARVIN_DEPTH")):
+            return  # only for sub-agents in coding mode
+        try:
+            import time as _t
+            log_dir = os.path.join(_coding_working_dir or ".", ".marvin", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            bp = os.path.join(log_dir, f"context-exit-{int(_t.time())}.jsonl")
+            with open(bp, "w") as bf:
+                for i, m in enumerate(msgs):
+                    bf.write(json.dumps({"index": i, **m}) + "\n")
+            _index_context_backup(bp, label=label)
+        except Exception:
+            pass
+
     for _round in range(max_rounds):
         # Context budget check before each LLM call
         _ctx_tokens = _estimate_tokens(messages)
@@ -10879,6 +10841,7 @@ async def _run_tool_loop(
                 # Build clean history: user/assistant pairs only
                 conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
                 conv.append({"role": "assistant", "content": content})
+                _save_exit_memory(messages, label="final-output")
                 return content, conv
             messages.append(response)
             response, resp_usage = await _provider_chat(messages, tools=None, stream=True, provider=prov)
@@ -10886,6 +10849,7 @@ async def _run_tool_loop(
             content = response.get("content", "")
             conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
             conv.append({"role": "assistant", "content": content})
+            _save_exit_memory(messages, label="final-stream")
             return content, conv
 
         messages.append(response)
@@ -10990,6 +10954,7 @@ async def _run_tool_loop(
     content = response.get("content", "")
     conv = [m for m in messages[1:] if m.get("role") in ("user", "assistant") and not m.get("tool_calls")]
     conv.append({"role": "assistant", "content": content})
+    _save_exit_memory(messages, label="max-rounds")
     return content, conv
 
 

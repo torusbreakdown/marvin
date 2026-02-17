@@ -225,7 +225,7 @@ command resumes from the first incomplete phase.
 | Phase | Name | Description |
 |-------|------|-------------|
 | **1a** | Spec + UX | *Sequential*, not parallel.  First a spec agent writes `.marvin/spec.md`, then a UX agent reads the spec and writes `.marvin/ux.md`. |
-| **1a_review** | Spec/UX Review | A read-only reviewer (high-tier model) checks spec and UX docs against upstream references.  Up to 2 review rounds with automated fix cycles. |
+| **1a_review** | Spec/UX Review | Up to 4 adversarial review rounds with automated fix cycles. R1: 4 parallel reviewers (3 upstream compliance + 1 quality). R2+: single reviewer, can pass with SPEC_VERIFIED. |
 | **1b** | Architecture + Test Plan | Writes `.marvin/design.md` — file structure, data models, API routes, dependency list, exhaustive test plan. |
 | **1b_review** | Design Review | Read-only review of `design.md` against spec and upstream docs. |
 | **2a** | Functional Tests (TDD) | Parallel agents write failing unit tests from the test plan. |

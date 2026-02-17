@@ -3063,9 +3063,15 @@ async def launch_research_agent(params: LaunchResearchAgentParams) -> str:
         os.close(prompt_fd)
 
     try:
+        _uv_path = shutil.which("uv")
+        if _uv_path:
+            _launch_cmd = [_uv_path, "run", _sys.executable, app_path, "--non-interactive", "--working-dir", wd,
+                "--prompt-file", prompt_file]
+        else:
+            _launch_cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd,
+                "--prompt-file", prompt_file]
         proc = await asyncio.create_subprocess_exec(
-            _sys.executable, app_path, "--non-interactive", "--working-dir", wd,
-            "--prompt-file", prompt_file,
+            *_launch_cmd,
             cwd=wd, env=sub_env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -3209,7 +3215,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         finally:
             os.close(prompt_fd)
 
-        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
+        # Use uv run if available (provides copilot SDK); fall back to direct python
+        _uv_path = shutil.which("uv")
+        if _uv_path:
+            cmd = [_uv_path, "run", _sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
+        else:
+            cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
 

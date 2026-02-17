@@ -12259,7 +12259,7 @@ async def _run_non_interactive():
                 elif etype == "session.idle":
                     done.set()
 
-            sdk_model = model_override or "gpt-5.2"
+            sdk_model = model_override or os.environ.get("MARVIN_CHAT_MODEL", "claude-haiku-4.5")
             session_opts = {
                 "model": sdk_model,
                 "tools": all_tools,

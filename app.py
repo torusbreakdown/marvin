@@ -11738,7 +11738,7 @@ class SessionManager:
         self._chunks: list[str] = []
         self._SESSION_TIMEOUT = 180
         self._conversation: list[dict] = []  # conversation history for non-SDK providers
-        self._sdk_model = "gpt-5.2"  # current SDK model for cost tracking
+        self._sdk_model = os.environ.get("MARVIN_CHAT_MODEL", "claude-haiku-4.5")
         # Callbacks for streaming (curses uses these; plain uses print)
         self._on_delta = on_delta
         self._on_message = on_message
@@ -11814,8 +11814,7 @@ class SessionManager:
         await self._sdk_client.start()
         effort = "high" if _coding_mode else "low"
         self._sdk_session = await self._sdk_client.create_session({
-            "model": "gpt-5.2",
-            "reasoning_effort": effort,
+            "model": self._sdk_model,
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
@@ -11824,10 +11823,8 @@ class SessionManager:
     async def rebuild_sdk_session(self):
         if self._sdk_session:
             await self._sdk_session.destroy()
-        effort = "high" if _coding_mode else "low"
         self._sdk_session = await self._sdk_client.create_session({
-            "model": "gpt-5.2",
-            "reasoning_effort": effort,
+            "model": self._sdk_model,
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })

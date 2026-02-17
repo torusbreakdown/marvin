@@ -3234,7 +3234,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
 
     async def _run_sub(prompt: str, model: str, timeout_s: int = 600, label: str = "",
-                       readonly: bool = False, writable_files: list[str] | None = None) -> tuple[int, str, str]:
+                       readonly: bool = False, writable_files: list[str] | None = None,
+                       skip_tickets: bool = False) -> tuple[int, str, str]:
         """Run a non-interactive sub-agent subprocess. Returns (rc, stdout, stderr)."""
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
@@ -3244,7 +3245,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["GIT_DIR"] = os.path.join(wd, ".git")
         sub_env["MARVIN_DEPTH"] = str(depth + 1)
         sub_env["MARVIN_MODEL"] = model
-        sub_env["MARVIN_TICKET"] = params.ticket_id
+        if skip_tickets:
+            sub_env.pop("MARVIN_TICKET", None)
+        else:
+            sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
         # Route known Copilot SDK models through the SDK (not kimi/openrouter)
         _COPILOT_SDK_MODELS = {"claude-sonnet-4.5", "claude-haiku-4.5", "claude-sonnet-4",
@@ -3265,7 +3269,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # Inject ticket creation instruction into prompt for non-readonly agents
         ticket_preamble = ""
-        if not readonly:
+        if not readonly and not skip_tickets:
             ticket_preamble = (
                 f"⚠️ TICKET REQ: Create ticket first w/ tk. Parent epic: {params.ticket_id}\n"
                 f"Ex: tk(args='create \"Task title\" -t task --parent {params.ticket_id} "
@@ -3415,6 +3419,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         allow_questions: int = 3, readonly: bool = False,
         writable_files: list[str] | None = None,
         check_done: callable = None,
+        skip_tickets: bool = False,
     ) -> tuple[int, str, str]:
         """Run _run_sub with up to _MAX_RETRIES attempts, escalating timeout each time.
 
@@ -3435,7 +3440,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         for attempt in range(1, _MAX_RETRIES + 1):
             timeout_s = base_timeout * attempt
             full_prompt = prompt + qa_context + continuation_context
-            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly, writable_files=writable_files)
+            rc, out, err = await _run_sub(full_prompt, model, timeout_s=timeout_s, label=label, readonly=readonly, writable_files=writable_files, skip_tickets=skip_tickets)
 
             # Check if sub-agent is asking questions instead of finishing
             if questions_asked < allow_questions and "QUESTIONS_FOR_PARENT:" in (out or ""):
@@ -3963,7 +3968,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _run_sub_with_retry(
                 fix_prompt, _AGENT_MODELS["fallback"], base_timeout=900,
                 label=f"Spec fixer: {doc_label} R{review_round}",
-                writable_files=[rel_doc], check_done=_fixer_check_done)
+                writable_files=[rel_doc], check_done=_fixer_check_done,
+                skip_tickets=True)
 
             # Git commit after fixer so next round's diff is clean
             _git_commit_checkpoint(f"Fixer applied: {doc_label} R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")
@@ -4190,7 +4196,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
 
             fix_rc, fix_out, fix_err = await _run_sub_with_retry(
-                fix_prompt, _AGENT_MODELS["fallback"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
+                fix_prompt, _AGENT_MODELS["fallback"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}",
+                skip_tickets=True)
 
             if review_round >= _MAX_REVIEW_ROUNDS:
                 await _notify_pipeline(f"⚠️ Review: {phase_label} — max rounds reached")
@@ -4349,7 +4356,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 # Run spec — retry until file exists
                 for _spec_attempt in range(1, _MAX_RETRIES + 1):
                     spec_rc, sout, serr = await _run_sub_with_retry(product_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Product spec",
-                        writable_files=[".marvin/spec.md"])
+                        writable_files=[".marvin/spec.md"], skip_tickets=True)
                     if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 1000:
                         spec_size = os.path.getsize(spec_path)
                         await _notify_pipeline(f"✅ spec.md ready ({spec_size} bytes)")
@@ -4388,7 +4395,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             # Run UX after spec (sequential — UX reads spec.md) — retry until file exists
             for _ux_attempt in range(1, _MAX_RETRIES + 1):
                 ux_rc, ux_out, ux_err = await _run_sub_with_retry(ux_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="UX design",
-                    writable_files=[".marvin/ux.md"])
+                    writable_files=[".marvin/ux.md"], skip_tickets=True)
                 if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 1000:
                     ux_size = os.path.getsize(ux_path)
                     await _notify_pipeline(f"✅ ux.md ready ({ux_size} bytes)")
@@ -4464,7 +4471,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
             for _arch_attempt in range(1, _MAX_RETRIES + 1):
                 rc, dout, derr = await _run_sub_with_retry(arch_prompt, _AGENT_MODELS["plan_gen"], base_timeout=1200, label="Architecture pass",
-                    writable_files=[".marvin/design.md"])
+                    writable_files=[".marvin/design.md"], skip_tickets=True)
                 if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
                     design_size = os.path.getsize(design_path)
                     await _notify_pipeline(f"✅ Phase 1b complete — design.md ({design_size} bytes)")
@@ -5049,7 +5056,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
                 rc, fix_out, fix_err = await _run_sub_with_retry(
                     fix_prompt, _AGENT_MODELS["fallback"], base_timeout=1800,
-                    label=f"QA-fix-round-{qa_round}")
+                    label=f"QA-fix-round-{qa_round}", skip_tickets=True)
 
                 await _notify_pipeline(f"🔧 QA fix round {qa_round} complete")
             else:

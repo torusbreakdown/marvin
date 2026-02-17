@@ -2629,6 +2629,26 @@ async def tree(params: TreeParams) -> str:
     lines.append(f"\n{file_count} files")
     return "\n".join(lines)
 
+# ── Context budget for read_file (works inside SDK-managed tool loops too) ──
+# The _run_tool_loop path has its own budget gate, but the Copilot SDK drives
+# its own loop so we never see results there.  Track cumulative bytes returned
+# by read_file this session so we can self-limit even under the SDK.
+_READ_BUDGET_MAX = 300_000     # hard limit ~75K tokens — Copilot SDK ≈ 128K total
+_READ_BUDGET_WARN = 200_000    # start warning at ~50K tokens
+_read_budget_used = 0          # cumulative chars returned this session
+
+def _read_budget_dump(content: str, path: str) -> None:
+    """Dump overflowing read content to a temp file so the agent can recover it."""
+    mem_dir = os.path.join(_coding_working_dir or ".", ".marvin", "memories")
+    os.makedirs(mem_dir, exist_ok=True)
+    safe = os.path.basename(path).replace("/", "_").replace(" ", "_")[:60]
+    dump_path = os.path.join(mem_dir, f"dump-{safe}.txt")
+    try:
+        with open(dump_path, "w") as f:
+            f.write(content)
+    except Exception:
+        pass
+    return dump_path
 
 @define_tool(
     description=(
@@ -2681,7 +2701,54 @@ async def read_file(params: ReadFileParams) -> str:
     header = f"{os.path.relpath(full, _coding_working_dir or '.')} ({total} lines)"
     if params.start_line or params.end_line:
         header += f" [showing {start+1}-{end}]"
-    return header + "\n" + "\n".join(numbered)
+    result_str = header + "\n" + "\n".join(numbered)
+
+    # ── Context budget guard (critical for Copilot SDK which has ~128K limit) ──
+    global _read_budget_used
+    result_len = len(result_str)
+    remaining = _READ_BUDGET_MAX - _read_budget_used
+
+    if result_len > 2000 and _read_budget_used + result_len > _READ_BUDGET_MAX:
+        # Would exceed hard limit — dump to file, return error
+        dump_path = _read_budget_dump(result_str, params.path)
+        rel_dump = os.path.relpath(dump_path, _coding_working_dir or ".")
+        return (
+            f"⚠️ CONTEXT BUDGET EXCEEDED — cannot fit this file in context "
+            f"(~{_read_budget_used // 1000}K / {_READ_BUDGET_MAX // 1000}K chars used). "
+            f"Full content dumped to {rel_dump} — read it in small ranges.\n"
+            f"Use smaller start_line/end_line ranges (e.g. 100-line chunks), "
+            f"or use write_note to save your findings and move on to producing output."
+        )
+
+    if result_len > 2000 and _read_budget_used + result_len > _READ_BUDGET_WARN:
+        # Approaching limit — truncate to fit and warn
+        room_chars = max(2000, remaining)
+        trunc_lines = result_str.split("\n")
+        kept = []
+        char_count = 0
+        for tl in trunc_lines:
+            if char_count + len(tl) + 1 > room_chars:
+                break
+            kept.append(tl)
+            char_count += len(tl) + 1
+        result_str = "\n".join(kept) + (
+            f"\n\n⚠️ TRUNCATED — only {len(kept)} of {len(trunc_lines)} lines shown "
+            f"(~{_read_budget_used // 1000}K / {_READ_BUDGET_MAX // 1000}K chars budget used). "
+            f"Use start_line/end_line for remaining sections. "
+            f"STOP READING and START PRODUCING OUTPUT soon."
+        )
+
+    _read_budget_used += len(result_str)
+
+    # Inject warning when budget is getting low
+    if _read_budget_used > _READ_BUDGET_WARN:
+        pct = int((_read_budget_used / _READ_BUDGET_MAX) * 100)
+        result_str += (
+            f"\n\n⏳ CONTEXT BUDGET: ~{_read_budget_used // 1000}K / {_READ_BUDGET_MAX // 1000}K chars used ({pct}%). "
+            f"Read sparingly — use small line ranges. START PRODUCING OUTPUT NOW."
+        )
+
+    return result_str
 
 
 # ── Git tools ────────────────────────────────────────────────────────────────
@@ -3984,12 +4051,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "architecture documents EXACTLY. You are not reviewing code quality — only "
                     "checking that every requirement is implemented correctly.\n\n"
                     "STEPS:\n"
-                    "1. Read .marvin/spec.md completely — note every user story, acceptance criterion, "
-                    "endpoint, behavior, constraint, and feature requirement.\n"
-                    "2. Read .marvin/ux.md completely — note every screen, component, interaction, "
-                    "state, style rule, and accessibility requirement.\n"
-                    "3. Read .marvin/design.md completely — note every architecture decision, file "
-                    "structure, API shape, database schema, and module responsibility.\n"
+                    "1. Read .marvin/spec.md IN CHUNKS (200 lines at a time) — note every user story, acceptance criterion, "
+                    "endpoint, behavior, constraint, and feature requirement. Use write_note to save findings.\n"
+                    "2. Read .marvin/ux.md IN CHUNKS (200 lines at a time) — note every screen, component, interaction, "
+                    "state, style rule, and accessibility requirement. Use write_note to save findings.\n"
+                    "3. Read .marvin/design.md IN CHUNKS (200 lines at a time) — note every architecture decision, file "
+                    "structure, API shape, database schema, and module responsibility. Use write_note to save findings.\n"
                     "4. Read all implementation files and verify:\n"
                     "   - Every user story's acceptance criteria are implemented\n"
                     "   - Every API endpoint matches the specified request/response shapes\n"
@@ -4244,7 +4311,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             # Agent 2: UX design — screens, components, style guide, visual polish
             ux_prompt = (
                 "Senior UX designer — produce UX DESIGN DOC. No code, no architecture. "
-                "Read .marvin/spec.md FIRST w/ read_file. Must be consistent w/ spec.\n\n"
+                "Read .marvin/spec.md FIRST w/ read_file IN CHUNKS (200 lines at a time — file is large). "
+                "Use write_note to save key findings between reads. Must be consistent w/ spec.\n\n"
                 "Include: 1) UX schema — every screen/view, components, layout, interactions, "
                 "states (loading/empty/error/streaming/success), transitions, breakpoints "
                 "2) Component library — all components w/ states/variants/dimensions "
@@ -4302,8 +4370,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return f"Failed to read spec: {e}"
 
             arch_prompt = (
-                "Senior architect — read .marvin/spec.md + .marvin/ux.md w/ read_file, "
+                "Senior architect — read .marvin/spec.md + .marvin/ux.md w/ read_file "
+                "IN CHUNKS (200 lines at a time to stay within context budget), "
                 "then produce ARCHITECTURE + TEST PLAN. No code.\n\n"
+                "⚠️ CONTEXT BUDGET: These files are large (~200KB total). "
+                "Read strategically — skim structure first (line 1-200), then key sections. "
+                "Use write_note to save findings between reads. Do NOT try to read both files in full.\n\n"
                 "1) Architecture — file structure, modules, data flow, API endpoints "
                 "(req/res shapes + status codes), DB schema, error handling, tech choices w/ rationale\n"
                 "2) Implementation plan — ordered file list w/ responsibilities + spec req traceability\n"

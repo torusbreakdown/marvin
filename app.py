@@ -3170,6 +3170,12 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
+        # If model contains '/' (e.g. anthropic/claude-sonnet-4.5), route through
+        # kimi/openrouter provider by overriding KIMI_MODEL and setting provider to kimi
+        if "/" in model:
+            sub_env["KIMI_MODEL"] = model
+            sub_env["MARVIN_MODEL"] = "kimi"
+            sub_env["LLM_PROVIDER"] = "kimi"
         if readonly:
             sub_env["MARVIN_READONLY"] = "1"
         if writable_files:
@@ -3774,7 +3780,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 cur_mtime = os.path.getmtime(_fix_target) if os.path.isfile(_fix_target) else 0
                 return cur_mtime > _fix_mtime_before  # file was modified
             await _run_sub_with_retry(
-                fix_prompt, _AGENT_MODELS["codex"], base_timeout=900,
+                fix_prompt, _AGENT_MODELS["fallback"], base_timeout=900,
                 label=f"Spec fixer: {doc_label} R{review_round}",
                 writable_files=[rel_doc], check_done=_fixer_check_done)
 

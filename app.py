@@ -5175,7 +5175,7 @@ def _background_jobs_summary() -> str:
 class ReviewCodebaseParams(BaseModel):
     working_dir: str = Field(description="Root directory of the codebase to review")
     ref_dir: str = Field(
-        default=".ref",
+        default="ref",
         description="Directory containing reference docs (relative to working_dir). "
         "Any number of .md/.txt files — treated as explanatory context (NOT ground truth). "
         "The CODE is ground truth; ref docs explain intent, spec, architecture."

@@ -5083,6 +5083,93 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
 
 
+# ── Background job persistence ────────────────────────────────────────────────
+
+import dataclasses as _dc
+
+def _jobs_dir(wd: str) -> str:
+    d = os.path.join(wd, ".marvin", "jobs")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _save_job(wd: str, job: dict):
+    path = os.path.join(_jobs_dir(wd), f"{job['id']}.json")
+    with open(path, "w") as f:
+        json.dump(job, f, indent=2)
+
+
+def _load_job(wd: str, job_id: str) -> dict | None:
+    path = os.path.join(_jobs_dir(wd), f"{job_id}.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _list_jobs(wd: str) -> list[dict]:
+    jobs = []
+    d = os.path.join(wd, ".marvin", "jobs")
+    if not os.path.isdir(d):
+        return jobs
+    for f in sorted(os.listdir(d)):
+        if f.endswith(".json"):
+            try:
+                with open(os.path.join(d, f)) as fh:
+                    jobs.append(json.load(fh))
+            except Exception:
+                pass
+    return jobs
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _check_job_liveness(job: dict) -> str:
+    """Check if a running job's processes are still alive. Returns updated status."""
+    if job.get("status") != "running":
+        return job["status"]
+    pids = job.get("active_pids", [])
+    if not pids:
+        return "running"
+    alive = [p for p in pids if _pid_alive(p)]
+    if not alive:
+        return "dead"  # all processes gone but job never marked complete
+    return "running"
+
+
+def _background_jobs_summary() -> str:
+    """One-liner for system message about active background jobs."""
+    wd = _coding_working_dir
+    if not wd:
+        return ""
+    jobs = _list_jobs(wd)
+    if not jobs:
+        return ""
+    lines = []
+    for j in jobs:
+        status = _check_job_liveness(j)
+        if status == "running":
+            elapsed = int(_time.time()) - j.get("started_at", 0)
+            mins = elapsed // 60
+            lines.append(f"🔄 {j['type']} job `{j['id']}` — {j.get('phase', '?')} (running {mins}m)")
+        elif status == "dead":
+            lines.append(f"💀 {j['type']} job `{j['id']}` — processes died (phase: {j.get('phase', '?')})")
+        elif status == "completed":
+            lines.append(f"✅ {j['type']} job `{j['id']}` — {j.get('result', 'done')}")
+        elif status == "failed":
+            lines.append(f"❌ {j['type']} job `{j['id']}` — {j.get('error', 'failed')}")
+    if not lines:
+        return ""
+    return "\n\nBACKGROUND JOBS:\n" + "\n".join(lines)
+
+
 # ── Tool: Standalone code review ─────────────────────────────────────────────
 
 class ReviewCodebaseParams(BaseModel):
@@ -5110,6 +5197,8 @@ class ReviewCodebaseParams(BaseModel):
 @define_tool(
     description=(
         "Run a 4-stage code review on an existing codebase. "
+        "Launches reviewers in the background and returns immediately — "
+        "use review_status to check progress. "
         "Creates a unique git branch for the review, runs 4 parallel reviewers per round, "
         "dispatches a fixer for issues found, and repeats until clean or max rounds reached. "
         "Requires a ref/ directory with docs explaining the codebase intent. "
@@ -5186,7 +5275,8 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
 
     async def _review_sub(prompt: str, model: str, timeout_s: int = 600,
                           label: str = "", readonly: bool = False,
-                          writable_files: list[str] | None = None) -> tuple[int, str, str]:
+                          writable_files: list[str] | None = None,
+                          job_ref: dict | None = None) -> tuple[int, str, str]:
         sub_env = os.environ.copy()
         sub_env.pop("VIRTUAL_ENV", None)
         sub_env.pop("CONDA_PREFIX", None)
@@ -5234,6 +5324,13 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
             *cmd, cwd=wd, env=sub_env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+        # Track PID in job state for cross-session liveness checks
+        if job_ref and proc.pid:
+            pids = job_ref.get("active_pids", [])
+            if proc.pid not in pids:
+                pids.append(proc.pid)
+                job_ref["active_pids"] = pids
+                _save_job(wd, job_ref)
         try:
             sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
@@ -5259,14 +5356,23 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
                     _usage.absorb_sub_cost(json.loads(line[len("MARVIN_COST:"):]))
                 except Exception:
                     pass
+        # Remove PID from job tracking
+        if job_ref and proc.pid:
+            pids = job_ref.get("active_pids", [])
+            if proc.pid in pids:
+                pids.remove(proc.pid)
+                job_ref["active_pids"] = pids
+                _save_job(wd, job_ref)
         return proc.returncode or 0, stdout_text, stderr_text
 
     async def _review_sub_with_retry(prompt, model, base_timeout=600, label="",
-                                     readonly=False, writable_files=None, check_done=None):
+                                     readonly=False, writable_files=None, check_done=None,
+                                     job_ref=None):
         _MAX_RETRIES = 5
         for attempt in range(1, _MAX_RETRIES + 1):
             rc, out, err = await _review_sub(prompt, model, timeout_s=base_timeout * attempt,
-                                             label=label, readonly=readonly, writable_files=writable_files)
+                                             label=label, readonly=readonly, writable_files=writable_files,
+                                             job_ref=job_ref)
             if check_done and check_done(rc, out, err):
                 return rc, out, err
             if rc == 0 and len((out or "").strip()) > 200:
@@ -5279,7 +5385,8 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
         fallback = _AGENT_MODELS.get("fallback", "")
         if fallback and fallback != model:
             rc, out, err = await _review_sub(prompt, fallback, timeout_s=base_timeout * 2,
-                                             label=f"{label} (fallback)", readonly=readonly, writable_files=writable_files)
+                                             label=f"{label} (fallback)", readonly=readonly, writable_files=writable_files,
+                                             job_ref=job_ref)
         return rc, out, err
 
     def _git_checkpoint(msg: str):
@@ -5370,12 +5477,11 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
         "If any remain → list them with SEVERITY + REVIEW_FAILED.\n"
     )
 
-    # ── Run review rounds ──
+    # ── Launch review as background job ──
     _git_checkpoint(f"Review start: {branch_name}")
     review_history_path = os.path.join(wd, ".marvin", "review-history-code.md")
     os.makedirs(os.path.join(wd, ".marvin"), exist_ok=True)
 
-    # All writable code files for fixer
     writable_code = [f for f in code_files if not f.startswith(params.ref_dir)]
 
     active_reviewers = [
@@ -5385,101 +5491,224 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
         ("quality", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), True),
     ]
 
-    round_results = []
-    for review_round in range(1, params.max_rounds + 1):
-        _git_checkpoint(f"Code review R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')} — needs review")
+    import secrets as _secrets
+    job_id = f"review-{_time.strftime('%Y%m%d-%H%M%S')}-{_secrets.token_hex(3)}"
+    job = {
+        "id": job_id,
+        "type": "code-review",
+        "status": "running",
+        "started_at": int(_time.time()),
+        "working_dir": wd,
+        "branch": branch_name,
+        "files_count": len(code_files),
+        "ref_count": len(ref_files),
+        "max_rounds": params.max_rounds,
+        "phase": "starting",
+        "round": 0,
+        "round_results": [],
+        "active_pids": [],
+        "result": None,
+        "error": None,
+    }
+    _save_job(wd, job)
 
-        history_note = ""
-        if os.path.isfile(review_history_path):
-            history_note = "\n\nPrior reviews in .marvin/review-history-code.md — read w/ read_file.\n"
-
-        diff_note = ""
-        if review_round > 1:
-            fixer_diff = _git_diff_since("HEAD~1")
-            if fixer_diff:
-                diff_note = (
-                    f"\n\nGIT DIFF of fixer's changes:\n```diff\n{fixer_diff}\n```\n"
-                    "CHECK: does this diff address prior findings? If NOT, FAIL them again.\n"
-                )
-
-        prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note + diff_note
-
-        def _reviewer_check_done(rc, out, err):
-            return len((out or "").strip()) > 200
-
-        review_tasks = []
-        for rname, rmodel, is_quality in active_reviewers:
-            rprompt = (review_prompt_quality + history_note + diff_note) if is_quality else prompt_for_round
-            review_tasks.append(_review_sub_with_retry(
-                rprompt, rmodel, base_timeout=900,
-                label=f"Code-review-{rname}-R{review_round}", readonly=True,
-                check_done=_reviewer_check_done))
-        results = await asyncio.gather(*review_tasks)
-
-        all_outputs = []
-        still_active = []
-        for (rc, rev_out, rev_err), (rname, rmodel, is_quality) in zip(results, active_reviewers):
-            out = (rev_out or "").strip()
-            if not out or len(out) <= 200:
-                still_active.append((rname, rmodel, is_quality))
-                continue
-            _clean_keywords = ("REVIEW_CLEAN", "SPEC_VERIFIED", "no corrections needed",
-                               "production-ready", "no issues found", "all issues fixed")
-            if any(k.lower() in out.lower() for k in _clean_keywords):
-                continue  # Drop satisfied reviewer
-            still_active.append((rname, rmodel, is_quality))
-            all_outputs.append(out)
-
-        active_reviewers = still_active
-        round_results.append(f"R{review_round}: {len(all_outputs)} reviewers found issues, {4 - len(still_active)} satisfied")
-
-        if not all_outputs:
-            round_results.append(f"R{review_round}: ALL CLEAN ✅")
-            break
-        if not active_reviewers:
-            break
-
-        rev_out = "\n\n---\n\n".join(all_outputs)
+    async def _run_review_job():
+        nonlocal job
         try:
-            with open(review_history_path, "a") as rh:
-                rh.write(f"\n\n{'='*60}\n## Round {review_round} Findings\n{'='*60}\n\n")
-                rh.write(rev_out)
-                rh.write("\n")
-        except Exception:
-            pass
+            round_results = []
+            cur_reviewers = list(active_reviewers)
+            for review_round in range(1, params.max_rounds + 1):
+                job["round"] = review_round
+                job["phase"] = f"R{review_round} review (4 agents)"
+                _save_job(wd, job)
 
-        # Fixer
-        fix_prompt = (
-            "CODE FIXER. Fix the code files listed in the review findings.\n\n"
-            "1) Read .marvin/review-history-code.md to get the list of issues\n"
-            "2) Read each file mentioned in the issues to find the lines to fix\n"
-            f"3) Read relevant reference docs in {params.ref_dir}/ to understand correct behavior\n"
-            "4) Apply apply_patch for each issue — one patch per issue\n"
-            "5) STOP. Do not summarize. Do not self-review. Do not grade.\n\n"
-            "RULES:\n"
-            "- Fix every critical and major issue. Do not skip any.\n"
-            "- Reference docs explain intent — make the code match the documented behavior.\n"
-            "- Do NOT analyze, summarize, grade, or review your own work.\n"
-            "- Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
-            "- Do NOT stop partway through. Fix ALL issues before finishing.\n"
-            "- Do NOT create tickets.\n"
-            "- A separate independent reviewer will check your work.\n"
-        )
-        _review_fixer_model = os.environ.get("MARVIN_REVIEW_CODEBASE_FIXER", "claude-sonnet-4")
-        await _review_sub_with_retry(
-            fix_prompt, _review_fixer_model, base_timeout=900,
-            label=f"Code-fixer-R{review_round}", writable_files=writable_code)
+                _git_checkpoint(f"Code review R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')} — needs review")
 
-        _git_checkpoint(f"Code fixer R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")
+                history_note = ""
+                if os.path.isfile(review_history_path):
+                    history_note = "\n\nPrior reviews in .marvin/review-history-code.md — read w/ read_file.\n"
 
-    # Summary
-    summary = f"Code review on branch `{branch_name}` — {len(code_files)} files, {len(ref_files)} ref docs\n"
-    summary += "\n".join(round_results)
-    if active_reviewers:
-        summary += f"\n⚠️ {len(active_reviewers)} reviewers still had issues after {params.max_rounds} rounds"
+                diff_note = ""
+                if review_round > 1:
+                    fixer_diff = _git_diff_since("HEAD~1")
+                    if fixer_diff:
+                        diff_note = (
+                            f"\n\nGIT DIFF of fixer's changes:\n```diff\n{fixer_diff}\n```\n"
+                            "CHECK: does this diff address prior findings? If NOT, FAIL them again.\n"
+                        )
+
+                prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note + diff_note
+
+                def _reviewer_check_done(rc, out, err):
+                    return len((out or "").strip()) > 200
+
+                review_tasks = []
+                for rname, rmodel, is_quality in cur_reviewers:
+                    rprompt = (review_prompt_quality + history_note + diff_note) if is_quality else prompt_for_round
+                    review_tasks.append(_review_sub_with_retry(
+                        rprompt, rmodel, base_timeout=900,
+                        label=f"Code-review-{rname}-R{review_round}", readonly=True,
+                        check_done=_reviewer_check_done, job_ref=job))
+                results = await asyncio.gather(*review_tasks)
+
+                all_outputs = []
+                still_active = []
+                for (rc, rev_out, rev_err), (rname, rmodel, is_quality) in zip(results, cur_reviewers):
+                    out = (rev_out or "").strip()
+                    if not out or len(out) <= 200:
+                        still_active.append((rname, rmodel, is_quality))
+                        continue
+                    _clean_keywords = ("REVIEW_CLEAN", "SPEC_VERIFIED", "no corrections needed",
+                                       "production-ready", "no issues found", "all issues fixed")
+                    if any(k.lower() in out.lower() for k in _clean_keywords):
+                        continue
+                    still_active.append((rname, rmodel, is_quality))
+                    all_outputs.append(out)
+
+                cur_reviewers = still_active
+                round_results.append(f"R{review_round}: {len(all_outputs)} reviewers found issues, {4 - len(still_active)} satisfied")
+
+                if not all_outputs:
+                    round_results.append(f"R{review_round}: ALL CLEAN ✅")
+                    break
+                if not cur_reviewers:
+                    break
+
+                rev_out = "\n\n---\n\n".join(all_outputs)
+                try:
+                    with open(review_history_path, "a") as rh:
+                        rh.write(f"\n\n{'='*60}\n## Round {review_round} Findings\n{'='*60}\n\n")
+                        rh.write(rev_out)
+                        rh.write("\n")
+                except Exception:
+                    pass
+
+                # Fixer
+                job["phase"] = f"R{review_round} fixer"
+                _save_job(wd, job)
+
+                fix_prompt = (
+                    "CODE FIXER. Fix the code files listed in the review findings.\n\n"
+                    "1) Read .marvin/review-history-code.md to get the list of issues\n"
+                    "2) Read each file mentioned in the issues to find the lines to fix\n"
+                    f"3) Read relevant reference docs in {params.ref_dir}/ to understand correct behavior\n"
+                    "4) Apply apply_patch for each issue — one patch per issue\n"
+                    "5) STOP. Do not summarize. Do not self-review. Do not grade.\n\n"
+                    "RULES:\n"
+                    "- Fix every critical and major issue. Do not skip any.\n"
+                    "- Reference docs explain intent — make the code match the documented behavior.\n"
+                    "- Do NOT analyze, summarize, grade, or review your own work.\n"
+                    "- Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
+                    "- Do NOT stop partway through. Fix ALL issues before finishing.\n"
+                    "- Do NOT create tickets.\n"
+                    "- A separate independent reviewer will check your work.\n"
+                )
+                _review_fixer_model = os.environ.get("MARVIN_REVIEW_CODEBASE_FIXER", "claude-sonnet-4")
+                await _review_sub_with_retry(
+                    fix_prompt, _review_fixer_model, base_timeout=900,
+                    label=f"Code-fixer-R{review_round}", writable_files=writable_code,
+                    job_ref=job)
+
+                _git_checkpoint(f"Code fixer R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")
+
+            # Done
+            job["status"] = "completed"
+            job["phase"] = "done"
+            job["round_results"] = round_results
+            summary = f"Code review on branch `{branch_name}` — {len(code_files)} files, {len(ref_files)} ref docs\n"
+            summary += "\n".join(round_results)
+            if cur_reviewers:
+                summary += f"\n⚠️ {len(cur_reviewers)} reviewers still had issues after {params.max_rounds} rounds"
+            else:
+                summary += "\n✅ All reviewers satisfied"
+            job["result"] = summary
+            _save_job(wd, job)
+
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            job["phase"] = "error"
+            _save_job(wd, job)
+
+    asyncio.create_task(_run_review_job())
+
+    return (
+        f"🚀 Code review launched in background as job `{job_id}`\n"
+        f"Branch: `{branch_name}` — {len(code_files)} files, {len(ref_files)} ref docs\n"
+        f"4 reviewers × up to {params.max_rounds} rounds\n"
+        f"Use review_status to check progress. I'll also report status on your next message."
+    )
+
+
+class ReviewStatusParams(BaseModel):
+    working_dir: str = Field(
+        default="",
+        description="Root directory of the codebase (defaults to current working dir)"
+    )
+    job_id: str = Field(
+        default="",
+        description="Specific job ID to check (defaults to most recent job)"
+    )
+
+
+@define_tool(
+    description=(
+        "Check status of background code review jobs. "
+        "Shows whether reviewers are still running, which round they're on, "
+        "and final results if completed. Works across sessions — "
+        "can check on jobs started before a restart."
+    )
+)
+async def review_status(params: ReviewStatusParams) -> str:
+    wd = os.path.abspath(params.working_dir or _coding_working_dir or ".")
+    if not os.path.isdir(wd):
+        return f"Error: directory not found: {wd}"
+
+    jobs = _list_jobs(wd)
+    if not jobs:
+        return "No background review jobs found."
+
+    if params.job_id:
+        job = _load_job(wd, params.job_id)
+        if not job:
+            return f"Job `{params.job_id}` not found."
+        jobs = [job]
     else:
-        summary += "\n✅ All reviewers satisfied"
-    return summary
+        # Show most recent, plus any still running
+        running = [j for j in jobs if _check_job_liveness(j) == "running"]
+        if running:
+            jobs = running
+        else:
+            jobs = jobs[-1:]  # just the latest
+
+    lines = []
+    for j in jobs:
+        status = _check_job_liveness(j)
+        elapsed = int(_time.time()) - j.get("started_at", 0)
+        mins = elapsed // 60
+
+        lines.append(f"**Job `{j['id']}`** — {j.get('type', '?')}")
+        lines.append(f"  Status: {status} | Phase: {j.get('phase', '?')} | Elapsed: {mins}m")
+        lines.append(f"  Branch: `{j.get('branch', '?')}` | Files: {j.get('files_count', '?')}")
+
+        if j.get("round_results"):
+            for rr in j["round_results"]:
+                lines.append(f"  {rr}")
+
+        if status == "completed" and j.get("result"):
+            lines.append(f"  Result:\n{j['result']}")
+        elif status == "failed" and j.get("error"):
+            lines.append(f"  Error: {j['error']}")
+        elif status == "dead":
+            lines.append(f"  ⚠️ Processes died — job did not complete. Last phase: {j.get('phase', '?')}")
+            pids = j.get("active_pids", [])
+            if pids:
+                alive = [p for p in pids if _pid_alive(p)]
+                lines.append(f"  PIDs tracked: {pids} — alive: {alive}")
+
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Tool: Steam store & API ──────────────────────────────────────────────────
@@ -8272,6 +8501,7 @@ def _build_system_message() -> str:
             "\n\nRecent conversation history (the user's past queries in this profile). "
             "Use this for context about what they've been asking about:\n" + history
         )
+    base += _background_jobs_summary()
     return base
 
 

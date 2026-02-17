@@ -5252,6 +5252,13 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
             os.unlink(prompt_file)
         except Exception:
             pass
+        # Absorb sub-agent cost data from stderr
+        for line in stderr_text.splitlines():
+            if line.startswith("MARVIN_COST:"):
+                try:
+                    _usage.absorb_sub_cost(json.loads(line[len("MARVIN_COST:"):]))
+                except Exception:
+                    pass
         return proc.returncode or 0, stdout_text, stderr_text
 
     async def _review_sub_with_retry(prompt, model, base_timeout=600, label="",

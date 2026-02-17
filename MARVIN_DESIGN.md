@@ -318,13 +318,15 @@ Parent Marvin Process (orchestrator)
 ├── Sub-agent: Spec Writer      (plan-tier, writes .marvin/spec.md)
 ├── Sub-agent: UX Writer        (plan-tier, writes .marvin/ux.md)
 │       ↑ These two run in PARALLEL (phase 1a)
-├── Sub-agent: Spec Reviewer    (opus-tier, READONLY)
+├── Sub-agent: Spec Reviewer ×3 (opus + 2× aux, READONLY, adversarial R1)
 ├── Sub-agent: Spec Fixer       (codex-tier, applies review fixes)
-│       ↑ Review/fix loop (phase 1a_review)
+│       ↑ Review/fix loop up to 4 rounds (phase 1a_review)
+│       ↑ R1 is adversarial (must find issues), R2+ can pass
+│       ↑ Findings saved to .marvin/review-history-{doc}.md
 ├── Sub-agent: Architecture     (plan-tier, writes .marvin/design.md)
 ├── Sub-agent: Design Reviewer  (opus-tier, READONLY)
 ├── Sub-agent: Design Fixer     (codex-tier, applies review fixes)
-│       ↑ Review/fix loop (phase 1b_review)
+│       ↑ Review/fix loop up to 4 rounds (phase 1b_review)
 ├── Sub-agent: Test Writer      (codex-tier, writes tests/)
 │       ↑ Phases 2a (functional) and 2b (integration/E2E)
 ├── Sub-agent: Implementer      (codex-tier, writes src/)
@@ -342,7 +344,7 @@ python app.py \
   --non-interactive \
   --working-dir /project \
   --model $TIER_MODEL \
-  --prompt "..."
+  --prompt-file /path/to/prompt.txt
 ```
 
 With these environment variables set by the parent:
@@ -353,6 +355,7 @@ With these environment variables set by the parent:
 | `MARVIN_MODEL`        | Model for this tier (codex/opus/plan)  |
 | `MARVIN_TICKET`       | Parent ticket ID                       |
 | `MARVIN_READONLY`     | `"1"` for review agents, unset otherwise |
+| `MARVIN_WRITABLE_FILES` | Comma-separated paths for fixer agents (e.g. `.marvin/spec.md`) |
 | `MARVIN_SUBAGENT_LOG` | Path to JSONL log file                 |
 
 ### 4.4 Sub-Agent Communication
@@ -656,6 +659,52 @@ but contains garbage.
 
 **Solution**: Agents MUST use the `create_file` tool explicitly. No
 stdout-to-file fallback. Ever.
+
+### 6.13 Context Budget Management
+
+**Problem**: Sub-agents with large context models (e.g. Kimi K2.5 at 228K tokens)
+can exhaust their context window reading large files, leaving no room for output.
+The model produces "Let me continue reading..." instead of useful work.
+
+**Solution**: The tool loop implements a three-tier budget system:
+1. **Warning at 180K tokens**: Inject a warning into tool results telling the agent
+   to stop reading and start producing output
+2. **Compaction at 200K tokens**: Dump full context to `.marvin/logs/context-backup-{ts}.jsonl`,
+   replace with system message + compact summary + last 8 messages
+3. **read_file budget gating**: If a `read_file` result would push context past
+   the warning threshold, truncate the result and tell the agent to use smaller
+   `start_line`/`end_line` ranges
+
+After compaction, the deterministic memory indexer extracts keywords, file references,
+and findings from the backup and writes them to `.marvin/memories/INDEX.md` for
+cross-agent recovery.
+
+### 6.14 Review History and Adversarial R1
+
+**Problem**: Spec reviewers rubber-stamp documents without finding real issues,
+especially when the model knows the "pass" keyword.
+
+**Solution**:
+- **Round 1 is adversarial**: 3 parallel reviewers are told the spec is NEVER
+  perfect and must end with `REVIEW_FAILED`. The pass keyword is not mentioned
+  in the R1 prompt so the model cannot accidentally (or deliberately) use it.
+- **Rounds 2–4 can pass**: Single reviewer checks if fixer addressed issues.
+  Can respond `SPEC_VERIFIED` to end the loop.
+- **All findings are collated**: Every round's output is appended to
+  `.marvin/review-history-{doc}.md`. Both reviewers and fixers are told where
+  to find prior round findings.
+- **Empty output crashes the pipeline**: If all 3 R1 reviewers return empty
+  output, the pipeline aborts with `RuntimeError` rather than silently passing.
+
+### 6.15 Write Restrictions for Design-Phase Agents
+
+**Problem**: Fixer agents (spec fixer, UX fixer, design fixer) had full write
+access and would create implementation files instead of just fixing docs.
+
+**Solution**: `MARVIN_WRITABLE_FILES` env var restricts which files an agent can
+write to (comma-separated relative paths). Additionally, these agents have
+`run_command`, `git_commit`, `git_checkout`, `write_note`, `install_packages`,
+`launch_agent`, and `launch_research_agent` stripped from their tool set.
 
 ---
 

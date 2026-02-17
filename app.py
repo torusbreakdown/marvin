@@ -2302,6 +2302,14 @@ class LaunchAgentParams(BaseModel):
     )
 
 
+class LaunchResearchAgentParams(BaseModel):
+    query: str = Field(description="The research question or investigation query for the agent")
+    model: str = Field(
+        default="auto",
+        description="Model tier: 'auto', 'codex', or 'opus'"
+    )
+
+
 # ── Coding tools ─────────────────────────────────────────────────────────────
 
 @define_tool(
@@ -3002,6 +3010,82 @@ def _auto_select_model(prompt: str) -> str:
 
 @define_tool(
     description=(
+        "Launch a readonly research agent to investigate a question. "
+        "The agent can read files, search code, browse the web, search "
+        "Stack Overflow, Wikipedia, and use other read-only tools. "
+        "It CANNOT edit files, run commands, or create files — it is strictly read-only. "
+        "Returns the agent's findings as text. No ticket required."
+    )
+)
+async def launch_research_agent(params: LaunchResearchAgentParams) -> str:
+    wd = _coding_working_dir
+    if not wd:
+        return "No working directory set."
+
+    # Model selection
+    if params.model == "auto":
+        tier = _auto_select_model(params.query)
+    else:
+        tier = params.model
+    model_name = _AGENT_MODELS.get(tier)
+    if not model_name:
+        return f"Unknown model tier '{tier}'. Use: codex, opus, or auto."
+
+    import sys as _sys, tempfile as _tempfile
+    app_path = os.path.abspath(_sys.argv[0])
+
+    research_prompt = (
+        "You are a RESEARCH AGENT. Investigate the following query using the tools "
+        "available to you. You can read files, search code, browse the web, search "
+        "Stack Overflow, Wikipedia, etc. You CANNOT edit files or run commands.\n\n"
+        "Use write_note to save your findings as you go.\n\n"
+        f"QUERY: {params.query}\n\n"
+        "When done, output a clear, concise summary of your findings."
+    )
+
+    sub_env = os.environ.copy()
+    sub_env.pop("VIRTUAL_ENV", None)
+    sub_env.pop("CONDA_PREFIX", None)
+    sub_env.pop("GIT_DIR", None)
+    sub_env["MARVIN_DEPTH"] = str(int(os.environ.get("MARVIN_DEPTH", "0")) + 1)
+    sub_env["MARVIN_MODEL"] = model_name
+    sub_env["MARVIN_READONLY"] = "1"
+    sub_env["PYTHONUNBUFFERED"] = "1"
+
+    # Write prompt to temp file to avoid E2BIG
+    log_dir = os.path.join(wd, ".marvin", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    prompt_fd, prompt_file = _tempfile.mkstemp(prefix="research-prompt-", suffix=".txt", dir=log_dir)
+    try:
+        os.write(prompt_fd, research_prompt.encode("utf-8"))
+    finally:
+        os.close(prompt_fd)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _sys.executable, app_path, "--non-interactive", "--working-dir", wd,
+            "--prompt-file", prompt_file,
+            cwd=wd, env=sub_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        sout, serr = await asyncio.wait_for(proc.communicate(), timeout=600)
+        stdout_text = (sout or b"").decode(errors="replace").strip()
+        return stdout_text if stdout_text else "(research agent returned no output)"
+    except asyncio.TimeoutError:
+        if proc and proc.returncode is None:
+            proc.kill()
+        return "Research agent timed out after 600s"
+    except Exception as e:
+        return f"Research agent failed: {e}"
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except Exception:
+            pass
+
+
+@define_tool(
+    description=(
         "Launch a sub-agent to execute a specific task in non-interactive mode. "
         "REQUIRES a valid ticket ID from the tk ticket system — create one with "
         "create_ticket first, with dependencies on any prerequisite tickets. "
@@ -3103,7 +3187,18 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 f"Create child tasks for sub-units of work. Close your ticket when done.\n\n"
             )
 
-        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt", ticket_preamble + prompt]
+        full_prompt = ticket_preamble + prompt
+        # Write prompt to temp file to avoid E2BIG on large prompts
+        import tempfile as _tempfile
+        _prompt_dir = os.path.join(wd, ".marvin", "logs")
+        os.makedirs(_prompt_dir, exist_ok=True)
+        prompt_fd, prompt_file = _tempfile.mkstemp(prefix="marvin-prompt-", suffix=".txt", dir=_prompt_dir)
+        try:
+            os.write(prompt_fd, full_prompt.encode("utf-8"))
+        finally:
+            os.close(prompt_fd)
+
+        cmd = [_sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
         if _ntfy_override_topic:
             cmd.extend(["--ntfy", _ntfy_override_topic])
 
@@ -3203,7 +3298,20 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 pass
             return -1, "", f"{label or 'Sub-agent'} timed out after {timeout_s}s"
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                with open(log_path, "w") as lf:
+                    lf.write(f"=== {label} | model={model} | EXCEPTION ===\n{tb}\n")
+            except Exception:
+                pass
             return -1, "", f"{label or 'Sub-agent'} failed: {e}"
+        finally:
+            # Clean up prompt temp file
+            try:
+                os.unlink(prompt_file)
+            except Exception:
+                pass
 
     # Hard errors are non-retryable; timeouts and crashes retry with escalating timeouts.
     _HARD_ERRORS = ("ModuleNotFoundError", "ImportError", "model capability",
@@ -3466,10 +3574,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     async def _spec_design_review(doc_path: str, doc_label: str) -> None:
         """Review a generated spec or design doc against upstream references.
 
-        Runs a readonly reviewer (opus tier) that checks the generated document
-        for consistency with upstream reference docs. If issues are found,
-        dispatches a fixer (plan tier) to update the document, then re-reviews.
-        Up to 2 rounds of review/fix.
+        Runs readonly reviewers that check the generated document for
+        consistency with upstream reference docs. Uses read_file naturally;
+        the tool loop's context budget will truncate oversized reads.
         """
         if not os.path.isfile(doc_path):
             return
@@ -3485,103 +3592,133 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             return  # nothing to verify against
 
         rel_doc = os.path.relpath(doc_path, wd)
-        # When reviewing design.md, also verify it against spec.md
         spec_path = os.path.join(wd, ".marvin", "spec.md")
         also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
-        review_prompt = (
+
+        review_prompt_base = (
             f"You are a SPEC COMPLIANCE AUDITOR. The files in .marvin/upstream/ are the "
             f"AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM. The generated "
             f"document '{rel_doc}' must implement EVERY requirement from upstream EXACTLY "
             f"as specified — no simplifications, no omissions, no reinterpretations"
             + (" — and must also be consistent with the product spec (.marvin/spec.md)" if also_check_spec else "")
             + ".\n\n"
-            "STEPS:\n"
-            f"1. Read {rel_doc} completely with read_file.\n"
-            "2. Read ALL upstream reference documents:\n"
-            + "\n".join(f"   - {f}" for f in upstream_files) + "\n"
-            + (f"3. Read .marvin/spec.md — the generated product spec.\n" if also_check_spec else "")
-            + f"{'4' if also_check_spec else '3'}. Cross-check EVERY claim in the generated document against the upstream "
-            "   specs"
-            + (" and the product spec" if also_check_spec else "")
-            + ". Look for:\n"
-            "   - **Simplifications** — upstream describes X in detail but the generated doc "
-            "     says 'simplified version' or 'we can add later' — this is ALWAYS critical\n"
-            "   - **Omissions** — upstream specifies a feature/endpoint/format that the "
-            "     generated doc doesn't mention at all — this is ALWAYS critical\n"
-            "   - **Contradictions** — the generated doc says X but upstream says Y\n"
-            "   - **Wrong labels/names** — e.g. using 'Assistant:' when upstream says 'Marvin:'\n"
-            "   - **Format mismatches** — streaming formats, event names, field names, etc.\n"
-            "   - **Invented behavior** — the generated doc describes behavior not in upstream\n"
-            "   - **Missing newline/whitespace handling** — upstream often specifies exact "
-            "     string processing rules\n"
-            + ("   - **Spec inconsistency** — the design contradicts or omits requirements from spec.md\n" if also_check_spec else "")
+            "METHODOLOGY — work section by section, one upstream doc at a time:\n"
+            "1. Read the generated doc with read_file (use start_line/end_line for large files).\n"
+            "2. Read each upstream doc one at a time. For each upstream section, find the\n"
+            "   matching section in the generated doc and compare.\n"
+            "3. Use write_note to save findings as you go — this persists if context fills.\n"
+            "4. After checking ALL upstream docs, compile your final report.\n\n"
+            "NOTE: If read_file returns a context budget error, use smaller line ranges.\n"
+            "Your context window is limited. Read strategically — you don't have to read\n"
+            "every line, focus on sections with requirements.\n\n"
+            "Look carefully for:\n"
+            "   - **Invented features** — generated doc describes something NOT in upstream\n"
+            "   - **Simplifications** — upstream describes X in detail but generated doc\n"
+            "     says 'simplified version' or omits details\n"
+            "   - **Omissions** — upstream specifies a feature that the generated doc skips\n"
+            "   - **Contradictions** — generated doc says X but upstream says Y\n"
+            "   - **Wrong counts/names** — numbers, labels, field names don't match\n"
+            + ("   - **Spec inconsistency** — design contradicts or omits spec.md requirements\n" if also_check_spec else "")
             + "\n"
-            "CRITICAL RULE: If the generated document 'simplifies' or omits ANY upstream "
-            "requirement, that is a CRITICAL finding. The upstream docs describe a real system "
-            "that already works — every detail matters.\n\n"
             "OUTPUT FORMAT — for each finding:\n"
             "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
             "SEVERITY: critical/major/minor\n\n"
             "Do NOT edit any files. Do NOT run commands. Report only.\n"
-            "If everything is consistent, respond with 'SPEC_VERIFIED'.\n"
         )
 
-        _MAX_SPEC_REVIEW_ROUNDS = 2
+        # Round 1: adversarial — must find issues, no way to pass
+        review_prompt_r1 = review_prompt_base + (
+            "\nThis is a FIRST PASS review. Generated specs are NEVER perfect on the first "
+            "attempt — there are ALWAYS issues. Your job is to find every single one.\n"
+            "End your report with REVIEW_FAILED and a count of issues found.\n"
+        )
+
+        # Round 2+: can pass if fixer addressed everything
+        review_prompt_r2 = review_prompt_base + (
+            "\nThis is a follow-up review after fixes were applied. Check whether the "
+            "previous issues were addressed. If ALL issues are fixed, respond SPEC_VERIFIED.\n"
+            "If issues remain, list them and end with REVIEW_FAILED.\n"
+        )
+
+        _MAX_SPEC_REVIEW_ROUNDS = 4
+        # Collated review history — all rounds' findings in one file
+        review_history_path = os.path.join(wd, ".marvin", f"review-history-{doc_label}.md")
+
         for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
             await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
+            # Tell reviewers where prior reviews are
+            history_note = ""
+            if os.path.isfile(review_history_path):
+                history_note = (
+                    f"\n\nPRIOR REVIEWS: All previous review findings are saved in "
+                    f".marvin/review-history-{doc_label}.md — read it with read_file "
+                    f"to see what was found and fixed in earlier rounds.\n"
+                )
+            prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note
 
             if review_round == 1:
-                # First round: 3 parallel reviewers for maximum coverage
+                # First round: 3 parallel adversarial reviewers
                 review_tasks = [
                     _run_sub_with_retry(
-                        review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
+                        prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
                         label=f"Spec review (plan): {doc_label} R1", readonly=True),
                     _run_sub_with_retry(
-                        review_prompt, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
+                        prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
                         label=f"Spec review (aux1): {doc_label} R1", readonly=True),
                     _run_sub_with_retry(
-                        review_prompt, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
+                        prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
                         label=f"Spec review (aux2): {doc_label} R1", readonly=True),
                 ]
                 results = await asyncio.gather(*review_tasks)
-                # Merge all reviewer outputs
+                # Merge all reviewer outputs — round 1 always produces findings
                 all_outputs = []
-                all_verified = True
+                any_real_output = False
                 for rc, rev_out, rev_err in results:
-                    if rev_out and "SPEC_VERIFIED" not in rev_out:
-                        all_verified = False
+                    if rev_out and rev_out.strip():
+                        any_real_output = True
                         all_outputs.append(rev_out)
-                if all_verified:
-                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (all 3 reviewers agree)")
-                    break
-                rev_out = "\n\n---\n\n".join(all_outputs) if all_outputs else "(no output)"
+                if not any_real_output:
+                    await _notify_pipeline(f"🚫 PIPELINE ABORT: Spec review {doc_label} — all reviewers returned empty output")
+                    raise RuntimeError(f"Spec review {doc_label} failed: all 3 reviewers returned empty output")
+                rev_out = "\n\n---\n\n".join(all_outputs)
             else:
-                # Subsequent rounds: single opus reviewer
+                # Subsequent rounds: single reviewer, can pass
                 rc, rev_out, rev_err = await _run_sub_with_retry(
-                    review_prompt, _AGENT_MODELS["opus"], base_timeout=900,
+                    prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
                     label=f"Spec review: {doc_label} R{review_round}", readonly=True)
 
-                if "SPEC_VERIFIED" in (rev_out or ""):
-                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
-                    break
+            # Append this round's findings to the review history file
+            try:
+                with open(review_history_path, "a") as rh:
+                    rh.write(f"\n\n{'='*60}\n")
+                    rh.write(f"## Round {review_round} Review Findings\n")
+                    rh.write(f"{'='*60}\n\n")
+                    rh.write(rev_out or "(no findings)")
+                    rh.write("\n")
+            except Exception:
+                pass
+
+            # Round 2+: check if verified after logging
+            if review_round > 1 and "SPEC_VERIFIED" in (rev_out or ""):
+                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
+                break
 
             # Dispatch a fixer agent (plan tier) to update the document
             fix_prompt = (
                 _project_context() + "\n\n"
                 f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
-                "The following violations were found between the generated document "
-                "and the AUTHORITATIVE upstream specs. The upstream specs describe an "
+                "Review findings have been saved. The upstream specs describe an "
                 "EXISTING SYSTEM — they are always right. Fix ALL critical and major "
                 "issues by updating the generated document to EXACTLY match upstream.\n\n"
                 "DO NOT 'simplify' — if upstream says it, the generated doc must say it.\n"
                 "DO NOT omit features — if upstream has it, the generated doc must have it.\n\n"
-                f"{rev_out or '(no output)'}\n\n"
                 "INSTRUCTIONS:\n"
-                f"1. Read {rel_doc} and ALL upstream files in .marvin/upstream/\n"
-                "2. Fix each SPEC_MISMATCH by updating the generated document to match upstream EXACTLY\n"
-                "3. Use apply_patch or edit the file to make corrections\n"
-                "4. Do NOT change upstream reference files — only update the generated document\n"
-                "5. Preserve the overall structure and completeness of the document\n"
+                f"1. Read .marvin/review-history-{doc_label}.md for all review findings\n"
+                f"2. Read {rel_doc} and the relevant upstream files in .marvin/upstream/\n"
+                "3. Fix each SPEC_MISMATCH by updating the generated document to match upstream EXACTLY\n"
+                "4. Use apply_patch or edit the file to make corrections\n"
+                "5. Do NOT change upstream reference files — only update the generated document\n"
+                "6. Preserve the overall structure and completeness of the document\n"
             )
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
             await _run_sub_with_retry(
@@ -10606,11 +10743,10 @@ async def _run_tool_loop(
         summary_msg = {
             "role": "user",
             "content": (
-                f"⚠️ CONTEXT COMPACTED — {len(middle)} messages summarized to save space.\n"
-                f"Full context backed up to: {_context_backup_path}\n"
-                f"A keyword index is available at .marvin/memories/INDEX.md — read it to find "
-                f"specific content from your earlier work without re-reading entire files.\n"
-                f"Use read_file on the backup path with line ranges to recover specific sections.\n\n"
+                f"⚠️ CONTEXT FORGOTTEN — {len(middle)} messages compacted.\n"
+                f"Your earlier context has been saved to .marvin/memories/. "
+                f"Read .marvin/memories/INDEX.md to find keywords and file references "
+                f"from your prior work. Full backup: {_context_backup_path}\n\n"
                 f"SUMMARY OF PRIOR WORK:\n{compact_summary}\n\n"
                 f"Continue with your task. Focus on PRODUCING OUTPUT, not re-reading."
             ),
@@ -10796,6 +10932,40 @@ async def _run_tool_loop(
         for call_id, fn_name, result in results:
             _usage.record(fn_name)
             result_str = str(result)
+
+            # Budget-gate read_file: if result would push context past warning
+            # threshold, truncate it and tell agent to use smaller ranges
+            if fn_name == "read_file" and len(result_str) > 2000:
+                _ctx_tokens = _estimate_tokens(messages)
+                result_tokens = len(result_str) // 4
+                if _ctx_tokens + result_tokens > _CTX_WARN_TOKENS:
+                    # How much room do we have?
+                    room_tokens = max(0, _CTX_WARN_TOKENS - _ctx_tokens)
+                    room_chars = room_tokens * 4
+                    if room_chars < 2000:
+                        # No room at all — return error
+                        result_str = (
+                            f"⚠️ CONTEXT BUDGET EXCEEDED — cannot fit this file in context "
+                            f"(~{_ctx_tokens // 1000}K / {_CTX_MAX_TOKENS // 1000}K tokens used). "
+                            f"Use smaller start_line/end_line ranges (e.g. 100-line chunks), "
+                            f"or use write_note to save your findings and move on to producing output."
+                        )
+                    else:
+                        # Truncate to fit
+                        lines = result_str.split("\n")
+                        truncated = []
+                        char_count = 0
+                        for line in lines:
+                            if char_count + len(line) + 1 > room_chars:
+                                break
+                            truncated.append(line)
+                            char_count += len(line) + 1
+                        result_str = "\n".join(truncated) + (
+                            f"\n\n⚠️ TRUNCATED — only {len(truncated)} of {len(lines)} lines shown "
+                            f"(~{_ctx_tokens // 1000}K / {_CTX_MAX_TOKENS // 1000}K tokens used). "
+                            f"Use start_line/end_line for remaining sections."
+                        )
+
             # Inject context budget warning
             _ctx_tokens = _estimate_tokens(messages)
             if _ctx_tokens > _CTX_WARN_TOKENS:
@@ -10803,9 +10973,9 @@ async def _run_tool_loop(
                 pct = int((_ctx_tokens / _CTX_MAX_TOKENS) * 100)
                 result_str += (
                     f"\n\n⏳ CONTEXT BUDGET: ~{_ctx_tokens // 1000}K / {_CTX_MAX_TOKENS // 1000}K tokens used ({pct}%). "
-                    f"~{max(0, remaining) // 1000}K until auto-compaction. "
-                    f"STOP READING and START PRODUCING OUTPUT NOW. "
-                    f"Summarize what you've learned and write your deliverable."
+                    f"~{max(0, remaining) // 1000}K until context forgotten. "
+                    f"After compaction, check .marvin/memories/INDEX.md to recover prior work. "
+                    f"STOP READING and START PRODUCING OUTPUT NOW."
                 )
             messages.append({
                 "role": "tool",
@@ -10901,7 +11071,7 @@ def _build_all_tools():
         set_working_dir, get_working_dir,
         create_file, append_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
-        run_command, install_packages, launch_agent, tk,
+        run_command, install_packages, launch_agent, launch_research_agent, tk,
         # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,
@@ -11372,6 +11542,14 @@ async def _run_non_interactive():
         if a == "--prompt" and i < len(sys.argv) - 1:
             prompt_text = sys.argv[i + 1]
             skip_next = True
+        elif a == "--prompt-file" and i < len(sys.argv) - 1:
+            try:
+                with open(sys.argv[i + 1], "r") as pf:
+                    prompt_text = pf.read()
+            except Exception as e:
+                print(f"Error reading prompt file: {e}", file=sys.stderr)
+                sys.exit(1)
+            skip_next = True
         elif a == "--working-dir" and i < len(sys.argv) - 1:
             working_dir = sys.argv[i + 1]
             skip_next = True
@@ -11382,7 +11560,7 @@ async def _run_non_interactive():
             design_first = True
 
     if not prompt_text:
-        print("Error: --prompt is required in non-interactive mode", file=sys.stderr)
+        print("Error: --prompt or --prompt-file is required in non-interactive mode", file=sys.stderr)
         sys.exit(1)
 
     # Set up coding mode
@@ -11417,7 +11595,7 @@ async def _run_non_interactive():
         all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _WRITE_TOOLS]
     # MARVIN_WRITABLE_FILES: strip run_command and other write tools entirely (file writes gated per-file in the tools themselves)
     if os.environ.get("MARVIN_WRITABLE_FILES"):
-        _BLOCKED = {"run_command", "git_commit", "git_checkout", "write_note", "install_packages", "launch_agent"}
+        _BLOCKED = {"run_command", "git_commit", "git_checkout", "write_note", "install_packages", "launch_agent", "launch_research_agent"}
         all_tools = [t for t in all_tools if getattr(t, "__name__", getattr(t, "name", "")) not in _BLOCKED]
     if _SUBAGENT_TOOL_LOG:
         all_tools = _wrap_tools_with_logging(all_tools)

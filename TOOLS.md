@@ -288,6 +288,16 @@ All tool calls are JSON objects with named parameters. Arguments must NEVER be a
   - `design_first`: `bool` (default: False) — Run spec & architecture passes before implementation. Phase 1a uses claude-opus-4.6 to generate a product spec and UX design (.marvin/spec.md). Phase 1b uses claude-opus-4.6 to generate architecture and exhaustive test plan (.marvin/design.md) based on the spec. Recommended for greenfield tasks.
   - `tdd`: `bool` (default: False) — Enable TDD workflow: (1) write failing tests first in parallel agents, (2) implement code, (3) run debug loop until all tests pass. Requires design_first=true or an existing .marvin/design.md.
 
+### `launch_research_agent`
+**Description**: Launch a readonly research agent to investigate a question. The agent can read files, search code, browse the web, search Stack Overflow, Wikipedia, and use other read-only tools. It CANNOT edit files, run commands, or create files — it is strictly read-only. Returns the agent's findings as text. No ticket required.
+**Parameters** (LaunchResearchAgentParams):
+  - `query`: `str` (required) — The research question or investigation query for the agent
+  - `model`: `str` (default: 'auto') — Model tier: 'auto', 'codex', or 'opus'
+**Notes**:
+  - Not available to fixer agents (MARVIN_WRITABLE_FILES) — only plan/review/general agents
+  - Spawns a subprocess with MARVIN_READONLY=1, so all write tools are stripped
+  - 600s timeout, depth-limited like launch_agent
+
 
 ## Steam Gaming
 ### `steam_search` (line 4546)

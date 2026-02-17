@@ -137,10 +137,13 @@ This is the primary integration surface.
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--non-interactive` | Yes | Enables single-shot mode |
-| `--prompt TEXT` | Yes | The user's message |
+| `--prompt TEXT` | Yes* | The user's message |
+| `--prompt-file PATH` | Yes* | Read prompt from a file (avoids E2BIG for large prompts) |
 | `--working-dir PATH` | No | Sets coding working directory |
 | `--design-first` | No | Triggers design-first TDD pipeline (§4) |
 | `--ntfy TOPIC` | No | Push notification topic for pipeline alerts |
+
+*One of `--prompt` or `--prompt-file` is required.
 
 ### 3.2 What Non-Interactive Mode Does
 
@@ -558,6 +561,7 @@ Can also be set via the `--provider` CLI flag in interactive mode.
 | `MARVIN_FE_ROUNDS` | `10` | Max frontend validation iterations (Phase 4c) |
 | `MARVIN_QA_ROUNDS` | `3` | Max adversarial QA iterations (Phase 5) |
 | `MARVIN_READONLY` | *(unset)* | Set to `1` to strip write tools |
+| `MARVIN_WRITABLE_FILES` | *(unset)* | Comma-separated relative paths; restricts file writes to only those paths. Also strips `run_command`, `git_commit`, `git_checkout`, `write_note`, `install_packages`, `launch_agent`, `launch_research_agent` |
 | `MARVIN_SUBAGENT_LOG` | *(none)* | Path for JSONL tool-call logging |
 | `WHISPER_MODEL` | `whisper-large-v3` | Groq Whisper model for speech-to-text |
 | `EDITOR` | `nano` | Editor for opening preferences |

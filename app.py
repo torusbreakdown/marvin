@@ -5349,10 +5349,10 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
     writable_code = [f for f in code_files if not f.startswith(params.ref_dir)]
 
     active_reviewers = [
-        ("plan", _AGENT_MODELS["opus"], False),
-        ("aux1", _AGENT_MODELS["aux_reviewer"], False),
-        ("aux2", _AGENT_MODELS["aux_reviewer"], False),
-        ("quality", _AGENT_MODELS["aux_reviewer"], True),
+        ("plan", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
+        ("aux1", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
+        ("aux2", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), False),
+        ("quality", os.environ.get("MARVIN_REVIEW_CODEBASE_MODEL", "claude-sonnet-4"), True),
     ]
 
     round_results = []
@@ -5435,8 +5435,9 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
             "- Do NOT create tickets.\n"
             "- A separate independent reviewer will check your work.\n"
         )
+        _review_fixer_model = os.environ.get("MARVIN_REVIEW_CODEBASE_FIXER", "claude-sonnet-4")
         await _review_sub_with_retry(
-            fix_prompt, _AGENT_MODELS["fallback"], base_timeout=900,
+            fix_prompt, _review_fixer_model, base_timeout=900,
             label=f"Code-fixer-R{review_round}", writable_files=writable_code)
 
         _git_checkpoint(f"Code fixer R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")

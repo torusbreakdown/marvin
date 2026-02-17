@@ -2355,6 +2355,9 @@ def _ticket_gate_check() -> str | None:
         return None
     if not os.environ.get("MARVIN_TICKET"):
         return None
+    # Skip ticket gate for write-restricted agents (fixers with specific file targets)
+    if os.environ.get("MARVIN_WRITABLE_FILES"):
+        return None
     if getattr(tk, "_agent_has_ticket", False):
         return None
     parent = os.environ.get("MARVIN_TICKET", "unknown")
@@ -3766,50 +3769,54 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 # First round: 4 parallel adversarial reviewers (3 upstream compliance + 1 quality)
                 def _reviewer_check_done(rc, out, err):
                     return len((out or "").strip()) > 200
-                review_tasks = [
-                    _run_sub_with_retry(
-                        prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
-                        label=f"Spec review (plan): {doc_label} R1", readonly=True,
-                        check_done=_reviewer_check_done),
-                    _run_sub_with_retry(
-                        prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
-                        label=f"Spec review (aux1): {doc_label} R1", readonly=True,
-                        check_done=_reviewer_check_done),
-                    _run_sub_with_retry(
-                        prompt_for_round, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
-                        label=f"Spec review (aux2): {doc_label} R1", readonly=True,
-                        check_done=_reviewer_check_done),
-                    _run_sub_with_retry(
-                        review_prompt_quality, _AGENT_MODELS["aux_reviewer"], base_timeout=900,
-                        label=f"Spec review (quality): {doc_label} R1", readonly=True,
-                        check_done=_reviewer_check_done),
+                active_reviewers = [
+                    ("plan", _AGENT_MODELS["opus"], False),
+                    ("aux1", _AGENT_MODELS["aux_reviewer"], False),
+                    ("aux2", _AGENT_MODELS["aux_reviewer"], False),
+                    ("quality", _AGENT_MODELS["aux_reviewer"], True),  # True = quality reviewer
                 ]
-                results = await asyncio.gather(*review_tasks)
-                # Merge reviewer outputs — omit clean reviews, only keep ones with issues
-                all_outputs = []
-                any_real_output = False
-                for rc, rev_out, rev_err in results:
-                    out = (rev_out or "").strip()
-                    if not out or len(out) <= 200:
-                        continue
-                    # Skip clean reviews — only feed issues to the fixer
-                    if "SPEC_VERIFIED" in out:
-                        continue
-                    any_real_output = True
-                    all_outputs.append(out)
-                if not any_real_output:
-                    # All reviewers either returned empty or clean — spec is good
-                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (R1 — all reviewers satisfied)")
-                    if substage:
-                        _save_state(substage)
-                    break
-                rev_out = "\n\n---\n\n".join(all_outputs)
-            else:
-                # Subsequent rounds: single reviewer, can pass
-                rc, rev_out, rev_err = await _run_sub_with_retry(
-                    prompt_for_round, _AGENT_MODELS["opus"], base_timeout=900,
-                    label=f"Spec review: {doc_label} R{review_round}", readonly=True,
-                    check_done=_reviewer_check_done)
+
+            # Build per-reviewer prompts (quality gets its own prompt, others get standard)
+            review_tasks = []
+            for rname, rmodel, is_quality in active_reviewers:
+                rprompt = (review_prompt_quality + history_note + diff_note) if is_quality else prompt_for_round
+                review_tasks.append(_run_sub_with_retry(
+                    rprompt, rmodel, base_timeout=900,
+                    label=f"Spec review ({rname}): {doc_label} R{review_round}", readonly=True,
+                    check_done=_reviewer_check_done))
+            results = await asyncio.gather(*review_tasks)
+
+            # Merge reviewer outputs — omit clean reviews, only keep ones with issues
+            all_outputs = []
+            still_active = []
+            for (rc, rev_out, rev_err), (rname, rmodel, is_quality) in zip(results, active_reviewers):
+                out = (rev_out or "").strip()
+                if not out or len(out) <= 200:
+                    still_active.append((rname, rmodel, is_quality))
+                    continue
+                # Check if this reviewer is satisfied
+                _clean_keywords = ("SPEC_VERIFIED", "no corrections needed", "production-ready",
+                                   "no issues found", "REVIEW_CLEAN", "all issues fixed")
+                if any(k.lower() in out.lower() for k in _clean_keywords):
+                    await _notify_pipeline(f"✅ Reviewer {rname} satisfied: {doc_label} R{review_round}")
+                    continue  # Drop from active — don't add to still_active
+                still_active.append((rname, rmodel, is_quality))
+                all_outputs.append(out)
+
+            # Update active reviewers for next round (drop satisfied ones)
+            active_reviewers = still_active
+
+            if not all_outputs:
+                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (R{review_round} — all reviewers satisfied)")
+                if substage:
+                    _save_state(substage)
+                break
+            if not active_reviewers:
+                if substage:
+                    _save_state(substage)
+                break
+
+            rev_out = "\n\n---\n\n".join(all_outputs)
 
             # Append this round's findings to the review history file
             try:
@@ -3821,15 +3828,6 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     rh.write("\n")
             except Exception:
                 pass
-
-            # Round 2+: check if verified after logging
-            _clean_keywords = ("SPEC_VERIFIED", "no corrections needed", "production-ready",
-                               "no issues found", "REVIEW_CLEAN", "all issues fixed")
-            if review_round > 1 and any(k.lower() in (rev_out or "").lower() for k in _clean_keywords):
-                await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
-                if substage:
-                    _save_state(substage)
-                break
 
             # Dispatch a fixer — PATCH ONLY, no analysis, no self-review
             fix_prompt = (

@@ -4000,7 +4000,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
 
             fix_rc, fix_out, fix_err = await _run_sub_with_retry(
-                fix_prompt, _AGENT_MODELS["codex"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
+                fix_prompt, _AGENT_MODELS["fallback"], base_timeout=1200, label=f"Review fixer: {phase_label} round {review_round}")
 
             if review_round >= _MAX_REVIEW_ROUNDS:
                 await _notify_pipeline(f"⚠️ Review: {phase_label} — max rounds reached")
@@ -4838,7 +4838,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt += _marvin_interface_context()
 
                 rc, fix_out, fix_err = await _run_sub_with_retry(
-                    fix_prompt, _AGENT_MODELS["plan"], base_timeout=1800,
+                    fix_prompt, _AGENT_MODELS["fallback"], base_timeout=1800,
                     label=f"QA-fix-round-{qa_round}")
 
                 await _notify_pipeline(f"🔧 QA fix round {qa_round} complete")

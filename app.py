@@ -2995,7 +2995,7 @@ _AGENT_MODELS = {
     "plan_gen": os.environ.get("MARVIN_CODE_MODEL_PLAN_GEN", "gemini-3-pro-preview"),  # spec/architecture generation
     "test_writer": os.environ.get("MARVIN_CODE_MODEL_TEST_WRITER", "gemini-3-pro-preview"),  # TDD test writing
     "aux_reviewer": os.environ.get("MARVIN_CODE_MODEL_AUX_REVIEWER", "gpt-5.2"),  # second/third spec reviewer
-    "fallback": os.environ.get("MARVIN_CODE_MODEL_FALLBACK", "anthropic/claude-sonnet-4.5"),  # reliable fallback when primary model fails
+    "fallback": os.environ.get("MARVIN_CODE_MODEL_FALLBACK", "claude-sonnet-4.5"),  # reliable fallback via Copilot SDK
 }
 
 
@@ -3170,9 +3170,15 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         sub_env["MARVIN_MODEL"] = model
         sub_env["MARVIN_TICKET"] = params.ticket_id
         sub_env["PYTHONUNBUFFERED"] = "1"
-        # If model contains '/' (e.g. anthropic/claude-sonnet-4.5), route through
-        # kimi/openrouter provider by overriding KIMI_MODEL and setting provider to kimi
-        if "/" in model:
+        # Route known Copilot SDK models through the SDK (not kimi/openrouter)
+        _COPILOT_SDK_MODELS = {"claude-sonnet-4.5", "claude-haiku-4.5", "claude-sonnet-4",
+                               "claude-opus-4.5", "claude-opus-4.6", "gpt-5.2", "gpt-5.1",
+                               "gpt-5", "gpt-5.1-codex", "gpt-5.2-codex", "gpt-5.3-codex"}
+        if model in _COPILOT_SDK_MODELS:
+            sub_env["MARVIN_MODEL"] = model
+            sub_env["LLM_PROVIDER"] = "copilot"
+        elif "/" in model:
+            # OpenRouter model (e.g. anthropic/claude-sonnet-4.5)
             sub_env["KIMI_MODEL"] = model
             sub_env["MARVIN_MODEL"] = "kimi"
             sub_env["LLM_PROVIDER"] = "kimi"

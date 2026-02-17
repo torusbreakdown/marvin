@@ -5015,6 +5015,366 @@ async def launch_agent(params: LaunchAgentParams) -> str:
     return f"[{tier} / {model_name}] Ticket {params.ticket_id} ✅ ({' → '.join(phases)})\n\n{impl_out}"
 
 
+# ── Tool: Standalone code review ─────────────────────────────────────────────
+
+class ReviewCodebaseParams(BaseModel):
+    working_dir: str = Field(description="Root directory of the codebase to review")
+    ref_dir: str = Field(
+        default=".ref",
+        description="Directory containing reference docs (relative to working_dir). "
+        "Any number of .md/.txt files — treated as explanatory context (NOT ground truth). "
+        "The CODE is ground truth; ref docs explain intent, spec, architecture."
+    )
+    focus: str = Field(
+        default="all",
+        description="Review focus: 'all', 'backend', 'frontend', 'tests', or a glob pattern"
+    )
+    max_rounds: int = Field(default=4, description="Maximum review/fix rounds (1-8)", ge=1, le=8)
+
+
+@define_tool(
+    description=(
+        "Run a 4-stage code review on an existing codebase. "
+        "Creates a unique git branch for the review, runs 4 parallel reviewers per round, "
+        "dispatches a fixer for issues found, and repeats until clean or max rounds reached. "
+        "Requires a ref/ directory with docs explaining the codebase intent. "
+        "CODE is ground truth; ref docs are explanatory context only."
+    )
+)
+async def review_codebase(params: ReviewCodebaseParams) -> str:
+    import time as _time
+    import subprocess
+
+    wd = os.path.abspath(params.working_dir or _coding_working_dir or ".")
+    if not os.path.isdir(wd):
+        return f"Error: working directory not found: {wd}"
+
+    ref_path = os.path.join(wd, params.ref_dir)
+    if not os.path.isdir(ref_path):
+        return f"Error: ref directory not found: {ref_path}. Create it with reference docs (.md/.txt)."
+
+    # Collect reference docs
+    ref_files = []
+    for f in sorted(os.listdir(ref_path)):
+        fp = os.path.join(ref_path, f)
+        if os.path.isfile(fp) and f.endswith((".md", ".txt", ".rst")):
+            ref_files.append(os.path.relpath(fp, wd))
+    if not ref_files:
+        return f"Error: no .md/.txt files found in {params.ref_dir}/"
+
+    # Collect code files to review
+    code_files = []
+    skip_dirs = {".venv", ".git", "__pycache__", ".pytest_cache", "node_modules",
+                 ".marvin", params.ref_dir, "dist", "build", ".next", ".nuxt"}
+    for root, dirs, files in os.walk(wd):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for f in files:
+            if not f.endswith((".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css",
+                               ".go", ".rs", ".java", ".c", ".cpp", ".h", ".rb",
+                               ".toml", ".yaml", ".yml", ".json", ".sh")):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), wd)
+            if params.focus == "all":
+                code_files.append(rel)
+            elif params.focus == "backend":
+                if not rel.startswith(("static/", "public/", "frontend/")) and not rel.endswith((".html", ".css")):
+                    code_files.append(rel)
+            elif params.focus == "frontend":
+                if rel.startswith(("static/", "public/", "frontend/", "src/components/")) or rel.endswith((".html", ".css", ".tsx", ".jsx")):
+                    code_files.append(rel)
+            elif params.focus == "tests":
+                if "test" in rel.lower() or rel.startswith("tests/"):
+                    code_files.append(rel)
+            else:
+                import fnmatch
+                if fnmatch.fnmatch(rel, params.focus):
+                    code_files.append(rel)
+
+    if not code_files:
+        return f"Error: no code files found matching focus='{params.focus}'"
+
+    # Set up git branch for the review
+    git_dir = os.path.join(wd, ".git")
+    if not os.path.isdir(git_dir):
+        return "Error: not a git repository. Initialize git first."
+
+    git_env = {**os.environ, "GIT_DIR": git_dir, "GIT_WORK_TREE": wd}
+    branch_name = f"review/{_time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        subprocess.run(["git", "checkout", "-b", branch_name], cwd=wd, env=git_env,
+                        capture_output=True, timeout=10, check=True)
+    except subprocess.CalledProcessError as e:
+        return f"Error creating review branch: {e.stderr.decode()}"
+
+    # ── Sub-agent dispatch (self-contained, mirrors launch_agent internals) ──
+    app_path = os.path.abspath(__file__)
+
+    async def _review_sub(prompt: str, model: str, timeout_s: int = 600,
+                          label: str = "", readonly: bool = False,
+                          writable_files: list[str] | None = None) -> tuple[int, str, str]:
+        sub_env = os.environ.copy()
+        sub_env.pop("VIRTUAL_ENV", None)
+        sub_env.pop("CONDA_PREFIX", None)
+        sub_env.pop("GIT_DIR", None)
+        sub_env["GIT_DIR"] = git_dir
+        sub_env["MARVIN_DEPTH"] = str(int(os.environ.get("MARVIN_DEPTH", "0")) + 1)
+        sub_env["MARVIN_MODEL"] = model
+        sub_env["PYTHONUNBUFFERED"] = "1"
+        # Route model through correct provider
+        _COPILOT_SDK_MODELS = {"claude-sonnet-4.5", "claude-haiku-4.5", "claude-sonnet-4",
+                               "claude-opus-4.5", "claude-opus-4.6", "gpt-5.2", "gpt-5.1",
+                               "gpt-5", "gpt-5.1-codex", "gpt-5.2-codex", "gpt-5.3-codex"}
+        if model in _COPILOT_SDK_MODELS:
+            sub_env["LLM_PROVIDER"] = "copilot"
+        elif "/" in model:
+            sub_env["KIMI_MODEL"] = model
+            sub_env["MARVIN_MODEL"] = "kimi"
+            sub_env["LLM_PROVIDER"] = "kimi"
+        if readonly:
+            sub_env["MARVIN_READONLY"] = "1"
+        if writable_files:
+            sub_env["MARVIN_WRITABLE_FILES"] = ",".join(writable_files)
+
+        import tempfile as _tempfile
+        log_dir = os.path.join(wd, ".marvin", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        prompt_fd, prompt_file = _tempfile.mkstemp(prefix="review-prompt-", suffix=".txt", dir=log_dir)
+        try:
+            os.write(prompt_fd, prompt.encode("utf-8"))
+        finally:
+            os.close(prompt_fd)
+
+        _uv_path = shutil.which("uv")
+        if _uv_path:
+            cmd = [_uv_path, "run", sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
+        else:
+            cmd = [sys.executable, app_path, "--non-interactive", "--working-dir", wd, "--prompt-file", prompt_file]
+
+        safe_label = (label or "review").replace(" ", "-")[:40]
+        ts = int(_time.time())
+        log_path = os.path.join(log_dir, f"{safe_label}-{ts}.log")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=wd, env=sub_env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            sout, serr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            sout, serr = b"", b"TIMEOUT"
+        stdout_text = (sout or b"").decode(errors="replace").strip()
+        stderr_text = (serr or b"").decode(errors="replace").strip()
+        try:
+            with open(log_path, "w") as lf:
+                lf.write(f"=== {label} | model={model} | rc={proc.returncode} ===\n")
+                lf.write(f"=== STDOUT ===\n{stdout_text}\n=== STDERR ===\n{stderr_text}\n")
+        except Exception:
+            pass
+        try:
+            os.unlink(prompt_file)
+        except Exception:
+            pass
+        return proc.returncode or 0, stdout_text, stderr_text
+
+    async def _review_sub_with_retry(prompt, model, base_timeout=600, label="",
+                                     readonly=False, writable_files=None, check_done=None):
+        _MAX_RETRIES = 3
+        for attempt in range(1, _MAX_RETRIES + 1):
+            rc, out, err = await _review_sub(prompt, model, timeout_s=base_timeout * attempt,
+                                             label=label, readonly=readonly, writable_files=writable_files)
+            if check_done and check_done(rc, out, err):
+                return rc, out, err
+            if rc == 0 and len((out or "").strip()) > 200:
+                return rc, out, err
+        # Fallback escalation
+        fallback = _AGENT_MODELS.get("fallback", "")
+        if fallback and fallback != model:
+            rc, out, err = await _review_sub(prompt, fallback, timeout_s=base_timeout * 2,
+                                             label=f"{label} (fallback)", readonly=readonly, writable_files=writable_files)
+        return rc, out, err
+
+    def _git_checkpoint(msg: str):
+        try:
+            subprocess.run(["git", "add", "."], cwd=wd, env=git_env, capture_output=True, timeout=30)
+            subprocess.run(["git", "commit", "-m", msg, "--allow-empty"],
+                           cwd=wd, env=git_env, capture_output=True, timeout=30)
+        except Exception:
+            pass
+
+    def _git_diff_since(ref: str = "HEAD~1") -> str:
+        try:
+            r = subprocess.run(["git", "diff", ref], cwd=wd, env=git_env,
+                               capture_output=True, timeout=30, text=True)
+            return r.stdout[:8000] if r.stdout else ""
+        except Exception:
+            return ""
+
+    # ── Build review prompts ──
+    ref_listing = "\n".join(f"  - {f}" for f in ref_files)
+    code_listing = "\n".join(f"  - {f}" for f in sorted(code_files))
+
+    review_prompt_r1 = (
+        "CODE REVIEW AUDIT. You review an existing codebase against reference documentation.\n\n"
+        f"REFERENCE DOCS (explain intent/spec — read IN CHUNKS, 200 lines at a time):\n{ref_listing}\n\n"
+        f"CODE FILES (ground truth — this is what's actually implemented):\n{code_listing}\n\n"
+        "The CODE is the source of truth. The ref docs explain what the code SHOULD do.\n"
+        "Your job: find where the code diverges from the documented intent, has bugs, "
+        "security issues, missing error handling, or spec violations.\n\n"
+        "METHOD:\n"
+        "1) Read ref docs first (in chunks — use start_line/end_line). Use write_note to save key findings.\n"
+        "2) Read each code file. Compare against ref doc expectations.\n"
+        "3) Report issues found.\n\n"
+        "REVIEW CRITERIA — flag ONLY genuine issues:\n"
+        "1. **Spec violations** — code doesn't match documented behavior\n"
+        "2. **Security** — XSS, injection, unsafe operations, missing sanitization\n"
+        "3. **Logic bugs** — wrong conditions, off-by-one, race conditions, data loss\n"
+        "4. **Missing error handling** — unhandled exceptions, missing null checks\n"
+        "5. **Integration bugs** — wrong API shapes, protocol mismatches\n"
+        "6. **Test gaps** — untested critical paths, mocked things that shouldn't be\n\n"
+        "Do NOT flag: style, naming, minor refactors, missing comments.\n\n"
+        "For EACH issue: FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION\n\n"
+        "FIRST PASS — code is NEVER perfect. Find every issue. "
+        "End with REVIEW_FAILED + issue count.\n"
+        "Read-only — no edits, no commands.\n"
+    )
+
+    review_prompt_quality = (
+        "CODE QUALITY REVIEW. Evaluate code independently for quality.\n\n"
+        f"CODE FILES:\n{code_listing}\n\n"
+        "Evaluate: 1) Maintainability — clear structure, reasonable complexity? "
+        "2) Robustness — error handling, edge cases? "
+        "3) Consistency — naming, patterns, conventions uniform? "
+        "4) Performance — obvious N+1 queries, blocking I/O, memory leaks? "
+        "5) Testability — can the code be tested without excessive mocking?\n\n"
+        "For EACH issue: FILE:LINE — SEVERITY (critical/major/minor) — DESCRIPTION\n\n"
+        "Find every issue. End with REVIEW_FAILED + count.\n"
+        "Read-only — no edits, no commands.\n"
+    )
+
+    review_prompt_r2 = (
+        "FOLLOW-UP CODE REVIEW after fixes were applied.\n\n"
+        f"REFERENCE DOCS:\n{ref_listing}\n\n"
+        f"CODE FILES:\n{code_listing}\n\n"
+        "Read .marvin/review-history-code.md to see ALL prior findings.\n\n"
+        "CRITICAL: Check EVERY prior finding. If ANY critical/major issue from a prior round "
+        "is STILL present in the code, that is a FAILURE. Do not let it slide.\n\n"
+        "The fixer may have claimed to fix things — IGNORE claims. "
+        "Only the actual code matters. Verify each fix by reading the relevant lines.\n\n"
+        "If ALL critical+major issues are fixed → respond with exactly: REVIEW_CLEAN\n"
+        "If ANY issues remain → list them with SEVERITY + REVIEW_FAILED. Be stern.\n"
+    )
+
+    # ── Run review rounds ──
+    _git_checkpoint(f"Review start: {branch_name}")
+    review_history_path = os.path.join(wd, ".marvin", "review-history-code.md")
+    os.makedirs(os.path.join(wd, ".marvin"), exist_ok=True)
+
+    # All writable code files for fixer
+    writable_code = [f for f in code_files if not f.startswith(params.ref_dir)]
+
+    active_reviewers = [
+        ("plan", _AGENT_MODELS["opus"], False),
+        ("aux1", _AGENT_MODELS["aux_reviewer"], False),
+        ("aux2", _AGENT_MODELS["aux_reviewer"], False),
+        ("quality", _AGENT_MODELS["aux_reviewer"], True),
+    ]
+
+    round_results = []
+    for review_round in range(1, params.max_rounds + 1):
+        _git_checkpoint(f"Code review R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')} — needs review")
+
+        history_note = ""
+        if os.path.isfile(review_history_path):
+            history_note = "\n\nPrior reviews in .marvin/review-history-code.md — read w/ read_file.\n"
+
+        diff_note = ""
+        if review_round > 1:
+            fixer_diff = _git_diff_since("HEAD~1")
+            if fixer_diff:
+                diff_note = (
+                    f"\n\nGIT DIFF of fixer's changes:\n```diff\n{fixer_diff}\n```\n"
+                    "CHECK: does this diff address prior findings? If NOT, FAIL them again.\n"
+                )
+
+        prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note + diff_note
+
+        def _reviewer_check_done(rc, out, err):
+            return len((out or "").strip()) > 200
+
+        review_tasks = []
+        for rname, rmodel, is_quality in active_reviewers:
+            rprompt = (review_prompt_quality + history_note + diff_note) if is_quality else prompt_for_round
+            review_tasks.append(_review_sub_with_retry(
+                rprompt, rmodel, base_timeout=900,
+                label=f"Code-review-{rname}-R{review_round}", readonly=True,
+                check_done=_reviewer_check_done))
+        results = await asyncio.gather(*review_tasks)
+
+        all_outputs = []
+        still_active = []
+        for (rc, rev_out, rev_err), (rname, rmodel, is_quality) in zip(results, active_reviewers):
+            out = (rev_out or "").strip()
+            if not out or len(out) <= 200:
+                still_active.append((rname, rmodel, is_quality))
+                continue
+            _clean_keywords = ("REVIEW_CLEAN", "SPEC_VERIFIED", "no corrections needed",
+                               "production-ready", "no issues found", "all issues fixed")
+            if any(k.lower() in out.lower() for k in _clean_keywords):
+                continue  # Drop satisfied reviewer
+            still_active.append((rname, rmodel, is_quality))
+            all_outputs.append(out)
+
+        active_reviewers = still_active
+        round_results.append(f"R{review_round}: {len(all_outputs)} reviewers found issues, {4 - len(still_active)} satisfied")
+
+        if not all_outputs:
+            round_results.append(f"R{review_round}: ALL CLEAN ✅")
+            break
+        if not active_reviewers:
+            break
+
+        rev_out = "\n\n---\n\n".join(all_outputs)
+        try:
+            with open(review_history_path, "a") as rh:
+                rh.write(f"\n\n{'='*60}\n## Round {review_round} Findings\n{'='*60}\n\n")
+                rh.write(rev_out)
+                rh.write("\n")
+        except Exception:
+            pass
+
+        # Fixer
+        fix_prompt = (
+            f"DOCUMENT EDITOR / CODE FIXER. Fix the code files listed below.\n\n"
+            f"1) read_file .marvin/review-history-code.md — get the issues\n"
+            "2) read_file each file mentioned in the issues — find lines to fix\n"
+            f"3) read_file relevant ref docs in {params.ref_dir}/ for correct behavior\n"
+            "4) apply_patch for EACH issue — one patch per issue\n"
+            "5) STOP. No summary. No self-review. No grading.\n\n"
+            "RULES:\n"
+            "- Fix EVERY critical and major issue. Do not skip any.\n"
+            "- Ref docs explain intent — match the code to the documented behavior.\n"
+            "- Do NOT analyze, summarize, grade, or review your own work.\n"
+            "- ONLY use: read_file, apply_patch. Nothing else.\n"
+            "- A separate reviewer will check your work.\n"
+        )
+        await _review_sub_with_retry(
+            fix_prompt, _AGENT_MODELS["fallback"], base_timeout=900,
+            label=f"Code-fixer-R{review_round}", writable_files=writable_code)
+
+        _git_checkpoint(f"Code fixer R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")
+
+    # Summary
+    summary = f"Code review on branch `{branch_name}` — {len(code_files)} files, {len(ref_files)} ref docs\n"
+    summary += "\n".join(round_results)
+    if active_reviewers:
+        summary += f"\n⚠️ {len(active_reviewers)} reviewers still had issues after {params.max_rounds} rounds"
+    else:
+        summary += "\n✅ All reviewers satisfied"
+    return summary
+
+
 # ── Tool: Steam store & API ──────────────────────────────────────────────────
 
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY", "")
@@ -11229,7 +11589,7 @@ def _build_all_tools():
         set_working_dir, get_working_dir,
         create_file, append_file, apply_patch, code_grep, tree, read_file,
         git_status, git_diff, git_commit, git_log, git_checkout,
-        run_command, install_packages, launch_agent, launch_research_agent, tk,
+        run_command, install_packages, launch_agent, launch_research_agent, review_codebase, tk,
         # Knowledge tools
         stack_search, stack_answers,
         wiki_search, wiki_summary, wiki_full, wiki_grep,

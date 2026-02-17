@@ -32,7 +32,7 @@
 
 ## 1. Architecture Overview
 
-Marvin is a single-process CLI assistant with 70+ local tools, multiple LLM
+Marvin is a single-process CLI assistant with ~90 local tools, multiple LLM
 provider back-ends, a user profile system, persistent conversation history, and
 a multi-phase coding-agent pipeline.  It runs locally — no containers, no cloud
 deployment.
@@ -43,7 +43,7 @@ deployment.
 │                                                   │
 │  ┌────────────┐  ┌───────────┐  ┌──────────────┐  │
 │  │  Profile    │  │   Chat    │  │   Tools      │  │
-│  │  System     │  │   Log     │  │  (70+ local  │  │
+│  │  System     │  │   Log     │  │  (~90 local  │  │
 │  │            │  │           │  │   & web)     │  │
 │  └────────────┘  └───────────┘  └──────────────┘  │
 │  ┌────────────┐  ┌───────────┐  ┌──────────────┐  │
@@ -149,7 +149,7 @@ This is the primary integration surface.
 
 - Loads user preferences from the active profile
 - Builds the full system message (personality, tool instructions, coding rules)
-- Loads all 70+ tools; auto-approves every tool call (no user confirmation)
+- Loads all ~90 tools; auto-approves every tool call (no user confirmation)
 - Embeds compact conversation history into the system message (last 20 entries,
   each truncated to 200 chars) — enough for topic awareness, not full context
 - Loads `.marvin/spec.md`, `.marvin/design.md`, `.marvin/ux.md` if present in
@@ -583,7 +583,7 @@ Can also be set via the `--provider` CLI flag in interactive mode.
 
 ## 13. Complete Tool Catalog
 
-Marvin has 70+ tools organized into categories.  The integrator does NOT need to
+Marvin has ~90 tools organized into categories.  The integrator does NOT need to
 know about these — Marvin handles all tool calling internally.  This list is for
 reference only.
 

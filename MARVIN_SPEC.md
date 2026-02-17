@@ -13,7 +13,7 @@
 
 ## 1. Overview
 
-Marvin is a CLI assistant with ~115 tools spanning location, web search, coding,
+Marvin is a CLI assistant with ~90 tools spanning location, web search, coding,
 notes, calendar, media, and more. It runs in two primary modes: **interactive**
 (terminal UI) and **non-interactive** (pipeline/coding mode). This document
 specifies the behavioral contracts for both modes, with emphasis on the coding
@@ -37,7 +37,7 @@ Default mode when launched without flags.
 - Curses-based TUI (or `--plain` for readline) with colored chat, scrolling,
   status bar, and input history
 - User types messages, Marvin responds with tool calls and text
-- All ~115 tools available
+- All ~90 tools available
 - Conversation history persisted to `chat_log.json` and seeded into the LLM
   as user/assistant messages (last 20 entries)
 - Slash commands available (`!shell`, `!code`, `!voice`, etc.)
@@ -81,7 +81,7 @@ Activated when both `--non-interactive` and `--working-dir` are set.
 ```
 Phase       Description                                      Parallelism
 ─────       ───────────                                      ───────────
-1a          Product Spec + UX Design                         Parallel agents
+1a          Product Spec + UX Design                         Sequential agents
 1a_review   Spec conformance review + fix loop               Sequential
 1b          Architecture + Test Plan                         Sequential
 1b_review   Design review + fix loop                         Sequential
@@ -137,7 +137,7 @@ After each document phase (1a, 1b), a review cycle runs:
    generated documents against the original requirements
 2. Findings are compiled into a fix prompt
 3. **Fixer agent** (codex-tier model) applies the fixes
-4. Re-review if not exhausted (max 2–3 rounds)
+4. Re-review if not exhausted (max 4 rounds)
 
 **TDD awareness**: During test-writing phases (2a, 2b), the reviewer will see
 tests that import modules that don't exist yet. This is DESIRED behavior in
@@ -283,7 +283,7 @@ Sub-agents get context from `.marvin/upstream/`:
 |---------------------|-------------------------------------------------|
 | `MARVIN_API_SPEC.md`| Integration/IO contracts for bridges and UIs     |
 | `MARVIN_SPEC.md`    | This document — behavioral specification         |
-| `TOOLS.md`          | Complete tool schema reference (~115 tools)       |
+| `TOOLS.md`          | Complete tool schema reference (~90 tools)       |
 | `SHARP_EDGES.md`    | Implementation gotchas and hard-learned lessons   |
 | `README.md`         | Project-level README                              |
 | `REFERENCE.md`      | Quick-reference cheat sheet                       |

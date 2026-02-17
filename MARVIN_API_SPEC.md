@@ -562,7 +562,7 @@ Can also be set via the `--provider` CLI flag in interactive mode.
 | `MARVIN_QA_ROUNDS` | `3` | Max adversarial QA iterations (Phase 5) |
 | `MARVIN_READONLY` | *(unset)* | Set to `1` to strip write tools |
 | `MARVIN_WRITABLE_FILES` | *(unset)* | Comma-separated relative paths; restricts file writes to only those paths. Also strips `run_command`, `git_commit`, `git_checkout`, `write_note`, `install_packages`, `launch_agent`, `launch_research_agent` |
-| `MARVIN_SUBAGENT_LOG` | *(none)* | Path for JSONL tool-call logging |
+| `MARVIN_SUBAGENT_LOG` | *(none)* | Path for JSONL tool-call logging. Each line: `{"ts":…,"tool":…,"args":…,"result":…}` |
 | `WHISPER_MODEL` | `whisper-large-v3` | Groq Whisper model for speech-to-text |
 | `EDITOR` | `nano` | Editor for opening preferences |
 

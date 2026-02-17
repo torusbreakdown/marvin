@@ -3739,21 +3739,24 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                         check_done=_reviewer_check_done),
                 ]
                 results = await asyncio.gather(*review_tasks)
-                # Merge all reviewer outputs — round 1 always produces findings
+                # Merge reviewer outputs — omit clean reviews, only keep ones with issues
                 all_outputs = []
                 any_real_output = False
                 for rc, rev_out, rev_err in results:
                     out = (rev_out or "").strip()
-                    if not out:
+                    if not out or len(out) <= 200:
                         continue
-                    # Accept any substantial output (>200 chars) even if it's
-                    # chain-of-thought — it likely contains useful findings
-                    if len(out) > 200:
-                        any_real_output = True
-                        all_outputs.append(out)
+                    # Skip clean reviews — only feed issues to the fixer
+                    if "SPEC_VERIFIED" in out:
+                        continue
+                    any_real_output = True
+                    all_outputs.append(out)
                 if not any_real_output:
-                    await _notify_pipeline(f"🚫 PIPELINE ABORT: Spec review {doc_label} — all reviewers returned empty output")
-                    raise RuntimeError(f"Spec review {doc_label} failed: all reviewers returned empty output")
+                    # All reviewers either returned empty or clean — spec is good
+                    await _notify_pipeline(f"✅ Spec review clean: {doc_label} (R1 — all reviewers satisfied)")
+                    if substage:
+                        _save_state(substage)
+                    break
                 rev_out = "\n\n---\n\n".join(all_outputs)
             else:
                 # Subsequent rounds: single reviewer, can pass

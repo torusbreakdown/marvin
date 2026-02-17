@@ -3949,6 +3949,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "  provide examples, clarify ambiguity — make the doc implementable.\n"
                 "- Do NOT summarize, self-review, grade, or create tickets.\n"
                 "- Do NOT run multiple review rounds yourself.\n"
+                "- Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
+                "- Do NOT stop partway through. Fix ALL issues before finishing.\n"
                 "- A separate independent reviewer will check your work. You are NOT the reviewer.\n"
             )
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
@@ -4180,7 +4182,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 "The following issues were found by parallel code reviewers. "
                 "Fix all critical and major issues. Minor issues are optional.\n\n"
                 f"{combined_findings}\n\n"
-                f"{fix_instructions}"
+                f"{fix_instructions}\n"
+                "Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
+                "Do NOT stop partway through. Fix ALL issues before finishing.\n"
+                "Do NOT create tickets. Do NOT summarize or self-review.\n"
             )
             await _notify_pipeline(f"🔧 Review round {review_round}: dispatching fixer for {len(all_findings)} reports")
 
@@ -5035,6 +5040,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "Fix EVERY critical and major issue. Ignore minor issues for now.\n\n"
                     "After fixing, run 'pytest -v' to make sure you haven't broken anything.\n"
                     "Commit each fix with a message like 'QA fix: <description>'.\n\n"
+                    "Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
+                    "Do NOT stop partway through. Fix ALL issues before finishing.\n"
+                    "Do NOT create tickets. Do NOT summarize or self-review.\n\n"
                     "FINDINGS:\n" + "\n\n".join(all_findings)
                 )
                 fix_prompt += _marvin_interface_context()
@@ -5232,13 +5240,17 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
 
     async def _review_sub_with_retry(prompt, model, base_timeout=600, label="",
                                      readonly=False, writable_files=None, check_done=None):
-        _MAX_RETRIES = 3
+        _MAX_RETRIES = 5
         for attempt in range(1, _MAX_RETRIES + 1):
             rc, out, err = await _review_sub(prompt, model, timeout_s=base_timeout * attempt,
                                              label=label, readonly=readonly, writable_files=writable_files)
             if check_done and check_done(rc, out, err):
                 return rc, out, err
             if rc == 0 and len((out or "").strip()) > 200:
+                # Check for signs the agent didn't actually do the work
+                out_lower = (out or "").lower()
+                if any(bail in out_lower for bail in ["would you like", "shall i", "ready to", "let me know", "want me to"]):
+                    continue  # agent asked for confirmation instead of working
                 return rc, out, err
         # Fallback escalation
         fallback = _AGENT_MODELS.get("fallback", "")
@@ -5409,6 +5421,9 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
             "- Fix every critical and major issue. Do not skip any.\n"
             "- Reference docs explain intent — make the code match the documented behavior.\n"
             "- Do NOT analyze, summarize, grade, or review your own work.\n"
+            "- Do NOT ask for confirmation, input, or permission. Just fix everything.\n"
+            "- Do NOT stop partway through. Fix ALL issues before finishing.\n"
+            "- Do NOT create tickets.\n"
             "- A separate independent reviewer will check your work.\n"
         )
         await _review_sub_with_retry(

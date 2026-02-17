@@ -11992,16 +11992,20 @@ async def _run_curses_interactive(stdscr):
         done.clear()
         busy = True
 
-        result = await mgr.send_prompt(prompt_text)
-        # _run_tool_loop returns text directly (non-SDK path)
-        if result is not None:
-            if ui.is_streaming:
-                ui.end_stream()
-            ui.add_message("assistant", result.strip())
-            update_status()
-            ui.render()
-            busy = False
-            done.set()
+        # Run in background task so getch loop stays responsive for Ctrl+Q
+        async def _send_task():
+            nonlocal busy
+            result = await mgr.send_prompt(prompt_text)
+            if result is not None:
+                if ui.is_streaming:
+                    ui.end_stream()
+                ui.add_message("assistant", result.strip())
+                update_status()
+                ui.render()
+                busy = False
+                done.set()
+
+        asyncio.create_task(_send_task())
 
     try:
         while True:
@@ -12012,6 +12016,10 @@ async def _run_curses_interactive(stdscr):
 
             if key == 4 or key == 17:  # Ctrl+D or Ctrl+Q
                 break
+
+            if key == -1:
+                await asyncio.sleep(0.05)  # yield to event loop for background tasks
+                continue
 
             if key != -1 and not busy:
                 result = ui.handle_key(key)

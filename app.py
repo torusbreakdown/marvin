@@ -12291,6 +12291,17 @@ async def _run_curses_interactive(stdscr):
 
             if key != -1 and not busy:
                 result = ui.handle_key(key)
+                # Drain remaining keys (fast paste batching)
+                while True:
+                    k2 = stdscr.getch()
+                    if k2 == -1:
+                        break
+                    if k2 == 4 or k2 == 17:
+                        _exit_requested.set()
+                        break
+                    r2 = ui.handle_key(k2)
+                    if r2 is not None:
+                        result = r2
                 ui.render()
 
                 if result is not None:

@@ -2995,6 +2995,7 @@ _AGENT_MODELS = {
     "plan_gen": os.environ.get("MARVIN_CODE_MODEL_PLAN_GEN", "gemini-3-pro-preview"),  # spec/architecture generation
     "test_writer": os.environ.get("MARVIN_CODE_MODEL_TEST_WRITER", "gemini-3-pro-preview"),  # TDD test writing
     "aux_reviewer": os.environ.get("MARVIN_CODE_MODEL_AUX_REVIEWER", "gpt-5.2"),  # second/third spec reviewer
+    "fallback": os.environ.get("MARVIN_CODE_MODEL_FALLBACK", "anthropic/claude-sonnet-4.5"),  # reliable fallback when primary model fails
 }
 
 
@@ -3407,6 +3408,24 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 return rc, out, err  # non-retryable
             if attempt < _MAX_RETRIES:
                 next_timeout = base_timeout * (attempt + 1)
+
+        # All retries exhausted — escalate to fallback model (sonnet-4.5) if not already using it
+        fallback_model = _AGENT_MODELS.get("fallback", "")
+        if fallback_model and model != fallback_model:
+            await _notify_pipeline(f"⬆️ {label}: escalating to fallback model ({fallback_model})")
+            timeout_s = base_timeout * 2
+            full_prompt = prompt + qa_context + continuation_context
+            rc, out, err = await _run_sub(full_prompt, fallback_model, timeout_s=timeout_s, label=f"{label} (fallback)", readonly=readonly, writable_files=writable_files)
+            if rc == 0:
+                if not check_done or check_done(rc, out, err):
+                    return rc, out, err
+                # One more try with continuation
+                truncated_out = (out or "")[-3000:]
+                full_prompt = prompt + qa_context + (
+                    f"\n\nYou started but returned early. Prior output:\n{truncated_out}\n\n"
+                    "CONTINUE — ACT, don't repeat analysis.\n"
+                )
+                rc, out, err = await _run_sub(full_prompt, fallback_model, timeout_s=timeout_s, label=f"{label} (fallback retry)", readonly=readonly, writable_files=writable_files)
         return rc, out, err
 
     # ── Marvin CLI interface context for sub-agents ─────────────────────
@@ -3587,7 +3606,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         return "\n".join(parts)
 
     # ── Spec/design review helper ────────────────────────────────────
-    async def _spec_design_review(doc_path: str, doc_label: str) -> None:
+    async def _spec_design_review(doc_path: str, doc_label: str, phase_prefix: str = "") -> None:
         """Review a generated spec or design doc against upstream references.
 
         Runs readonly reviewers that check the generated document for
@@ -3657,7 +3676,14 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         # Collated review history — all rounds' findings in one file
         review_history_path = os.path.join(wd, ".marvin", f"review-history-{doc_label}.md")
 
+        _ROUND_NUMERALS = {1: "i", 2: "ii", 3: "iii", 4: "iv"}
+
         for review_round in range(1, _MAX_SPEC_REVIEW_ROUNDS + 1):
+            # Check if this substage is already done (allows restart from middle)
+            substage = f"{phase_prefix}_{_ROUND_NUMERALS.get(review_round, str(review_round))}" if phase_prefix else ""
+            if substage and _phase_done(substage):
+                await _notify_pipeline(f"⏭️ Spec review: {doc_label} R{review_round} skipped — already done")
+                continue
             await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
             # Tell reviewers where prior reviews are
             history_note = ""
@@ -3727,6 +3753,8 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             # Round 2+: check if verified after logging
             if review_round > 1 and "SPEC_VERIFIED" in (rev_out or ""):
                 await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
+                if substage:
+                    _save_state(substage)
                 break
 
             # Dispatch a fixer agent (plan tier) to update the document
@@ -3749,6 +3777,10 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt, _AGENT_MODELS["codex"], base_timeout=900,
                 label=f"Spec fixer: {doc_label} R{review_round}",
                 writable_files=[rel_doc], check_done=_fixer_check_done)
+
+            # Save substage checkpoint so we can restart from the next round
+            if substage:
+                _save_state(substage)
 
             if review_round >= _MAX_SPEC_REVIEW_ROUNDS:
                 await _notify_pipeline(f"⚠️ Spec review: {doc_label} — max rounds reached")
@@ -4005,7 +4037,11 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             pass
         return ""
 
-    _phase_order = ["1a", "1a_review", "1b", "1b_review", "2a", "2b", "3", "4a", "4b", "4c", "5"]
+    _phase_order = [
+        "1a", "1a_review_i", "1a_review_ii", "1a_review_iii", "1a_review_iv", "1a_review",
+        "1b", "1b_review_i", "1b_review_ii", "1b_review_iii", "1b_review_iv", "1b_review",
+        "2a", "2b", "3", "4a", "4b", "4c", "5",
+    ]
     def _phase_done(phase: str) -> bool:
         current = _load_state()
         if not current:
@@ -4162,7 +4198,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline("⏭️ Phase 1a review skipped — already completed")
         else:
             if os.path.isfile(spec_path) and os.path.getsize(spec_path) > 100:
-                await _spec_design_review(spec_path, "spec.md")
+                await _spec_design_review(spec_path, "spec.md", phase_prefix="1a_review")
             if os.path.isfile(ux_path) and os.path.getsize(ux_path) > 100:
                 await _spec_design_review(ux_path, "ux.md")
             _save_state("1a_review")
@@ -4231,7 +4267,7 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             await _notify_pipeline("⏭️ Phase 1b review skipped — already completed")
         else:
             if os.path.isfile(design_path) and os.path.getsize(design_path) > 1000:
-                await _spec_design_review(design_path, "design.md")
+                await _spec_design_review(design_path, "design.md", phase_prefix="1b_review")
             _save_state("1b_review")
 
     # ── Phase 2a: Functional tests (TDD, optional) ───────────────────────────

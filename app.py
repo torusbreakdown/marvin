@@ -3724,54 +3724,80 @@ async def launch_agent(params: LaunchAgentParams) -> str:
         also_check_spec = (doc_label == "design.md" and os.path.isfile(spec_path))
 
         review_prompt_base = (
-            f"'{rel_doc}'的规格合规审计。.marvin/upstream/中的文件=现有系统的权威文档。"
-            f"'{rel_doc}'必须与upstream精确匹配——不得简化/遗漏/重新解读"
-            + ("，且必须与.marvin/spec.md一致" if also_check_spec else "")
-            + "。\n\nOutput in English.\n\n"
-            "重要：生成文档可以添加upstream中没有的有用功能、UX优化、无障碍特性、"
-            "或改善体验的功能——这没问题，不应标记。"
-            "只标记：1) upstream中有但生成文档中缺失/错误的功能 "
-            "2) 与upstream的直接矛盾 3) 错误的名称/数量/格式。\n\n"
-            "不要标记：A) 章节编号或排列顺序差异——只要内容存在即可 "
-            "B) 组织方式的差异——生成文档可以合并/拆分/重组章节 "
-            "C) 措辞/格式差异——关注实质性行为差异，而非表述方式\n\n"
-            "方法：1) read_file读取生成文档（大文件使用行范围）"
-            "2) 读取每个upstream文档，逐节比较 "
-            "3) 用write_note记录发现 "
-            "4) 检查完所有upstream文档后编写最终报告。\n\n"
-            "如果read_file返回预算错误，使用更小的范围。策略性阅读。\n\n"
-            "寻找：upstream的简化、upstream功能的遗漏、"
-            "与upstream的矛盾、错误的数量/名称。不要标记新增内容。\n\n"
-            "格式：SPEC_MISMATCH: <源>:<章节> vs <生成>:<章节> — <描述>\nSEVERITY: critical/major/minor\n\n"
-            "只读——不编辑、不执行命令。\n"
+            f"You are a SPEC COMPLIANCE AUDITOR. The files in .marvin/upstream/ are the "
+            f"AUTHORITATIVE DOCUMENTATION of an EXISTING, RUNNING SYSTEM. The generated "
+            f"document '{rel_doc}' must implement EVERY requirement from upstream EXACTLY "
+            f"as specified — no simplifications, no omissions, no reinterpretations"
+            + (" — and must also be consistent with the product spec (.marvin/spec.md)" if also_check_spec else "")
+            + ".\n\n"
+            "IMPORTANT: The generated document MAY add useful features, UX improvements, "
+            "accessibility, or quality-of-life enhancements not in upstream — that is FINE "
+            "and should NOT be flagged.\n\n"
+            "Only flag:\n"
+            "  1) Features/behaviors that upstream specifies but the generated doc OMITS or gets WRONG\n"
+            "  2) Direct contradictions with upstream\n"
+            "  3) Wrong names, counts, formats, field names, or protocol details\n\n"
+            "Do NOT flag:\n"
+            "  A) Section numbering or ordering differences — content matters, not where it lives\n"
+            "  B) Organizational differences — the generated doc can merge/split/reorganize sections\n"
+            "  C) Wording or formatting differences — focus on substantive behavioral differences\n\n"
+            "METHODOLOGY — work section by section, one upstream doc at a time:\n"
+            "1. Read the generated doc with read_file (use start_line/end_line for large files).\n"
+            "2. Read each upstream doc one at a time. For each upstream section, find the\n"
+            "   matching content in the generated doc and compare.\n"
+            "3. Use write_note to save findings as you go — this persists if context fills.\n"
+            "4. After checking ALL upstream docs, compile your final report.\n\n"
+            "NOTE: If read_file returns a context budget error, use smaller line ranges.\n"
+            "Your context window is limited. Read strategically.\n\n"
+            "Look carefully for:\n"
+            "   - **Simplifications** — upstream describes X in detail but generated doc\n"
+            "     says 'simplified version' or omits details\n"
+            "   - **Omissions** — upstream specifies a feature that the generated doc skips\n"
+            "   - **Contradictions** — generated doc says X but upstream says Y\n"
+            "   - **Wrong counts/names** — numbers, labels, field names don't match\n"
+            + ("   - **Spec inconsistency** — design contradicts or omits spec.md requirements\n" if also_check_spec else "")
+            + "\n"
+            "OUTPUT FORMAT — for each finding:\n"
+            "SPEC_MISMATCH: <source file>:<section> vs <generated doc>:<section> — <description>\n"
+            "SEVERITY: critical/major/minor\n\n"
+            "Do NOT edit any files. Do NOT run commands. Report only.\n"
         )
 
         # R1: adversarial, must find issues
         review_prompt_r1 = review_prompt_base + (
-            "\n首轮审查——规格永远不完美。找出每个问题。"
-            "以 REVIEW_FAILED + 问题数量 结尾。\n"
+            "\nThis is a FIRST PASS review. Generated specs are NEVER perfect on the first "
+            "attempt — there are ALWAYS issues. Your job is to find every single one.\n"
+            "End your report with REVIEW_FAILED and a count of issues found.\n"
         )
 
         # R1 quality reviewer — evaluates doc independently, no upstream
         review_prompt_quality = (
-            f"'{rel_doc}'的质量审查。只用read_file读此文档。不要读.marvin/upstream/。\n\nOutput in English.\n\n"
-            "评估：1) 清晰度——工程师能否无疑问地实现？2) 完整性——是否有缺口、未定义的边界？"
-            "3) 内部一致性——是否有矛盾、错误的数量？4) 可操作性——是否有足够的具体细节？"
-            "5) 组织结构——逻辑结构是否合理、易于查找？\n\n"
-            "格式：QUALITY_ISSUE: <章节> — <描述>\nSEVERITY: critical/major/minor\n\n"
-            "只读。找出每个问题。以 REVIEW_FAILED + 数量 结尾。\n"
+            f"You are a DOCUMENT QUALITY REVIEWER for '{rel_doc}'. Read ONLY this document "
+            f"with read_file. Do NOT read .marvin/upstream/ files.\n\n"
+            "Evaluate the document on these criteria:\n"
+            "1) CLARITY — Could an engineer implement from this spec without ambiguity?\n"
+            "2) COMPLETENESS — Are there gaps, undefined edge cases, missing error handling?\n"
+            "3) INTERNAL CONSISTENCY — Any contradictions, wrong counts, conflicting statements?\n"
+            "4) ACTIONABILITY — Enough concrete detail (exact values, formats, examples)?\n"
+            "5) ORGANIZATION — Logical structure, easy to navigate and find information?\n\n"
+            "For each issue found:\n"
+            "QUALITY_ISSUE: <section> — <description>\n"
+            "SEVERITY: critical/major/minor\n\n"
+            "Read only. Find every issue. End with REVIEW_FAILED + count of issues.\n"
         )
 
-        # R2+: can pass
+        # R2+: can pass if all issues fixed
         review_prompt_r2 = review_prompt_base + (
-            "\n修复后的跟进审查。"
-            "阅读 .marvin/review-history-{doc_label}.md 查看所有先前发现。\n\n"
-            "关键：检查每一个先前发现。如果先前轮次中任何critical/major问题"
-            "仍然存在于文档中，即为失败。不得放过。\n\n"
-            "修复代理可能声称已修复或给自己打分——忽略其声明。"
-            "只有文档实际内容才重要。通过阅读相关行来验证每个修复。\n\n"
-            "如果所有critical+major问题已修复→回复：SPEC_VERIFIED\n"
-            "如果任何问题仍存在→列出问题及SEVERITY + REVIEW_FAILED。严格审查。\n"
+            f"\nThis is a follow-up review after fixes were applied. "
+            f"Read .marvin/review-history-{doc_label}.md for all prior findings.\n\n"
+            "CRITICAL: Check EVERY prior finding. If ANY critical or major issue from "
+            "previous rounds still exists in the document, it is a FAILURE. Do not let "
+            "anything slide.\n\n"
+            "The fixer agent may claim it fixed things or grade itself — IGNORE its claims. "
+            "Only the actual document content matters. Verify each fix by reading the "
+            "relevant lines.\n\n"
+            "If ALL critical+major issues are fixed → respond: SPEC_VERIFIED\n"
+            "If ANY issues remain → list them with SEVERITY and end with REVIEW_FAILED.\n"
         )
 
         _MAX_SPEC_REVIEW_ROUNDS = 4
@@ -3899,23 +3925,31 @@ async def launch_agent(params: LaunchAgentParams) -> str:
             except Exception:
                 pass
 
-            # Dispatch a fixer — PATCH ONLY, no analysis, no self-review
+            # Dispatch a fixer — verbose English prompt with full context
             fix_prompt = (
-                f"文档编辑器。你只修复{rel_doc}，不做其他任何事。\n\nOutput in English.\n\n"
-                f"1) read_file .marvin/review-history-{doc_label}.md——获取问题列表\n"
-                f"2) read_file {rel_doc}——找到需要修复的行\n"
-                "3) read_file相关的.marvin/upstream/文件——获取正确值\n"
-                "4) 对每个问题执行apply_patch——每个问题一个补丁\n"
-                "5) 停止。不要总结。不要自我审查。不要评分。不要创建工单。\n\n"
-                "规则：\n"
-                "- 你必须修复每一个critical和major问题。不得跳过。\n"
-                "- Upstream=永远正确。逐字复制值。\n"
-                "- 如果先前轮次的问题未修复，现在修复。\n"
-                "- 不要分析、总结、评分或审查自己的工作。\n"
-                "- 不要创建笔记、工单、报告或摘要。\n"
-                "- 不要自己运行多轮审查。\n"
-                "- 只使用：read_file、apply_patch。不用其他工具。\n"
-                "- 另有独立审查者检查你的工作。你不是审查者。\n"
+                _project_context() + "\n\n"
+                f"SPEC REVIEW FINDINGS for {rel_doc} (round {review_round}):\n"
+                "Review findings have been saved. The upstream specs describe an "
+                "EXISTING SYSTEM — they are always right. Fix ALL critical and major "
+                "issues by updating the generated document to EXACTLY match upstream.\n\n"
+                "DO NOT 'simplify' — if upstream says it, the generated doc must say it.\n"
+                "DO NOT omit features — if upstream has it, the generated doc must have it.\n\n"
+                "INSTRUCTIONS:\n"
+                f"1. Read .marvin/review-history-{doc_label}.md for all review findings\n"
+                f"2. Read {rel_doc} and the relevant upstream files in .marvin/upstream/\n"
+                "3. Fix each SPEC_MISMATCH by updating the generated document to match upstream EXACTLY\n"
+                "4. Fix each QUALITY_ISSUE by adding detail, resolving contradictions, or clarifying ambiguity\n"
+                "5. Use apply_patch to make corrections — one patch per issue\n"
+                f"6. Do NOT change upstream reference files — only update {rel_doc}\n"
+                "7. Preserve the overall structure and completeness of the document\n\n"
+                "RULES:\n"
+                "- You MUST fix every critical and major issue. Do not skip any.\n"
+                "- Upstream = always correct. Copy values verbatim from upstream.\n"
+                "- For QUALITY_ISSUE findings: add concrete detail, resolve contradictions,\n"
+                "  provide examples, clarify ambiguity — make the doc implementable.\n"
+                "- Do NOT summarize, self-review, grade, or create tickets.\n"
+                "- Do NOT run multiple review rounds yourself.\n"
+                "- A separate independent reviewer will check your work. You are NOT the reviewer.\n"
             )
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
             # Track file mtime to detect if fixer actually modified the doc

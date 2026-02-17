@@ -3691,13 +3691,42 @@ async def launch_agent(params: LaunchAgentParams) -> str:
 
         # R2+: can pass
         review_prompt_r2 = review_prompt_base + (
-            "\nFollow-up after fixes. If ALL issues fixed → SPEC_VERIFIED. "
-            "If issues remain → list + REVIEW_FAILED.\n"
+            "\nFollow-up review after fixes were applied. "
+            "Read .marvin/review-history-{doc_label}.md to see ALL prior findings.\n\n"
+            "CRITICAL: Check EVERY prior finding. If ANY critical/major issue from a prior round "
+            "is STILL present in the document, that is a FAILURE. Do not let it slide.\n\n"
+            "The fixer agent may have claimed to fix things or graded itself — IGNORE its claims. "
+            "Only the actual document content matters. Verify each fix by reading the relevant lines.\n\n"
+            "If ALL critical+major issues are fixed → respond with exactly: SPEC_VERIFIED\n"
+            "If ANY issues remain → list them with SEVERITY + REVIEW_FAILED. Be stern.\n"
         )
 
         _MAX_SPEC_REVIEW_ROUNDS = 4
         # Collated review history — all rounds' findings in one file
         review_history_path = os.path.join(wd, ".marvin", f"review-history-{doc_label}.md")
+
+        def _git_commit_checkpoint(msg: str):
+            """Programmatic git add+commit for review checkpoints."""
+            git_dir = os.path.join(wd, ".git")
+            env = {**os.environ, "GIT_DIR": git_dir}
+            try:
+                subprocess.run(["git", "add", "."], cwd=wd, env=env,
+                               capture_output=True, timeout=30)
+                subprocess.run(["git", "commit", "-m", msg, "--allow-empty"],
+                               cwd=wd, env=env, capture_output=True, timeout=30)
+            except Exception:
+                pass
+
+        def _git_diff_since(ref: str = "HEAD~1") -> str:
+            """Get git diff since a ref, return as string."""
+            git_dir = os.path.join(wd, ".git")
+            env = {**os.environ, "GIT_DIR": git_dir}
+            try:
+                r = subprocess.run(["git", "diff", ref, "--", rel_doc],
+                                   cwd=wd, env=env, capture_output=True, timeout=30, text=True)
+                return r.stdout[:8000] if r.stdout else ""
+            except Exception:
+                return ""
 
         _ROUND_NUMERALS = {1: "i", 2: "ii", 3: "iii", 4: "iv"}
 
@@ -3708,13 +3737,30 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 await _notify_pipeline(f"⏭️ Spec review: {doc_label} R{review_round} skipped — already done")
                 continue
             await _notify_pipeline(f"🔍 Spec review: {doc_label} (round {review_round})")
+
+            # Git commit checkpoint before review
+            _git_commit_checkpoint(f"Review checkpoint: {doc_label} R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')} — needs review")
+
             # Tell reviewers where prior reviews are
             history_note = ""
             if os.path.isfile(review_history_path):
                 history_note = (
                     f"\n\nPrior reviews in .marvin/review-history-{doc_label}.md — read w/ read_file.\n"
                 )
-            prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note
+
+            # For R2+, include the git diff showing what the fixer changed
+            diff_note = ""
+            if review_round > 1:
+                fixer_diff = _git_diff_since("HEAD~1")
+                if fixer_diff:
+                    diff_note = (
+                        f"\n\nGIT DIFF of fixer's changes (what was actually modified):\n"
+                        f"```diff\n{fixer_diff}\n```\n"
+                        "CHECK: does this diff actually address the prior findings? "
+                        "If issues from prior rounds are NOT addressed in this diff, FAIL them again.\n"
+                    )
+
+            prompt_for_round = (review_prompt_r1 if review_round == 1 else review_prompt_r2) + history_note + diff_note
 
             if review_round == 1:
                 # First round: 4 parallel adversarial reviewers (3 upstream compliance + 1 quality)
@@ -3777,20 +3823,31 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 pass
 
             # Round 2+: check if verified after logging
-            if review_round > 1 and "SPEC_VERIFIED" in (rev_out or ""):
+            _clean_keywords = ("SPEC_VERIFIED", "no corrections needed", "production-ready",
+                               "no issues found", "REVIEW_CLEAN", "all issues fixed")
+            if review_round > 1 and any(k.lower() in (rev_out or "").lower() for k in _clean_keywords):
                 await _notify_pipeline(f"✅ Spec review clean: {doc_label} (round {review_round})")
                 if substage:
                     _save_state(substage)
                 break
 
-            # Dispatch a fixer agent (plan tier) to update the document
+            # Dispatch a fixer — PATCH ONLY, no analysis, no self-review
             fix_prompt = (
-                _project_context() + "\n\n"
-                f"Fix {rel_doc} per review findings (R{review_round}). "
-                f"Read .marvin/review-history-{doc_label}.md for issues. "
-                "Upstream specs = source of truth, always right. "
-                "Fix ALL critical+major issues. Don't simplify or omit — match upstream exactly. "
-                f"Read {rel_doc} + relevant .marvin/upstream/ files, then apply_patch to fix.\n"
+                f"DOCUMENT EDITOR. You fix {rel_doc} and NOTHING ELSE.\n\n"
+                f"1) read_file .marvin/review-history-{doc_label}.md — get the issues\n"
+                f"2) read_file {rel_doc} — find the lines to fix\n"
+                "3) read_file relevant .marvin/upstream/ files — get correct values\n"
+                "4) apply_patch for EACH issue — one patch per issue\n"
+                "5) STOP. No summary. No self-review. No grading. No tickets.\n\n"
+                "RULES:\n"
+                "- You MUST fix EVERY critical and major issue. Do not skip any.\n"
+                "- Upstream = always right. Copy values VERBATIM.\n"
+                "- If a prior round's issues were not fixed, fix them NOW.\n"
+                "- Do NOT analyze, summarize, grade, or review your own work.\n"
+                "- Do NOT create notes, tickets, reports, or summaries.\n"
+                "- Do NOT run multiple review rounds yourself.\n"
+                "- ONLY use: read_file, apply_patch. Nothing else.\n"
+                "- A separate reviewer will check your work. You are NOT the reviewer.\n"
             )
             await _notify_pipeline(f"🔧 Spec fix: {doc_label} (round {review_round})")
             # Track file mtime to detect if fixer actually modified the doc
@@ -3803,6 +3860,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                 fix_prompt, _AGENT_MODELS["fallback"], base_timeout=900,
                 label=f"Spec fixer: {doc_label} R{review_round}",
                 writable_files=[rel_doc], check_done=_fixer_check_done)
+
+            # Git commit after fixer so next round's diff is clean
+            _git_commit_checkpoint(f"Fixer applied: {doc_label} R{review_round} — {_time.strftime('%Y-%m-%d %H:%M')}")
 
             # Save substage checkpoint so we can restart from the next round
             if substage:
@@ -4004,8 +4064,9 @@ async def launch_agent(params: LaunchAgentParams) -> str:
                     "INSTRUCTIONS:\n"
                     "1. Read the files mentioned in each finding\n"
                     "2. Fix each critical/major issue with the smallest possible change\n"
-                    "3. Run 'pytest -v' after fixing to verify no regressions\n"
-                    f"4. Commit all fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n\n"
+                    "3. Run tests after fixing to verify no regressions\n"
+                    f"4. Commit fixes with message 'Code review fix ({phase_label.lower()}, round {review_round}): <summary>'\n"
+                    "5. STOP after committing. No self-review. No grading. No summary report.\n\n"
                     "Read .marvin/spec.md, .marvin/ux.md, and .marvin/design.md for the intended behavior."
                 )
 

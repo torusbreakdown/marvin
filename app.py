@@ -11882,10 +11882,16 @@ class SessionManager:
         return None
 
     async def cleanup(self):
-        if self._sdk_session:
-            await self._sdk_session.destroy()
-        if self._sdk_client:
-            await self._sdk_client.stop()
+        try:
+            if self._sdk_session:
+                await asyncio.wait_for(self._sdk_session.destroy(), timeout=1)
+        except Exception:
+            pass
+        try:
+            if self._sdk_client:
+                await asyncio.wait_for(self._sdk_client.stop(), timeout=1)
+        except Exception:
+            pass
 
 
 async def _run_curses_interactive(stdscr):

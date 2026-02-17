@@ -5215,7 +5215,15 @@ async def review_codebase(params: ReviewCodebaseParams) -> str:
 
     ref_path = os.path.join(wd, params.ref_dir)
     if not os.path.isdir(ref_path):
-        return f"Error: ref directory not found: {ref_path}. Create it with reference docs (.md/.txt)."
+        # Try common alternatives before failing
+        for alt in ("ref", ".ref", "docs", "doc"):
+            alt_path = os.path.join(wd, alt)
+            if os.path.isdir(alt_path) and any(f.endswith((".md", ".txt", ".rst")) for f in os.listdir(alt_path)):
+                ref_path = alt_path
+                params.ref_dir = alt
+                break
+        else:
+            return f"Error: ref directory not found: {ref_path}. Create it with reference docs (.md/.txt)."
 
     # Collect reference docs
     ref_files = []

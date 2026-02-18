@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import { createHash, randomBytes } from 'crypto';
+import { createServer } from 'http';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { execSync } from 'child_process';
 import type { ToolRegistry } from './registry.js';
 
 // ── Spotify OAuth + API plumbing ──────────────────────────────────────────
@@ -150,56 +152,83 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'spotify_auth',
-    'Start or complete Spotify OAuth. Call with no args to get the auth URL. Call with redirect_url after authorizing in browser.',
-    z.object({
-      redirect_url: z.string().default('').describe('The full redirect URL from your browser after authorizing. Leave empty to start auth flow.'),
-    }),
-    async (args, _ctx) => {
+    'Authenticate with Spotify. Handles the entire OAuth flow automatically — opens browser, captures callback, exchanges tokens. No user interaction needed beyond browser approval.',
+    z.object({}),
+    async (_args, _ctx) => {
       try {
-        if (!args.redirect_url) {
-          // Check if we already have valid tokens
-          const existing = loadTokens();
-          if (existing?.refresh_token && existing.access_token) {
-            try {
-              const token = await getToken();
-              if (token) {
-                const me = await api('/me');
-                if (!me.error) {
-                  return `Already authenticated as ${me.display_name || me.id}. Spotify tools are active.`;
-                }
+        // Check if we already have valid tokens
+        const existing = loadTokens();
+        if (existing?.refresh_token && existing.access_token) {
+          try {
+            const token = await getToken();
+            if (token) {
+              const me = await api('/me');
+              if (!me.error) {
+                return `Already authenticated as ${me.display_name || me.id}. Spotify tools are active.`;
               }
-            } catch { /* tokens invalid, proceed with new auth */ }
-          }
-
-          // Step 1: generate PKCE, build auth URL, save verifier
-          const { clientId } = loadCreds();
-          const { verifier, challenge } = generatePKCE();
-          saveTokens({ access_token: '', refresh_token: '', expires_at: 0, code_verifier: verifier });
-          const params = new URLSearchParams({
-            client_id: clientId,
-            response_type: 'code',
-            redirect_uri: REDIRECT_URI,
-            scope: SCOPES,
-            code_challenge_method: 'S256',
-            code_challenge: challenge,
-          });
-          return `Open this URL in your browser to authorize Spotify:\n\n${SPOTIFY_AUTH_URL}?${params}\n\nAfter authorizing, copy the full redirect URL from your browser (it will start with ${REDIRECT_URI}) and call spotify_auth again with redirect_url set to that URL.`;
+            }
+          } catch { /* tokens invalid, proceed with new auth */ }
         }
 
-        // Step 2: extract code from redirect URL, exchange for tokens
-        const url = new URL(args.redirect_url);
-        const code = url.searchParams.get('code');
-        if (!code) return `Error: No authorization code found in URL. Got error: ${url.searchParams.get('error') || 'unknown'}`;
+        const { clientId } = loadCreds();
+        const { verifier, challenge } = generatePKCE();
 
-        const saved = loadTokens();
-        if (!saved?.code_verifier) return 'Error: No pending auth flow. Call spotify_auth with no arguments first.';
+        // Start local HTTP server to capture the OAuth callback
+        const { code, server } = await new Promise<{ code: string; server: ReturnType<typeof createServer> }>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            srv.close();
+            reject(new Error('Auth timed out after 120 seconds'));
+          }, 120_000);
 
-        const tokens = await exchangeCode(code, saved.code_verifier);
+          const srv = createServer((req, res) => {
+            const url = new URL(req.url || '/', `http://127.0.0.1:8888`);
+            if (url.pathname === '/callback') {
+              const code = url.searchParams.get('code');
+              const error = url.searchParams.get('error');
+              if (code) {
+                res.writeHead(200, { 'Content-Type': 'text/html' });
+                res.end('<html><body><h2>Spotify authorized. You can close this tab.</h2></body></html>');
+                clearTimeout(timeout);
+                resolve({ code, server: srv });
+              } else {
+                res.writeHead(400, { 'Content-Type': 'text/html' });
+                res.end(`<html><body><h2>Authorization failed: ${error || 'unknown'}</h2></body></html>`);
+                clearTimeout(timeout);
+                reject(new Error(`Authorization denied: ${error || 'unknown'}`));
+              }
+            } else {
+              res.writeHead(404);
+              res.end();
+            }
+          });
+
+          srv.listen(8888, '127.0.0.1', () => {
+            // Build auth URL and open browser
+            const params = new URLSearchParams({
+              client_id: clientId,
+              response_type: 'code',
+              redirect_uri: REDIRECT_URI,
+              scope: SCOPES,
+              code_challenge_method: 'S256',
+              code_challenge: challenge,
+            });
+            const authUrl = `${SPOTIFY_AUTH_URL}?${params}`;
+            try {
+              execSync(`xdg-open '${authUrl}' 2>/dev/null || open '${authUrl}' 2>/dev/null`, { stdio: 'ignore' });
+            } catch {
+              // If browser open fails, the timeout will catch it
+            }
+          });
+        });
+
+        server.close();
+
+        // Exchange code for tokens
+        const tokens = await exchangeCode(code, verifier);
         saveTokens(tokens);
 
-        // Fetch user profile to confirm
         const me = await api('/me');
-        return `✓ Authenticated as ${me.display_name || me.id}. Spotify tools are now active.`;
+        return `Authenticated as ${me.display_name || me.id}. Spotify tools are now active.`;
       } catch (e: any) {
         return `Error: ${e.message}`;
       }

@@ -46,6 +46,7 @@ export class CursesUI implements UI {
   private reverseSearchMode = false;
   private reverseSearchQuery = '';
   private reverseSearchIdx = -1;
+  public onUndo: (() => void) | null = null;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -192,6 +193,12 @@ export class CursesUI implements UI {
       // Ctrl+R: reverse search
       if (key.ctrl && key.name === 'r') {
         self.enterReverseSearch();
+        return;
+      }
+
+      // Ctrl+Z: undo last chat message
+      if (key.ctrl && key.name === 'z') {
+        if (self.onUndo) self.onUndo();
         return;
       }
 
@@ -540,6 +547,26 @@ export class CursesUI implements UI {
     this.renderStatus();
     this.ensureInputFocus();
     this.screen.render();
+  }
+
+  /** Remove the last displayed message block (user or assistant) from the chat log widget. */
+  removeLastMessage(): void {
+    const content = this.chatLog.getContent();
+    const lines = content.split('\n');
+    // Find the last line that starts a message block (contains 👤 or 🤖 header)
+    let lastHeaderIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (/👤 You:|🤖 Marvin:/.test(lines[i])) {
+        lastHeaderIdx = i;
+        break;
+      }
+    }
+    if (lastHeaderIdx < 0) return;
+    // Remove from the header line to the end, then trim trailing blank lines
+    let truncated = lines.slice(0, lastHeaderIdx).join('\n').replace(/\n+$/, '');
+    if (truncated) truncated += '\n';
+    this.chatLog.setContent(truncated);
+    this.autoScroll();
   }
 
   private enterReverseSearch(): void {

@@ -25,6 +25,15 @@ export function appendChatLog(profileDir: string, entry: ChatLogEntry): void {
   saveChatLog(profileDir, existing);
 }
 
+export function popChatLogEntries(profileDir: string, count: number): number {
+  const entries = loadChatLog(profileDir);
+  const removed = Math.min(count, entries.length);
+  if (removed > 0) {
+    saveChatLog(profileDir, entries.slice(0, -removed));
+  }
+  return removed;
+}
+
 export function compactHistory(chatLog: ChatLogEntry[]): ChatLogEntry[] {
   // Compact old entries into summary entries
   return chatLog;

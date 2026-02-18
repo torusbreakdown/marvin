@@ -110,6 +110,7 @@ export interface SlashCommandContext {
     getUsage: () => { summary: () => string };
     getState: () => { codingMode: boolean; shellMode: boolean; provider: ProviderConfig; mode: AppMode };
     switchProvider: (provider: ReturnType<typeof createProvider>, config: ProviderConfig) => void;
+    undoLast: () => string | null;
   };
   ui: UI;
 }
@@ -416,6 +417,19 @@ export async function main(): Promise<void> {
     session,
     ui,
   };
+
+  // Wire Ctrl+Z undo for curses UI
+  if ('onUndo' in ui) {
+    (ui as CursesUI).onUndo = () => {
+      const role = session.undoLast();
+      if (role) {
+        (ui as CursesUI).removeLastMessage();
+        ui.displaySystem(`Removed last ${role} message (Ctrl+Z)`);
+      } else {
+        ui.displaySystem('Nothing to undo');
+      }
+    };
+  }
 
   // Handle inline prompt (positional argument)
   if (args.inlinePrompt) {

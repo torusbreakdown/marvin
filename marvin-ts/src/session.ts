@@ -15,7 +15,7 @@ import { UsageTracker } from './usage.js';
 import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
 import { buildSystemMessage } from './system-prompt.js';
-import { appendChatLog } from './history.js';
+import { appendChatLog, popChatLogEntries } from './history.js';
 
 // 'always'-category tools that are useful in coding mode as reference/research aids.
 const CODING_REFERENCE_TOOLS = new Set([
@@ -226,6 +226,18 @@ export class SessionManager {
 
   getMode(): AppMode {
     return this.state.mode;
+  }
+
+  /**
+   * Remove the last single message from LLM context and persistent chat log.
+   * Returns the role of the removed message, or null if nothing to remove.
+   */
+  undoLast(): string | null {
+    const msgs = this.state.messages;
+    if (msgs.length === 0) return null;
+    const last = msgs.pop()!;
+    popChatLogEntries(this.profile.profileDir, 1);
+    return last.role;
   }
 
   private getToolsForMode(): OpenAIFunctionDef[] {

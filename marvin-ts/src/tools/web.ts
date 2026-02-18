@@ -189,7 +189,6 @@ export function registerWebTools(registry: ToolRegistry): void {
     'Read a web page URL. Fetches the page and returns HTML content for the LLM to interpret directly.',
     z.object({
       url: z.string().describe('The URL to browse'),
-      max_length: z.number().default(8000).describe('Maximum characters to return (1-16000)'),
       __test_url: z.string().optional(),
     }),
     async (args) => {
@@ -199,13 +198,14 @@ export function registerWebTools(registry: ToolRegistry): void {
         if (urlErr) return urlErr;
       }
       let html = await fetchText(target);
-      // Strip script/style blocks to save tokens but keep structural HTML
       html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
       html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
       html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
       html = html.replace(/<!--[\s\S]*?-->/g, '');
-      if (html.length > args.max_length) {
-        html = html.slice(0, args.max_length) + '\n\n[Truncated]';
+      // ~100k tokens ≈ 400k chars; truncate to stay within context window
+      const MAX_CHARS = 400_000;
+      if (html.length > MAX_CHARS) {
+        html = html.slice(0, MAX_CHARS) + '\n\n[Truncated]';
       }
       return html || 'No content found on the page.';
     },

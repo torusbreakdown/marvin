@@ -1,4 +1,5 @@
 import type { Message, ChatResult, Provider, ChatOptions, OpenAIFunctionDef } from '../types.js';
+import { estimateTokens } from '../context.js';
 
 type ToolFunc = (args: Record<string, unknown>) => Promise<string>;
 
@@ -13,6 +14,10 @@ export interface RunToolLoopOptions {
   signal?: AbortSignal;
   onToolCall?: (toolNames: string[]) => void;
   onDelta?: (text: string) => void;
+  /** Called when context is near full. Should compact messages in-place and return the new array. */
+  onCompact?: (messages: Message[]) => Promise<Message[]>;
+  /** Token threshold at which to trigger compaction (default: 100000) */
+  compactThreshold?: number;
 }
 
 export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResult> {
@@ -26,12 +31,14 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
     signal,
     onToolCall,
     onDelta,
+    onCompact,
+    compactThreshold = 100_000,
   } = options;
 
   const tools = options.tools;
 
   // Build messages array: system + history + user prompt
-  const messages: Message[] = [
+  let messages: Message[] = [
     { role: 'system', content: systemMessage },
     ...history,
     { role: 'user', content: prompt },
@@ -43,6 +50,11 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
   while (rounds < maxRounds) {
     signal?.throwIfAborted();
     rounds++;
+
+    // Check if context needs compaction before sending to LLM
+    if (onCompact && estimateTokens(messages) > compactThreshold) {
+      messages = await onCompact(messages);
+    }
 
     const chatOptions: ChatOptions = {
       tools,

@@ -10,7 +10,7 @@ import type {
   AppMode,
   OpenAIFunctionDef,
 } from './types.js';
-import { ContextBudgetManager } from './context.js';
+import { ContextBudgetManager, compactContext } from './context.js';
 import { UsageTracker } from './usage.js';
 import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
@@ -131,12 +131,14 @@ export class SessionManager {
     this.state.abortController = new AbortController();
 
     try {
-      // Check context budget
+      // Check context budget before starting
       const budgetStatus = this.contextBudget.checkBudget(this.state.messages);
-      if (budgetStatus === 'compact') {
-        this.state.messages = await this.contextBudget.compact(this.state.messages);
-      } else if (budgetStatus === 'reject') {
-        throw new Error('Context budget exceeded. Use compact_history to free space or start a new session.');
+      if (budgetStatus === 'compact' || budgetStatus === 'reject') {
+        // Pre-compact using naive method to make room for the tool loop's LLM compaction
+        this.state.messages = compactContext(
+          [{ role: 'system', content: '' }, ...this.state.messages],
+          join(this.profile.profileDir, 'logs'),
+        ).slice(1); // remove placeholder system msg
       }
 
       // Build system message
@@ -192,6 +194,8 @@ export class SessionManager {
         signal: this.state.abortController.signal,
         onToolCall: callbacks?.onToolCallStart,
         onDelta: callbacks?.onDelta,
+        compactThreshold: 100_000,
+        onCompact: async (messages) => this.compactMessages(messages),
       });
 
       // Update usage tracking
@@ -283,6 +287,63 @@ export class SessionManager {
   toggleShellMode(): boolean {
     this.state.shellMode = !this.state.shellMode;
     return this.state.shellMode;
+  }
+
+  /**
+   * LLM-powered context compaction.
+   * Keeps system message + recent messages, asks the LLM to summarize the rest.
+   */
+  private async compactMessages(messages: Message[]): Promise<Message[]> {
+    const systemMsg = messages[0];
+
+    // Determine how many recent messages to preserve (up to 10 or 32k tokens)
+    let recentCount = 0;
+    let recentTokens = 0;
+    for (let i = messages.length - 1; i > 0; i--) {
+      const msgTokens = Math.ceil(JSON.stringify(messages[i]).length / 4);
+      if (recentCount >= 10 || recentTokens + msgTokens > 32_000) break;
+      recentCount++;
+      recentTokens += msgTokens;
+    }
+    if (recentCount === 0) recentCount = 1; // always keep at least 1
+
+    const recentMessages = messages.slice(-recentCount);
+    const olderMessages = messages.slice(1, -recentCount);
+
+    if (olderMessages.length === 0) return messages; // nothing to compact
+
+    // Build a text summary of what happened in the older messages
+    const olderText = olderMessages
+      .filter(m => m.content)
+      .map(m => {
+        const role = m.role === 'tool' ? `tool(${m.name})` : m.role;
+        const content = m.content!.slice(0, 300);
+        return `[${role}]: ${content}`;
+      })
+      .join('\n');
+
+    // Ask LLM to summarize
+    try {
+      const compactResult = await this.provider.chat([
+        { role: 'system', content: 'You are a context compactor. Summarize the following conversation history into a concise summary that preserves all important facts, decisions, tool results, and user preferences. Be thorough but brief. Output only the summary, no preamble.' },
+        { role: 'user', content: `Summarize this conversation history (${olderMessages.length} messages):\n\n${olderText.slice(0, 50_000)}` },
+      ], { stream: false });
+
+      const summary = compactResult.message.content || '[Compaction failed — no summary generated]';
+
+      const summaryMsg: Message = {
+        role: 'system',
+        content: `[Context compacted. ${olderMessages.length} older messages summarized below.]\n\n${summary}`,
+      };
+
+      // Also compact the in-memory session messages
+      this.state.messages = [summaryMsg];
+
+      return [systemMsg, summaryMsg, ...recentMessages];
+    } catch {
+      // If LLM compaction fails, fall back to naive compaction
+      return compactContext(messages, join(this.profile.profileDir, 'logs'));
+    }
   }
 
   abort(): void {

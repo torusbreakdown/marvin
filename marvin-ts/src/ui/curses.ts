@@ -37,7 +37,6 @@ export class CursesUI implements UI {
   private currentInput = '';
   private userScrolled = false;
   private pendingInput: string | null = null;
-  private inputReady = false;
   private liveStatus: StatusBarData;
   private clockInterval: ReturnType<typeof setInterval> | null = null;
   private origStderrWrite: typeof process.stderr.write | null = null;
@@ -306,7 +305,10 @@ export class CursesUI implements UI {
 
     this.inputBox.focus();
     this.inputBox.readInput();
-    this.inputReady = true;
+    // Prevent blur from killing the readInput session
+    if ((this.inputBox as any).__done) {
+      this.inputBox.removeListener('blur', (this.inputBox as any).__done);
+    }
   }
 
   private showSplash(): void {
@@ -472,9 +474,9 @@ export class CursesUI implements UI {
     if (this.screen.focused !== this.inputBox) {
       this.inputBox.focus();
     }
-    if (!this.inputReady) {
+    // If __listener was removed (by blur/_done), re-enter readInput
+    if (!(this.inputBox as any).__listener) {
       this.inputBox.readInput();
-      this.inputReady = true;
     }
   }
 

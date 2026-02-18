@@ -407,7 +407,7 @@ export async function main(): Promise<void> {
 
   // Display recent chat history in the UI
   if (profile.chatLog.length > 0) {
-    const recent = profile.chatLog.slice(-10);
+    const recent = profile.chatLog.slice(-50);
     ui.displayHistory(recent);
   }
 

@@ -1,8 +1,11 @@
 import blessed from 'neo-blessed';
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { UI } from './shared.js';
 import type { StatusBarData } from '../types.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface CursesUIOptions {
   provider: string;
@@ -240,8 +243,8 @@ export class CursesUI implements UI {
   }
 
   private showSplash(): void {
-    // At runtime dirname is dist/ui/, assets is at project root: ../../assets/
-    const splashPath = join(import.meta.dirname ?? '.', '..', '..', 'assets', 'splash.txt');
+    // __dirname = dist/ui/ at runtime, assets/ is at project root
+    const splashPath = join(__dirname, '..', '..', 'assets', 'splash.txt');
     try {
       if (existsSync(splashPath)) {
         const splash = readFileSync(splashPath, 'utf-8');

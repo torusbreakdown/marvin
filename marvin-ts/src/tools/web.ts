@@ -1,10 +1,23 @@
 import { z } from 'zod';
+import { execSync } from 'node:child_process';
 import { isPrivateUrl } from './ssrf.js';
 import type { ToolRegistry } from './registry.js';
 
 // SECURITY: Block requests to internal/private network addresses (SSRF protection)
 export function validateUrl(url: string): string | null {
   return isPrivateUrl(url);
+}
+
+function lynxDump(url: string): string {
+  try {
+    return execSync(
+      `lynx -dump -nolist -nonumbers -width=120 -accept_all_cookies ${JSON.stringify(url)}`,
+      { encoding: 'utf-8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
+    );
+  } catch (e: any) {
+    // If lynx fails, fall back to fetch
+    return '';
+  }
 }
 
 async function fetchText(url: string, headers?: Record<string, string>, _redirectCount = 0): Promise<string> {
@@ -186,7 +199,7 @@ export function registerWebTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'browse_web',
-    'Read a web page URL. Fetches the page and returns HTML content for the LLM to interpret directly.',
+    'Read a web page URL. Uses lynx to render the page as a real browser would, bypassing scraping blocks. Returns formatted text content.',
     z.object({
       url: z.string().describe('The URL to browse'),
       __test_url: z.string().optional(),
@@ -197,17 +210,22 @@ export function registerWebTools(registry: ToolRegistry): void {
         const urlErr = validateUrl(target);
         if (urlErr) return urlErr;
       }
-      let html = await fetchText(target);
-      html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-      html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-      html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
-      html = html.replace(/<!--[\s\S]*?-->/g, '');
-      // ~100k tokens ≈ 400k chars; truncate to stay within context window
-      const MAX_CHARS = 400_000;
-      if (html.length > MAX_CHARS) {
-        html = html.slice(0, MAX_CHARS) + '\n\n[Truncated]';
+      // Try lynx first (handles JS-blocked sites, cookies, redirects)
+      let text = lynxDump(target);
+      if (!text) {
+        // Fallback to fetch if lynx unavailable or fails
+        let html = await fetchText(target);
+        html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+        html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+        html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
+        html = html.replace(/<!--[\s\S]*?-->/g, '');
+        text = html;
       }
-      return html || 'No content found on the page.';
+      const MAX_CHARS = 400_000;
+      if (text.length > MAX_CHARS) {
+        text = text.slice(0, MAX_CHARS) + '\n\n[Truncated]';
+      }
+      return text || 'No content found on the page.';
     },
     'always',
   );

@@ -80,6 +80,17 @@ export class CursesUI implements UI {
       mouse: true,
     });
 
+    // Ensure terminal is reset on any exit path
+    const resetTerminal = () => {
+      try {
+        process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l');
+        process.stdout.write('\x1b[?25h\x1b[?1049l');
+      } catch { /* ignore */ }
+    };
+    process.on('exit', resetTerminal);
+    process.on('SIGINT', () => { resetTerminal(); process.exit(0); });
+    process.on('SIGTERM', () => { resetTerminal(); process.exit(0); });
+
     // ── Status bar (top) ──
     this.statusBar = blessed.box({
       parent: this.screen,
@@ -574,7 +585,19 @@ export class CursesUI implements UI {
     if (this.clockInterval) clearInterval(this.clockInterval);
     if (this.origStderrWrite) process.stderr.write = this.origStderrWrite;
     try {
+      // Disable mouse tracking before destroying screen
+      if (this.screen?.program) {
+        this.screen.program.disableMouse();
+        this.screen.program.showCursor();
+        this.screen.program.normalBuffer();
+      }
       this.screen?.destroy();
+    } catch { /* ignore */ }
+    // Belt-and-suspenders: write raw terminal reset sequences
+    try {
+      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l'); // disable mouse modes
+      process.stdout.write('\x1b[?25h');  // show cursor
+      process.stdout.write('\x1b[?1049l'); // normal screen buffer
     } catch { /* ignore */ }
   }
 }

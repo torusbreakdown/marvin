@@ -11,6 +11,7 @@ export interface CursesUIOptions {
   provider: string;
   model: string;
   profile: string;
+  inputHistory?: string[];
 }
 
 const COLORS: Record<string, string> = {
@@ -26,6 +27,7 @@ export class CursesUI implements UI {
   private statusBar!: blessed.Widgets.BoxElement;
   private chatLog!: blessed.Widgets.Log;
   private inputBox!: blessed.Widgets.TextareaElement;
+  private inputBorder!: blessed.Widgets.BoxElement;
   private opts: CursesUIOptions;
 
   private inputResolve: ((value: string) => void) | null = null;
@@ -41,9 +43,15 @@ export class CursesUI implements UI {
   private clockInterval: ReturnType<typeof setInterval> | null = null;
   private origStderrWrite: typeof process.stderr.write | null = null;
   private cursorPos = 0;
+  private reverseSearchMode = false;
+  private reverseSearchQuery = '';
+  private reverseSearchIdx = -1;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
+    if (opts.inputHistory?.length) {
+      this.history = [...opts.inputHistory];
+    }
     this.liveStatus = {
       providerEmoji: '🤖',
       model: opts.model,
@@ -110,18 +118,19 @@ export class CursesUI implements UI {
     });
 
     // ── Input area (bottom) ──
-    const inputBorder = blessed.box({
+    this.inputBorder = blessed.box({
       parent: this.screen,
       bottom: 0,
       left: 0,
       width: '100%',
       height: 3,
+      tags: true,
       border: { type: 'line' },
       style: { border: { fg: 'cyan' } },
     });
 
     this.inputBox = blessed.textarea({
-      parent: inputBorder,
+      parent: this.inputBorder,
       top: 0,
       left: 1,
       width: '100%-4',
@@ -135,14 +144,54 @@ export class CursesUI implements UI {
     // Override textarea's _listener to support cursor movement (left/right)
     const self = this;
     (this.inputBox as any)._listener = function(ch: string, key: any) {
-      if (key.name === 'return' || key.name === 'enter') return;
+      if (key.name === 'return' || key.name === 'enter') {
+        if (self.reverseSearchMode) {
+          self.exitReverseSearch(true);
+        }
+        return;
+      }
 
-      // Swallow escape — don't let it exit readInput mode
+      // Escape: cancel confirm dialog or quit app
       if (key.name === 'escape') {
+        if (self.reverseSearchMode) {
+          self.exitReverseSearch(false);
+          return;
+        }
         if (self.confirmResolve) {
           const cb = self.confirmResolve;
           self.confirmResolve = null;
           cb(false);
+          return;
+        }
+        if (self.inputResolve) {
+          const cb = self.inputResolve;
+          self.inputResolve = null;
+          cb('quit');
+        }
+        return;
+      }
+
+      // Ctrl+R: enter reverse search mode
+      if (key.ctrl && key.name === 'r') {
+        self.enterReverseSearch();
+        return;
+      }
+
+      // In reverse search mode, handle keys specially
+      if (self.reverseSearchMode) {
+        if (key.name === 'backspace') {
+          if (self.reverseSearchQuery.length > 0) {
+            self.reverseSearchQuery = self.reverseSearchQuery.slice(0, -1);
+            self.updateReverseSearch();
+          }
+          return;
+        }
+        // Ctrl+R again: search backwards further
+        // (already handled above, but for consecutive presses)
+        if (ch && !/^[\x00-\x1f\x7f]$/.test(ch)) {
+          self.reverseSearchQuery += ch;
+          self.updateReverseSearch();
+          return;
         }
         return;
       }
@@ -486,6 +535,45 @@ export class CursesUI implements UI {
     }
     this.renderStatus();
     this.ensureInputFocus();
+    this.screen.render();
+  }
+
+  private enterReverseSearch(): void {
+    this.reverseSearchMode = true;
+    this.reverseSearchQuery = '';
+    this.reverseSearchIdx = this.history.length;
+    this.inputBorder.setLabel({ text: '{cyan-fg}(reverse-i-search):{/cyan-fg}', side: 'left' });
+    this.inputBox.clearValue();
+    this.cursorPos = 0;
+    this.screen.render();
+  }
+
+  private updateReverseSearch(): void {
+    const q = this.reverseSearchQuery.toLowerCase();
+    this.inputBorder.setLabel({ text: `{cyan-fg}(reverse-i-search)\`${this.reverseSearchQuery}\`:{/cyan-fg}`, side: 'left' });
+    // Search backwards from reverseSearchIdx
+    for (let i = this.reverseSearchIdx - 1; i >= 0; i--) {
+      if (this.history[i].toLowerCase().includes(q)) {
+        this.reverseSearchIdx = i;
+        this.inputBox.setValue(this.history[i]);
+        this.cursorPos = this.history[i].length;
+        this.screen.render();
+        return;
+      }
+    }
+    // No match found
+    this.screen.render();
+  }
+
+  private exitReverseSearch(accept: boolean): void {
+    this.reverseSearchMode = false;
+    this.inputBorder.setLabel('');
+    if (!accept) {
+      this.inputBox.clearValue();
+      this.cursorPos = 0;
+    } else {
+      this.cursorPos = this.inputBox.value.length;
+    }
     this.screen.render();
   }
 

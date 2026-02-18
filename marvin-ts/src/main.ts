@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, appendFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import type { CliArgs, StreamCallbacks, Message, ProviderConfig, AppMode } from './types.js';
@@ -395,6 +395,7 @@ export async function main(): Promise<void> {
     provider: providerConfig.provider,
     model: providerConfig.model,
     profile: profile.name,
+    inputHistory: profile.inputHistory,
   };
   const ui: UI = useCurses ? new CursesUI(uiOpts) : new PlainUI(uiOpts);
   uiRef = ui;
@@ -455,6 +456,8 @@ export async function main(): Promise<void> {
     }
 
     ui.displayMessage('user', input);
+    // Persist input to history file
+    try { appendFileSync(join(profile.profileDir, 'history'), input + '\n'); } catch { /* ignore */ }
     const callbacks = makeStreamCallbacks(ui);
     ui.beginStream();
     try {

@@ -240,7 +240,8 @@ export class CursesUI implements UI {
   }
 
   private showSplash(): void {
-    const splashPath = join(import.meta.dirname ?? '.', '..', 'assets', 'splash.txt');
+    // At runtime dirname is dist/ui/, assets is at project root: ../../assets/
+    const splashPath = join(import.meta.dirname ?? '.', '..', '..', 'assets', 'splash.txt');
     try {
       if (existsSync(splashPath)) {
         const splash = readFileSync(splashPath, 'utf-8');

@@ -31,6 +31,7 @@ async function fetchText(url: string, headers?: Record<string, string>, _redirec
       ...headers,
     },
     redirect: 'manual', // SECURITY: Don't auto-follow redirects — validate each hop
+    signal: AbortSignal.timeout(15_000),
   });
   // Handle redirects manually to prevent SSRF via 302 to internal IPs
   if (res.status >= 300 && res.status < 400) {
@@ -70,9 +71,15 @@ function parseDdgResults(html: string, maxResults: number): Array<{ title: strin
   for (let i = 0; i < Math.min(links.length, maxResults); i++) {
     const link = links[i];
     const snippet = snippets[i];
+    let url = link[1];
+    // Extract real URL from DDG redirect links
+    try {
+      const uddg = new URL(url, 'https://duckduckgo.com').searchParams.get('uddg');
+      if (uddg) url = uddg;
+    } catch { /* keep original */ }
     results.push({
       title: stripHtml(link[2]),
-      url: link[1],
+      url,
       snippet: snippet ? stripHtml(snippet[1]) : '',
     });
   }
@@ -120,10 +127,17 @@ export function registerWebTools(registry: ToolRegistry): void {
       const params = new URLSearchParams({ q: query });
       if (time_filter) params.set('df', time_filter);
       const url = __test_url || `https://html.duckduckgo.com/html/?${params.toString()}`;
-      const html = await fetchText(url);
-      const results = parseDdgResults(html, max_results);
-      if (results.length === 0) return `No results found for: ${query}`;
-      return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
+      try {
+        const html = await fetchText(url);
+        const results = parseDdgResults(html, max_results);
+        if (results.length === 0) return `No results found for: ${query}`;
+        return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
+      } catch (e: any) {
+        if (e?.name === 'TimeoutError' || e?.message?.includes('abort')) {
+          return `Search timed out for: ${query}. You can try again.`;
+        }
+        return `Search failed: ${e?.message || e}`;
+      }
     },
     'always',
   );

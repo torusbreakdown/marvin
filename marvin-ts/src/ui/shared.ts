@@ -4,6 +4,7 @@ export interface UI {
   start(): Promise<void>;
   displayMessage(role: string, text: string): void;
   displaySystem(text: string): void;
+  displayError(text: string): void;
   displayToolCall(toolNames: string[]): void;
   beginStream(): void;
   streamDelta(text: string): void;

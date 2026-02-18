@@ -141,17 +141,24 @@ export class CursesUI implements UI {
     // readInput() adds internal listeners on each call; raise the cap
     (this.inputBox as any).setMaxListeners(100);
 
-    // Override textarea's _listener to support cursor movement (left/right)
+    // ── Direct input handling — bypass readInput() entirely ──
     const self = this;
-    (this.inputBox as any)._listener = function(ch: string, key: any) {
+    this.screen.program.on('keypress', (ch: string, key: any) => {
+      if (!key) return;
+      // Only handle keys when inputBox is focused
+      if (self.screen.focused !== self.inputBox) return;
+
+      // Enter: submit
       if (key.name === 'return' || key.name === 'enter') {
         if (self.reverseSearchMode) {
           self.exitReverseSearch(true);
+          return;
         }
+        process.nextTick(() => self.handleSubmit());
         return;
       }
 
-      // Escape: cancel confirm dialog or quit app
+      // Escape: cancel or quit
       if (key.name === 'escape') {
         if (self.reverseSearchMode) {
           self.exitReverseSearch(false);
@@ -171,13 +178,13 @@ export class CursesUI implements UI {
         return;
       }
 
-      // Ctrl+R: enter reverse search mode
+      // Ctrl+R: reverse search
       if (key.ctrl && key.name === 'r') {
         self.enterReverseSearch();
         return;
       }
 
-      // In reverse search mode, handle keys specially
+      // In reverse search mode
       if (self.reverseSearchMode) {
         if (key.name === 'backspace') {
           if (self.reverseSearchQuery.length > 0) {
@@ -186,8 +193,6 @@ export class CursesUI implements UI {
           }
           return;
         }
-        // Ctrl+R again: search backwards further
-        // (already handled above, but for consecutive presses)
         if (ch && !/^[\x00-\x1f\x7f]$/.test(ch)) {
           self.reverseSearchQuery += ch;
           self.updateReverseSearch();
@@ -196,8 +201,9 @@ export class CursesUI implements UI {
         return;
       }
 
-      const val = self.inputBox.value;
+      const val = self.inputBox.value || '';
 
+      // Arrow keys: cursor movement
       if (key.name === 'left') {
         if (self.cursorPos > 0) self.cursorPos--;
         self.renderInputCursor();
@@ -218,22 +224,7 @@ export class CursesUI implements UI {
         self.renderInputCursor();
         return;
       }
-      if (key.name === 'backspace') {
-        if (self.cursorPos > 0) {
-          const nv = val.slice(0, self.cursorPos - 1) + val.slice(self.cursorPos);
-          self.inputBox.setValue(nv);
-          self.cursorPos--;
-          self.screen.render();
-        }
-        return;
-      }
-      if (key.name === 'delete') {
-        if (self.cursorPos < val.length) {
-          self.inputBox.setValue(val.slice(0, self.cursorPos) + val.slice(self.cursorPos + 1));
-          self.screen.render();
-        }
-        return;
-      }
+
       // Up/down: history navigation
       if (key.name === 'up') {
         if (self.history.length === 0) return;
@@ -262,13 +253,30 @@ export class CursesUI implements UI {
         return;
       }
 
+      // Backspace / delete
+      if (key.name === 'backspace') {
+        if (self.cursorPos > 0) {
+          self.inputBox.setValue(val.slice(0, self.cursorPos - 1) + val.slice(self.cursorPos));
+          self.cursorPos--;
+          self.screen.render();
+        }
+        return;
+      }
+      if (key.name === 'delete') {
+        if (self.cursorPos < val.length) {
+          self.inputBox.setValue(val.slice(0, self.cursorPos) + val.slice(self.cursorPos + 1));
+          self.screen.render();
+        }
+        return;
+      }
+
       // Normal character input
       if (ch && !/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(ch)) {
         self.inputBox.setValue(val.slice(0, self.cursorPos) + ch + val.slice(self.cursorPos));
         self.cursorPos++;
         self.screen.render();
       }
-    };
+    });
 
     // ── Keyboard bindings ──
     this.screen.key(['C-q', 'C-d'], () => {
@@ -315,51 +323,35 @@ export class CursesUI implements UI {
   }
 
   private setupInput(): void {
-    const doSubmit = () => {
-      const text = this.inputBox.getValue().trim();
-      this.inputBox.clearValue();
-      this.cursorPos = 0;
-      this.screen.render();
-
-      if (!text) return;
-      this.history.push(text);
-      this.historyIdx = -1;
-      this.currentInput = '';
-
-      if (this.confirmResolve) {
-        const cb = this.confirmResolve;
-        this.confirmResolve = null;
-        cb(true);
-        return;
-      }
-
-      if (this.inputResolve) {
-        const cb = this.inputResolve;
-        this.inputResolve = null;
-        cb(text);
-      } else {
-        this.pendingInput = text;
-      }
-    };
-
-    this.inputBox.on('keypress', (_ch: string, key: any) => {
-      if (!key) return;
-
-      // Enter submits (prevent newline in textarea)
-      if (key.name === 'enter' || key.name === 'return') {
-        process.nextTick(() => doSubmit());
-        return;
-      }
-    });
-
     this.inputBox.focus();
-    this.inputBox.readInput();
-    // Prevent blur from killing the readInput session (defer since __done is set after readInput)
-    process.nextTick(() => {
-      if ((this.inputBox as any).__done) {
-        this.inputBox.removeListener('blur', (this.inputBox as any).__done);
-      }
-    });
+    // No readInput() needed — all input handled via program-level keypress handler
+  }
+
+  private handleSubmit(): void {
+    const text = this.inputBox.getValue().trim();
+    this.inputBox.clearValue();
+    this.cursorPos = 0;
+    this.screen.render();
+
+    if (!text) return;
+    this.history.push(text);
+    this.historyIdx = -1;
+    this.currentInput = '';
+
+    if (this.confirmResolve) {
+      const cb = this.confirmResolve;
+      this.confirmResolve = null;
+      cb(true);
+      return;
+    }
+
+    if (this.inputResolve) {
+      const cb = this.inputResolve;
+      this.inputResolve = null;
+      cb(text);
+    } else {
+      this.pendingInput = text;
+    }
   }
 
   private showSplash(): void {
@@ -527,16 +519,6 @@ export class CursesUI implements UI {
   private ensureInputFocus(): void {
     if (this.screen.focused !== this.inputBox) {
       this.inputBox.focus();
-    }
-    // If __listener was removed (by blur/_done), re-enter readInput
-    if (!(this.inputBox as any).__listener) {
-      this.inputBox.readInput();
-      // Prevent blur from killing the new readInput session
-      process.nextTick(() => {
-        if ((this.inputBox as any).__done) {
-          this.inputBox.removeListener('blur', (this.inputBox as any).__done);
-        }
-      });
     }
   }
 

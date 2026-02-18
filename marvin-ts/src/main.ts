@@ -2,10 +2,17 @@ import { parseArgs } from 'node:util';
 import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
-import type { CliArgs, StreamCallbacks, Message } from './types.js';
+import type { CliArgs, StreamCallbacks, Message, ProviderConfig } from './types.js';
 import type { UI } from './ui/shared.js';
 import { PlainUI } from './ui/plain.js';
 import { runNonInteractive } from './non-interactive.js';
+import { SessionManager } from './session.js';
+import { ToolRegistry } from './tools/registry.js';
+import { registerAllTools } from './tools/register-all.js';
+import { ProfileManager } from './profiles/manager.js';
+import { OpenAICompatProvider } from './llm/openai.js';
+import { OllamaProvider } from './llm/ollama.js';
+import { CopilotProvider } from './llm/copilot.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -116,6 +123,61 @@ function makeStreamCallbacks(ui: UI): StreamCallbacks {
   };
 }
 
+function resolveProviderConfig(args: CliArgs): ProviderConfig {
+  const providerName = args.provider ?? process.env['MARVIN_PROVIDER'] ?? 'ollama';
+  const defaults: Record<string, { model: string; baseUrl?: string }> = {
+    ollama:        { model: 'qwen3-coder:30b', baseUrl: 'http://localhost:11434' },
+    copilot:       { model: 'claude-haiku-4.5' },
+    openai:        { model: 'gpt-5.1', baseUrl: 'https://api.openai.com/v1' },
+    groq:          { model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
+    gemini:        { model: 'gemini-3-pro-preview', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
+    'openai-compat': { model: 'default' },
+  };
+  const d = defaults[providerName] ?? defaults['ollama'];
+  return {
+    provider: providerName as ProviderConfig['provider'],
+    model: process.env['MARVIN_MODEL'] ?? d.model,
+    apiKey: process.env['MARVIN_API_KEY'] ?? process.env['OPENAI_API_KEY'],
+    baseUrl: process.env['MARVIN_BASE_URL'] ?? d.baseUrl,
+    timeoutMs: 300_000,
+    maxToolRounds: 15,
+  };
+}
+
+function createProvider(config: ProviderConfig) {
+  if (config.provider === 'ollama') return new OllamaProvider(config);
+  if (config.provider === 'copilot') return new CopilotProvider(config);
+  return new OpenAICompatProvider(config);
+}
+
+function createSession(args: CliArgs) {
+  const providerConfig = resolveProviderConfig(args);
+  const provider = createProvider(providerConfig);
+
+  const profileManager = new ProfileManager();
+  const profile = profileManager.load('default');
+
+  const registry = new ToolRegistry();
+  const usage = { getSessionUsage: () => ({ totalCostUsd: 0, llmTurns: 0, modelTurns: {}, modelCost: {}, toolCallCounts: {} }) };
+
+  const session = new SessionManager({
+    provider,
+    providerConfig,
+    profile,
+    registry,
+    codingMode: false,
+    workingDir: args.workingDir ?? process.cwd(),
+    nonInteractive: args.nonInteractive,
+    persistDir: profile.profileDir,
+  });
+
+  registerAllTools(registry, {
+    getUsage: () => session.getUsage().getSessionUsage(),
+  });
+
+  return { session, profile, providerConfig };
+}
+
 function showSplash(): void {
   const splashPath = join(import.meta.dirname ?? '.', '..', 'assets', 'splash.txt');
   try {
@@ -133,7 +195,7 @@ export async function main(): Promise<void> {
 
   // --- Non-interactive mode ---
   if (args.nonInteractive) {
-    let prompt = args.prompt;
+    let prompt = args.prompt ?? args.inlinePrompt;
     if (!prompt) {
       if (process.stdin.isTTY) {
         process.stderr.write('Error: --non-interactive requires --prompt or piped stdin\n');
@@ -146,21 +208,73 @@ export async function main(): Promise<void> {
       }
     }
 
-    // In a real implementation, we'd create a SessionManager here.
-    // For now, this shows the structure.
-    process.stderr.write('Error: session bootstrap not yet implemented\n');
-    process.exit(1);
+    const { session } = createSession(args);
+    const exitCode = await runNonInteractive({
+      prompt,
+      session,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    process.exit(exitCode);
     return;
   }
 
   // --- Interactive mode ---
   showSplash();
 
-  // Signal handling
+  const { session, profile, providerConfig } = createSession(args);
+  const ui: UI = new PlainUI({
+    provider: providerConfig.provider,
+    model: providerConfig.model,
+    profile: profile.name,
+  });
+  await ui.start();
+
+  const slashCtx: SlashCommandContext = {
+    session,
+    ui,
+  };
+
+  // Handle inline prompt (positional argument)
+  if (args.inlinePrompt) {
+    const callbacks = makeStreamCallbacks(ui);
+    ui.beginStream();
+    try {
+      await session.submit(args.inlinePrompt, callbacks);
+    } catch {
+      // error already reported via callbacks.onError
+    }
+  }
+
+  // Signal handling — register BEFORE the REPL so Ctrl+C works during conversation
   const cleanup = () => {
+    session.destroy().catch(() => {});
+    ui.destroy();
     process.exit(0);
   };
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-}
 
+  // REPL loop
+  while (true) {
+    const input = await ui.promptInput();
+    if (input === 'quit') break;
+    if (!input) continue;
+
+    if (handleSlashCommand(input, slashCtx)) {
+      if (input.trim() === 'quit' || input.trim() === 'exit') break;
+      continue;
+    }
+
+    const callbacks = makeStreamCallbacks(ui);
+    ui.beginStream();
+    try {
+      await session.submit(input, callbacks);
+    } catch {
+      // error already reported via callbacks.onError
+    }
+  }
+
+  await session.destroy();
+  ui.destroy();
+}

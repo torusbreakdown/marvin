@@ -73,7 +73,7 @@ export class OpenAICompatProvider implements Provider {
       }
 
       if (shouldStream) {
-        return await this.parseStreamingResponse(response);
+        return await this.parseStreamingResponse(response, options?.onDelta);
       } else {
         return await this.parseNonStreamingResponse(response);
       }
@@ -102,7 +102,7 @@ export class OpenAICompatProvider implements Provider {
     };
   }
 
-  private async parseStreamingResponse(response: Response): Promise<ChatResult> {
+  private async parseStreamingResponse(response: Response, onDelta?: (text: string) => void): Promise<ChatResult> {
     const contentParts: string[] = [];
     const toolCallAccum = new Map<number, { id: string; name: string; args: string[] }>();
     let usage = { inputTokens: 0, outputTokens: 0 };
@@ -135,6 +135,7 @@ export class OpenAICompatProvider implements Provider {
         if (delta) {
           if (delta.content) {
             contentParts.push(delta.content);
+            onDelta?.(delta.content);
           }
 
           if (delta.tool_calls) {

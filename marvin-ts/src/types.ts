@@ -84,6 +84,7 @@ export interface ChatOptions {
   stream?: boolean;
   extraBody?: Record<string, unknown>;
   signal?: AbortSignal;
+  onDelta?: (text: string) => void;
 }
 
 export interface Provider {

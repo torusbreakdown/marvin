@@ -12,6 +12,7 @@ export interface RunToolLoopOptions {
   tools?: OpenAIFunctionDef[];
   signal?: AbortSignal;
   onToolCall?: (toolNames: string[]) => void;
+  onDelta?: (text: string) => void;
 }
 
 export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResult> {
@@ -25,6 +26,7 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
     tools,
     signal,
     onToolCall,
+    onDelta,
   } = options;
 
   // Build messages array: system + history + user prompt
@@ -55,6 +57,10 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
 
     // No tool calls → final response
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
+      // Emit content as delta for streaming UI
+      if (msg.content && onDelta) {
+        onDelta(msg.content);
+      }
       return { message: msg, usage: totalUsage };
     }
 
@@ -79,7 +85,7 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
   }
 
   // Max rounds reached — final call with no tools to get a text response
-  const finalResult = await provider.chat(messages, { tools: undefined, stream: true, signal });
+  const finalResult = await provider.chat(messages, { tools: undefined, stream: true, signal, onDelta });
   totalUsage.inputTokens += finalResult.usage.inputTokens;
   totalUsage.outputTokens += finalResult.usage.outputTokens;
   return { message: finalResult.message, usage: totalUsage };

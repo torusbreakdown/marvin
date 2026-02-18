@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, realpathSync } from 'fs';
 import { join, resolve, relative, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { execFileSync } from 'child_process';
@@ -18,10 +18,24 @@ function validateRepoPath(inputPath: string, repoDir: string): string | null {
   if (inputPath.includes('..')) {
     return `Error: Path traversal with ".." is not allowed.`;
   }
+  if (inputPath.includes('\0')) {
+    return `Error: Null bytes are not allowed in paths.`;
+  }
   const resolved = resolve(repoDir, inputPath);
   const rel = relative(repoDir, resolved);
   if (rel.startsWith('..') || isAbsolute(rel)) {
     return `Error: Path escapes the repository directory.`;
+  }
+  // SECURITY: Check symlinks don't escape repo directory (cloned repos can contain symlinks)
+  if (existsSync(resolved)) {
+    try {
+      const realPath = realpathSync(resolved);
+      const realRepo = realpathSync(repoDir);
+      const realRel = relative(realRepo, realPath);
+      if (realRel.startsWith('..') || isAbsolute(realRel)) {
+        return `Error: Path resolves outside repository via symlink.`;
+      }
+    } catch { /* ignore */ }
   }
   return null;
 }

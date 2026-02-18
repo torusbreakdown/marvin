@@ -12086,21 +12086,25 @@ class SessionManager:
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
+        self._sdk_session.on(self._on_event)  # register once per session
         return self._sdk_session
 
     async def rebuild_sdk_session(self):
         if self._sdk_session:
-            await self._sdk_session.destroy()
+            try:
+                await self._sdk_session.destroy()
+            except Exception:
+                pass
         self._sdk_session = await self._sdk_client.create_session({
             "model": self._sdk_model,
             "tools": self.all_tools,
             "system_message": {"content": _build_system_message()},
         })
+        self._sdk_session.on(self._on_event)  # register once per session
         return self._sdk_session
 
     async def _send_sdk(self, user_prompt: str):
         session = await self._get_sdk_session()
-        session.on(self._on_event)
         self._done.clear()
         self._chunks.clear()
         await session.send({"prompt": user_prompt})
@@ -12108,11 +12112,18 @@ class SessionManager:
         try:
             await asyncio.wait_for(self._done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            msg = f"\n⚠️  Response timed out after {timeout}s. Try again."
+            msg = f"\n⚠️  Response timed out after {timeout}s. Rebuilding session."
             if self._on_message:
                 self._on_message(msg)
             else:
                 print(msg)
+            # Session is in unknown state after timeout — destroy it so next
+            # request gets a clean session rather than stalling again.
+            try:
+                await self._sdk_session.destroy()
+            except Exception:
+                pass
+            self._sdk_session = None
 
     async def send_prompt(self, user_prompt: str, force_sdk: bool = False) -> str | None:
         """Send a prompt via active provider, with Copilot SDK as fallback.
@@ -12270,8 +12281,11 @@ async def _run_curses_interactive(stdscr):
                 ui.add_message("assistant", result.strip())
                 update_status()
                 ui.render()
-                busy = False
+            # Always clean up — SDK path normally relies on _on_idle setting done,
+            # but on timeout _on_idle never fires so we must ensure cleanup here.
+            if not done.is_set():
                 done.set()
+            busy = False
 
         asyncio.create_task(_send_task())
 

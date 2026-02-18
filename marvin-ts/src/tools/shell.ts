@@ -20,10 +20,20 @@ export function registerShellTools(registry: ToolRegistry): void {
       // non-interactive mode is used for automated coding workflows where the LLM
       // needs to run build/test commands without human intervention.
       if (!ctx.nonInteractive && ctx.confirmCommand) {
-        const confirmed = await ctx.confirmCommand(args.command);
+        // SECURITY: Strip ANSI escape codes so the command preview can't hide malicious content
+        const sanitizedPreview = args.command.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+        const confirmed = await ctx.confirmCommand(sanitizedPreview);
         if (!confirmed) {
           return 'Command declined by user.';
         }
+      }
+
+      // SECURITY: Filter sensitive environment variables from child process
+      const sanitizedEnv = { ...process.env };
+      const sensitiveKeys = ['OPENAI_API_KEY', 'MARVIN_API_KEY', 'GNEWS_API_KEY', 'STEAM_API_KEY',
+        'OMDB_API_KEY', 'RAWG_API_KEY', 'GOOGLE_PLACES_API_KEY', 'SPOTIFY_CLIENT_SECRET'];
+      for (const key of sensitiveKeys) {
+        delete sanitizedEnv[key];
       }
 
       return new Promise<string>((resolve) => {
@@ -32,7 +42,7 @@ export function registerShellTools(registry: ToolRegistry): void {
           cwd: ctx.workingDir!,
           timeout: timeoutMs,
           maxBuffer: 10 * 1024 * 1024,
-          env: { ...process.env },
+          env: { ...sanitizedEnv },
         }, (error, stdout, stderr) => {
           if (error) {
             if (error.killed || error.message.includes('TIMEOUT') || (error as any).code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || error.signal === 'SIGTERM') {

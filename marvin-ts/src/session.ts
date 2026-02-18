@@ -181,6 +181,13 @@ export class SessionManager {
     this.state.abortController?.abort();
   }
 
+  switchProvider(provider: Provider, config: ProviderConfig): void {
+    this.provider.destroy();
+    this.provider = provider;
+    this.providerConfig = config;
+    this.state.provider = config;
+  }
+
   async destroy(): Promise<void> {
     this.abort();
     this.usage.save();

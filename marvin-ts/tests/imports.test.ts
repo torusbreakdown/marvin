@@ -257,4 +257,16 @@ describe('Module imports — all modules export expected symbols', () => {
     expect(typeof mod.savePreferences).toBe('function');
     expect(typeof mod.updatePreference).toBe('function');
   });
+
+  it('src/tools/register-all.ts exports registerAllTools', async () => {
+    const mod = await import('../src/tools/register-all.js');
+    expect(typeof mod.registerAllTools).toBe('function');
+  });
+
+  it('src/main.ts exports createSession-related helpers (resolveProviderConfig, etc.)', async () => {
+    const mod = await import('../src/main.js');
+    expect(typeof mod.main).toBe('function');
+    expect(typeof mod.parseCliArgs).toBe('function');
+    expect(typeof mod.handleSlashCommand).toBe('function');
+  });
 });

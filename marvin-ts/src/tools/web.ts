@@ -1,49 +1,30 @@
 import { z } from 'zod';
+import { isPrivateUrl } from './ssrf.js';
 import type { ToolRegistry } from './registry.js';
 
 // SECURITY: Block requests to internal/private network addresses (SSRF protection)
-function validateUrl(url: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return `Error: Invalid URL: ${url}`;
-  }
-
-  // Only allow http and https protocols
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return `Error: Only http:// and https:// URLs are allowed. Got: ${parsed.protocol}`;
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-
-  // Block localhost and loopback addresses
-  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]' || hostname === '0.0.0.0') {
-    return `Error: Access to localhost/loopback addresses is not allowed.`;
-  }
-
-  // Block link-local (AWS metadata, Azure IMDS, etc.)
-  if (hostname === '169.254.169.254' || hostname.startsWith('169.254.')) {
-    return `Error: Access to link-local/metadata addresses is not allowed.`;
-  }
-
-  // Block common private network ranges
-  if (hostname.startsWith('10.') || hostname.startsWith('192.168.') ||
-      hostname.match(/^172\.(1[6-9]|2\d|3[01])\./) ||
-      hostname.endsWith('.local') || hostname.endsWith('.internal')) {
-    return `Error: Access to private network addresses is not allowed.`;
-  }
-
-  return null;
+export function validateUrl(url: string): string | null {
+  return isPrivateUrl(url);
 }
 
-async function fetchText(url: string, headers?: Record<string, string>): Promise<string> {
+async function fetchText(url: string, headers?: Record<string, string>, _redirectCount = 0): Promise<string> {
+  // SECURITY: Limit redirect depth to prevent infinite redirect loops
+  if (_redirectCount > 5) throw new Error('Too many redirects');
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; Marvin/1.0)',
       ...headers,
     },
+    redirect: 'manual', // SECURITY: Don't auto-follow redirects — validate each hop
   });
+  // Handle redirects manually to prevent SSRF via 302 to internal IPs
+  if (res.status >= 300 && res.status < 400) {
+    const location = res.headers.get('location');
+    if (!location) throw new Error(`HTTP ${res.status} redirect with no Location header`);
+    const redirectErr = validateUrl(location);
+    if (redirectErr) throw new Error(`Redirect blocked (SSRF): ${redirectErr}`);
+    return fetchText(location, headers, _redirectCount + 1);
+  }
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
   return res.text();
 }

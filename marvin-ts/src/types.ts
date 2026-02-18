@@ -57,7 +57,7 @@ export interface ToolCall {
 // === Provider ===
 
 export interface ProviderConfig {
-  provider: 'copilot' | 'gemini' | 'groq' | 'openai' | 'ollama' | 'openai-compat';
+  provider: 'copilot' | 'gemini' | 'groq' | 'openai' | 'ollama' | 'openai-compat' | 'llama-server';
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -195,6 +195,7 @@ export interface CliArgs {
   provider?: string;
   plain: boolean;
   nonInteractive: boolean;
+  codingMode?: boolean;
   prompt?: string;
   workingDir?: string;
   ntfy?: string;

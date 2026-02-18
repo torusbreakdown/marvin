@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync, realpathSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync, realpathSync, lstatSync } from 'fs';
 import { join, resolve, relative, isAbsolute } from 'path';
 import { homedir } from 'os';
 import { execFileSync } from 'child_process';
@@ -24,10 +24,25 @@ function validateNotesPath(name: string, baseDir: string): string | null {
   if (name.includes('..')) {
     return `Error: Path traversal with ".." is not allowed.`;
   }
+  // Block null bytes that could truncate paths at the OS level
+  if (name.includes('\0')) {
+    return `Error: Null bytes are not allowed in paths.`;
+  }
   const resolved = resolve(baseDir, name);
   const rel = relative(baseDir, resolved);
   if (rel.startsWith('..') || isAbsolute(rel)) {
     return `Error: Path escapes the notes directory.`;
+  }
+  // SECURITY: Check symlinks don't escape the notes directory
+  if (existsSync(resolved)) {
+    try {
+      const realPath = realpathSync(resolved);
+      const realBase = realpathSync(baseDir);
+      const realRel = relative(realBase, realPath);
+      if (realRel.startsWith('..') || isAbsolute(realRel)) {
+        return `Error: Path resolves outside notes directory via symlink.`;
+      }
+    } catch { /* path doesn't exist yet — OK for create */ }
   }
   return null;
 }

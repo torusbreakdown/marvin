@@ -89,7 +89,10 @@ export function registerGitTools(registry: ToolRegistry): void {
       if (isAbsolute(args.path) || args.path.includes('..')) {
         return 'Error: Only relative paths within the working directory are allowed.';
       }
-      return runGit(['blame', args.path], ctx.workingDir);
+      if (args.path.startsWith('-')) {
+        return 'Error: Path must not start with "-".';
+      }
+      return runGit(['blame', '--', args.path], ctx.workingDir);
     },
     'coding',
   );

@@ -73,7 +73,10 @@ export class PlainUI implements UI {
         reject(new Error('UI not started'));
         return;
       }
+      const onClose = () => resolve('quit');
+      this.rl.once('close', onClose);
       this.rl.question('You: ', (answer) => {
+        this.rl?.removeListener('close', onClose);
         const trimmed = answer.trim();
         if (trimmed === 'quit' || trimmed === 'exit') {
           resolve('quit');
@@ -81,8 +84,6 @@ export class PlainUI implements UI {
         }
         resolve(trimmed);
       });
-      // Handle Ctrl+D (EOF)
-      this.rl.once('close', () => resolve('quit'));
     });
   }
 

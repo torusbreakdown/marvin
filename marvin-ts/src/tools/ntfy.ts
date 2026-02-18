@@ -43,6 +43,15 @@ export function registerNtfyTools(registry: ToolRegistry): void {
       label: z.string().default('').describe('Friendly label'),
     }),
     async (args, ctx) => {
+      // SECURITY: In interactive mode, subscribing requires user confirmation.
+      // Without this, a prompt-injected LLM could subscribe to an attacker-controlled
+      // topic and then publish sensitive data to it (subscribe + publish = exfiltration).
+      if (!ctx.nonInteractive && ctx.confirmCommand) {
+        const confirmed = await ctx.confirmCommand(`Subscribe to ntfy topic: ${args.topic}`);
+        if (!confirmed) {
+          return 'Subscription declined by user.';
+        }
+      }
       const existing = ctx.profile.ntfySubscriptions.find(s => s.topic === args.topic);
       if (!existing) {
         ctx.profile.ntfySubscriptions.push({ topic: args.topic });

@@ -322,6 +322,57 @@ describe('OpenAICompatProvider', () => {
     });
   });
 
+  describe('Streaming tool call accumulation', () => {
+    it('accumulates incremental tool call arguments across SSE chunks', async () => {
+      // Simulate tool call arriving across multiple SSE chunks
+      const chunks = [
+        { choices: [{ delta: { role: 'assistant', content: null, tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_search', arguments: '{"q":' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"test qu' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'ery"}' } }] } }] },
+        { choices: [{ delta: {} }], usage: { prompt_tokens: 20, completion_tokens: 10 } },
+      ];
+      let sseBody = chunks.map(c => `data: ${JSON.stringify(c)}`).join('\n\n') + '\n\ndata: [DONE]\n\n';
+
+      mock.setHandler(() => ({
+        status: 200,
+        body: sseBody,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }));
+
+      const provider = new OpenAICompatProvider(baseConfig);
+      const result = await provider.chat([{ role: 'user', content: 'test' }], { stream: true });
+
+      expect(result.message.tool_calls).toHaveLength(1);
+      expect(result.message.tool_calls![0].id).toBe('call_1');
+      expect(result.message.tool_calls![0].function.name).toBe('web_search');
+      expect(result.message.tool_calls![0].function.arguments).toBe('{"q":"test query"}');
+    });
+
+    it('accumulates multiple parallel tool calls from streaming', async () => {
+      const chunks = [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a.ts"}' } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 1, id: 'call_2', type: 'function', function: { name: 'read_file', arguments: '{"path":"b.ts"}' } }] } }] },
+        { choices: [{ delta: {} }], usage: { prompt_tokens: 15, completion_tokens: 8 } },
+      ];
+      let sseBody = chunks.map(c => `data: ${JSON.stringify(c)}`).join('\n\n') + '\n\ndata: [DONE]\n\n';
+
+      mock.setHandler(() => ({
+        status: 200,
+        body: sseBody,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }));
+
+      const provider = new OpenAICompatProvider(baseConfig);
+      const result = await provider.chat([{ role: 'user', content: 'test' }], { stream: true });
+
+      expect(result.message.tool_calls).toHaveLength(2);
+      expect(result.message.tool_calls![0].function.name).toBe('read_file');
+      expect(result.message.tool_calls![0].function.arguments).toBe('{"path":"a.ts"}');
+      expect(result.message.tool_calls![1].function.name).toBe('read_file');
+      expect(result.message.tool_calls![1].function.arguments).toBe('{"path":"b.ts"}');
+    });
+  });
+
   describe('Timeout', () => {
     it('uses 300s timeout (300000ms) by default', () => {
       const provider = new OpenAICompatProvider(baseConfig);

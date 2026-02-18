@@ -56,7 +56,7 @@ export function registerTicketsTools(registry: ToolRegistry): void {
           cwd: ctx.workingDir,
           encoding: 'utf-8',
           timeout: 30_000,
-          env: { ...process.env },
+          env: { ...process.env, OPENAI_API_KEY: undefined, MARVIN_API_KEY: undefined },
         });
         return result || 'Done.';
       } catch (err: any) {

@@ -13,6 +13,7 @@ import { ProfileManager } from './profiles/manager.js';
 import { OpenAICompatProvider } from './llm/openai.js';
 import { OllamaProvider } from './llm/ollama.js';
 import { CopilotProvider } from './llm/copilot.js';
+import { LlamaServerProvider } from './llm/llama-server.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -22,18 +23,53 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       plain:             { type: 'boolean', default: false },
       curses:            { type: 'boolean', default: false },
       'non-interactive': { type: 'boolean', default: false },
+      'coding-mode':     { type: 'boolean', default: false },
       prompt:            { type: 'string' },
       'working-dir':     { type: 'string' },
       ntfy:              { type: 'string' },
+      help:              { type: 'boolean', short: 'h', default: false },
+      version:           { type: 'boolean', short: 'v', default: false },
     },
     allowPositionals: true,
     strict: true,
   });
 
+  if (values.help) {
+    process.stdout.write(
+      `Usage: marvin [options] [prompt]\n\n` +
+      `Options:\n` +
+      `  --provider <name>    LLM provider (ollama, copilot, openai, groq, gemini, openai-compat, llama-server)\n` +
+      `  --plain              Force plain readline UI\n` +
+      `  --curses             Force curses TUI\n` +
+      `  --non-interactive    Non-interactive mode (requires --prompt or piped stdin)\n` +
+      `  --coding-mode        Enable coding tools (auto-enabled with --working-dir)\n` +
+      `  --prompt <text>      Prompt text (non-interactive or single-shot)\n` +
+      `  --working-dir <dir>  Set working directory (implies --coding-mode)\n` +
+      `  --ntfy <topic>       Subscribe to ntfy topic\n` +
+      `  -h, --help           Show this help\n` +
+      `  -v, --version        Show version\n` +
+      `\nSlash commands (interactive):\n` +
+      `  !code         Toggle coding mode\n` +
+      `  !sh / !shell  Toggle shell mode (or !sh <cmd> to run a command)\n` +
+      `  !model        Show current provider/model (!model <provider> [model] to switch)\n` +
+      `  !<cmd>        Run shell command\n` +
+      `  usage         Show session usage/cost\n` +
+      `  quit / exit   Exit\n`,
+    );
+    process.exit(0);
+  }
+
+  if (values.version) {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname ?? '.', '..', 'package.json'), 'utf-8'));
+    process.stdout.write(`marvin ${pkg.version ?? '0.1.0'}\n`);
+    process.exit(0);
+  }
+
   return {
     provider: values.provider,
     plain: values.plain ?? false,
     nonInteractive: values['non-interactive'] ?? false,
+    codingMode: (values['coding-mode'] ?? false) || !!values['working-dir'],
     prompt: values.prompt,
     workingDir: values['working-dir'],
     ntfy: values.ntfy,
@@ -42,7 +78,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
 }
 
 // Known slash commands
-const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro']);
+const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro', '!model']);
 const KEYWORD_COMMANDS = new Set(['quit', 'exit', 'preferences', 'profiles', 'usage', 'saved']);
 
 export interface SlashCommandContext {
@@ -50,7 +86,8 @@ export interface SlashCommandContext {
     toggleCodingMode: () => boolean;
     toggleShellMode: () => boolean;
     getUsage: () => { summary: () => string };
-    getState: () => { codingMode: boolean; shellMode: boolean };
+    getState: () => { codingMode: boolean; shellMode: boolean; provider: ProviderConfig };
+    switchProvider: (provider: ReturnType<typeof createProvider>, config: ProviderConfig) => void;
   };
   ui: UI;
 }
@@ -77,6 +114,41 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
     return true;
   }
 
+  // !sh <command> and !shell <command> — run command directly
+  if (trimmed.startsWith('!sh ') || trimmed.startsWith('!shell ')) {
+    const cmd = trimmed.startsWith('!sh ') ? trimmed.slice(4) : trimmed.slice(7);
+    try {
+      const output = execSync(cmd, { encoding: 'utf-8', timeout: 30_000 }).trim();
+      if (output) ctx.ui.displaySystem(output);
+    } catch (err) {
+      ctx.ui.displayError(`Shell command failed: ${(err as Error).message}`);
+    }
+    return true;
+  }
+
+  // !model — show or switch provider/model
+  if (trimmed === '!model' || trimmed.startsWith('!model ')) {
+    const args = trimmed.slice(6).trim();
+    if (!args) {
+      const st = ctx.session.getState();
+      ctx.ui.displaySystem(`Provider: ${st.provider.provider}  Model: ${st.provider.model}  Base URL: ${st.provider.baseUrl ?? 'default'}`);
+      return true;
+    }
+    const parts = args.split(/\s+/);
+    const providerName = parts[0];
+    const modelOverride = parts[1];
+    try {
+      const config = resolveProviderConfig({ provider: providerName } as CliArgs);
+      if (modelOverride) config.model = modelOverride;
+      const provider = createProvider(config);
+      ctx.session.switchProvider(provider, config);
+      ctx.ui.displaySystem(`Switched to ${config.provider} / ${config.model}`);
+    } catch (err) {
+      ctx.ui.displayError((err as Error).message);
+    }
+    return true;
+  }
+
   if (trimmed === 'preferences') {
     const editor = process.env['EDITOR'] || 'nano';
     ctx.ui.displaySystem(`Opening preferences in ${editor}...`);
@@ -100,11 +172,21 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
   }
 
   // Generic shell escape: !COMMAND
-  if (trimmed.startsWith('!') && !KNOWN_BANG_COMMANDS.has(trimmed.split(/\s/)[0])) {
-    const cmd = trimmed.slice(1);
+  if (trimmed.startsWith('!')) {
+    const cmd = trimmed.slice(1).trim();
+    if (!cmd) {
+      ctx.ui.displayError('No command specified. Usage: !<command>');
+      return true;
+    }
+    if (KNOWN_BANG_COMMANDS.has('!' + cmd.split(/\s/)[0])) {
+      // Already handled above (e.g. !code, !voice) — if we get here it means
+      // the command had args but the handler above only matched exact. Let the
+      // LLM handle it as a regular message.
+      return false;
+    }
     try {
       const output = execSync(cmd, { encoding: 'utf-8', timeout: 30_000 }).trim();
-      ctx.ui.displaySystem(output);
+      if (output) ctx.ui.displaySystem(output);
     } catch (err) {
       ctx.ui.displayError(`Shell command failed: ${(err as Error).message}`);
     }
@@ -132,8 +214,13 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
     groq:          { model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
     gemini:        { model: 'gemini-3-pro-preview', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
     'openai-compat': { model: 'default' },
+    'llama-server':  { model: 'default', baseUrl: 'http://localhost:8080/v1' },
   };
-  const d = defaults[providerName] ?? defaults['ollama'];
+  if (!(providerName in defaults)) {
+    const valid = Object.keys(defaults).join(', ');
+    throw new Error(`Unknown provider '${providerName}'. Valid providers: ${valid}`);
+  }
+  const d = defaults[providerName];
   return {
     provider: providerName as ProviderConfig['provider'],
     model: process.env['MARVIN_MODEL'] ?? d.model,
@@ -147,6 +234,7 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
 function createProvider(config: ProviderConfig) {
   if (config.provider === 'ollama') return new OllamaProvider(config);
   if (config.provider === 'copilot') return new CopilotProvider(config);
+  if (config.provider === 'llama-server') return new LlamaServerProvider(config);
   return new OpenAICompatProvider(config);
 }
 
@@ -165,7 +253,7 @@ function createSession(args: CliArgs) {
     providerConfig,
     profile,
     registry,
-    codingMode: false,
+    codingMode: args.codingMode ?? false,
     workingDir: args.workingDir ?? process.cwd(),
     nonInteractive: args.nonInteractive,
     persistDir: profile.profileDir,
@@ -192,6 +280,12 @@ function showSplash(): void {
 
 export async function main(): Promise<void> {
   const args = parseCliArgs();
+
+  // Validate --working-dir early
+  if (args.workingDir && !existsSync(args.workingDir)) {
+    process.stderr.write(`Error: working directory does not exist: ${args.workingDir}\n`);
+    process.exit(1);
+  }
 
   // --- Non-interactive mode ---
   if (args.nonInteractive) {
@@ -257,7 +351,13 @@ export async function main(): Promise<void> {
 
   // REPL loop
   while (true) {
-    const input = await ui.promptInput();
+    let input: string;
+    try {
+      input = await ui.promptInput();
+    } catch {
+      // readline closed (e.g., piped stdin exhausted) — exit gracefully
+      break;
+    }
     if (input === 'quit') break;
     if (!input) continue;
 
@@ -278,3 +378,9 @@ export async function main(): Promise<void> {
   await session.destroy();
   ui.destroy();
 }
+
+// Bootstrap: call main() when this file is run directly
+main().catch((err) => {
+  process.stderr.write(`Fatal: ${(err as Error).message}\n`);
+  process.exit(1);
+});

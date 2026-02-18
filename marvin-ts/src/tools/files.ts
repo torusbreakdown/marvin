@@ -7,6 +7,10 @@ import type { ToolContext } from '../types.js';
 
 function validatePath(path: string, ctx: ToolContext): string | null {
   if (!ctx.workingDir) return 'Error: No working directory set.';
+  // SECURITY: Block null bytes that could truncate paths at the OS level
+  if (path.includes('\0')) {
+    return 'Error: Null bytes are not allowed in paths.';
+  }
   if (isAbsolute(path)) {
     const tree = getTree(ctx.workingDir, 2);
     return `Error: Absolute paths are not allowed. Use relative paths.\nWorking directory: ${ctx.workingDir}\n\nDirectory tree:\n${tree}`;
@@ -111,8 +115,16 @@ export function registerFilesTools(registry: ToolRegistry): void {
       if (existsSync(fullPath)) {
         return `Error: File already exists: ${args.path}. Use apply_patch to edit.`;
       }
+      // SECURITY: Validate that parent directory (if it exists) doesn't escape sandbox via symlink
       const dir = dirname(fullPath);
+      if (existsSync(dir)) {
+        const symlinkErr = validateRealPath(dir, ctx);
+        if (symlinkErr) return symlinkErr;
+      }
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      // SECURITY: Re-validate after mkdir in case of race condition
+      const parentCheck = validateRealPath(dir, ctx);
+      if (parentCheck) return parentCheck;
       writeFileSync(fullPath, args.content, 'utf-8');
       return `Created ${args.path}`;
     },
@@ -195,6 +207,9 @@ export function registerFilesTools(registry: ToolRegistry): void {
       if (!existsSync(fullPath)) {
         return `Error: Directory not found: ${args.path}`;
       }
+      // SECURITY: Check symlinks don't escape sandbox
+      const symlinkErr = validateRealPath(fullPath, ctx);
+      if (symlinkErr) return symlinkErr;
       return getTree(fullPath, args.max_depth);
     },
     'coding',

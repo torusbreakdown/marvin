@@ -220,7 +220,8 @@ export class CursesUI implements UI {
       }
       if (key.name === 'backspace') {
         if (self.cursorPos > 0) {
-          self.inputBox.value = val.slice(0, self.cursorPos - 1) + val.slice(self.cursorPos);
+          const nv = val.slice(0, self.cursorPos - 1) + val.slice(self.cursorPos);
+          self.inputBox.setValue(nv);
           self.cursorPos--;
           self.screen.render();
         }
@@ -228,17 +229,42 @@ export class CursesUI implements UI {
       }
       if (key.name === 'delete') {
         if (self.cursorPos < val.length) {
-          self.inputBox.value = val.slice(0, self.cursorPos) + val.slice(self.cursorPos + 1);
+          self.inputBox.setValue(val.slice(0, self.cursorPos) + val.slice(self.cursorPos + 1));
           self.screen.render();
         }
         return;
       }
-      // Up/down handled in our own keypress handler
-      if (key.name === 'up' || key.name === 'down') return;
+      // Up/down: history navigation
+      if (key.name === 'up') {
+        if (self.history.length === 0) return;
+        if (self.historyIdx === -1) {
+          self.currentInput = self.inputBox.getValue();
+          self.historyIdx = self.history.length - 1;
+        } else if (self.historyIdx > 0) {
+          self.historyIdx--;
+        }
+        self.inputBox.setValue(self.history[self.historyIdx]);
+        self.cursorPos = self.inputBox.value.length;
+        self.screen.render();
+        return;
+      }
+      if (key.name === 'down') {
+        if (self.historyIdx === -1) return;
+        if (self.historyIdx < self.history.length - 1) {
+          self.historyIdx++;
+          self.inputBox.setValue(self.history[self.historyIdx]);
+        } else {
+          self.historyIdx = -1;
+          self.inputBox.setValue(self.currentInput);
+        }
+        self.cursorPos = self.inputBox.value.length;
+        self.screen.render();
+        return;
+      }
 
       // Normal character input
       if (ch && !/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(ch)) {
-        self.inputBox.value = val.slice(0, self.cursorPos) + ch + val.slice(self.cursorPos);
+        self.inputBox.setValue(val.slice(0, self.cursorPos) + ch + val.slice(self.cursorPos));
         self.cursorPos++;
         self.screen.render();
       }
@@ -276,12 +302,11 @@ export class CursesUI implements UI {
     // Set up persistent input handling
     this.setupInput();
 
-    // Tick the clock every 30s
+    // Tick the clock every second
     this.clockInterval = setInterval(() => {
       this.renderStatus();
-      this.ensureInputFocus();
       this.screen.render();
-    }, 30_000);
+    }, 1_000);
 
     this.screen.render();
   }
@@ -320,34 +345,6 @@ export class CursesUI implements UI {
       // Enter submits (prevent newline in textarea)
       if (key.name === 'enter' || key.name === 'return') {
         process.nextTick(() => doSubmit());
-        return;
-      }
-
-      // History navigation
-      if (key.name === 'up') {
-        if (this.history.length === 0) return;
-        if (this.historyIdx === -1) {
-          this.currentInput = this.inputBox.getValue();
-          this.historyIdx = this.history.length - 1;
-        } else if (this.historyIdx > 0) {
-          this.historyIdx--;
-        }
-        this.inputBox.setValue(this.history[this.historyIdx]);
-        this.cursorPos = this.inputBox.value.length;
-        this.screen.render();
-        return;
-      }
-      if (key.name === 'down') {
-        if (this.historyIdx === -1) return;
-        if (this.historyIdx < this.history.length - 1) {
-          this.historyIdx++;
-          this.inputBox.setValue(this.history[this.historyIdx]);
-        } else {
-          this.historyIdx = -1;
-          this.inputBox.setValue(this.currentInput);
-        }
-        this.cursorPos = this.inputBox.value.length;
-        this.screen.render();
         return;
       }
     });
@@ -490,16 +487,19 @@ export class CursesUI implements UI {
     const s = this.liveStatus;
     const now = new Date();
     const hour = now.getHours();
-    const dayNight = (hour >= 6 && hour < 18) ? '☀️' : '🌙';
-    const clock = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const modeEmoji: Record<string, string> = { surf: '🌊', coding: '🔧', lockin: '🔒' };
+    const hh = String(hour).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const clock = `${hh}:${mm}:${ss}`;
+    const dayNight = (hour >= 6 && hour < 18) ? '*' : 'o';
+    const modeLabel: Record<string, string> = { surf: 'SURF', coding: 'CODE', lockin: 'LOCKIN' };
 
-    const left = `  Marvin │ ${s.profileName} │ ${s.model} $${s.costUsd.toFixed(4)}`;
+    const left = `  Marvin | ${s.profileName} | ${s.model} $${s.costUsd.toFixed(4)}`;
     const flags: string[] = [];
-    if (s.codingMode) flags.push('🔧 CODE');
-    if (s.shellMode) flags.push('🐚 SHELL');
-    flags.push(`${modeEmoji[s.mode] || '🌊'} ${s.mode.toUpperCase()}`);
-    const right = `${flags.join(' ')} │ ${s.messageCount} msgs │ ${dayNight} ${clock}  `;
+    if (s.codingMode) flags.push('CODE');
+    if (s.shellMode) flags.push('SHELL');
+    flags.push(modeLabel[s.mode] || 'SURF');
+    const right = `${flags.join(' ')} | ${s.messageCount} msgs | ${dayNight} ${clock}  `;
 
     const width = (this.statusBar as any).width ?? 80;
     const pad = Math.max(0, width - left.length - right.length);

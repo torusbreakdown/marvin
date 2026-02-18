@@ -81,6 +81,9 @@ export function loadOrCreateProfile(name: string, baseDir?: string): UserProfile
     const histPath = join(profileDir, 'history');
     if (existsSync(histPath)) {
       inputHistory = readFileSync(histPath, 'utf-8').split('\n').filter(Boolean);
+    } else if (chatLog.length > 0) {
+      // Seed from chat log user messages
+      inputHistory = chatLog.filter(e => e.role === 'you').map(e => e.text);
     }
   } catch { /* ignore */ }
 

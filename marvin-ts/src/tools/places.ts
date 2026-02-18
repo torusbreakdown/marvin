@@ -1,7 +1,32 @@
 import { z } from 'zod';
+import { execSync } from 'node:child_process';
 import type { ToolRegistry } from './registry.js';
 
-async function googleTextSearch(query: string, apiKey: string, lat?: number, lng?: number, radius?: number, maxResults?: number, openNow?: boolean): Promise<string> {
+function getGoogleAuthHeaders(): Record<string, string> {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (apiKey) {
+    return { 'X-Goog-Api-Key': apiKey };
+  }
+  // Fall back to gcloud ADC bearer token
+  try {
+    const token = execSync('gcloud auth application-default print-access-token 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (token) return { Authorization: `Bearer ${token}` };
+  } catch { /* ignore */ }
+  try {
+    const token = execSync('gcloud auth print-access-token 2>/dev/null', { encoding: 'utf-8' }).trim();
+    if (token) return { Authorization: `Bearer ${token}` };
+  } catch { /* ignore */ }
+  return {};
+}
+
+function hasGoogleAuth(): boolean {
+  return !!(process.env.GOOGLE_PLACES_API_KEY || Object.keys(getGoogleAuthHeaders()).length);
+}
+
+async function googleTextSearch(query: string, lat?: number, lng?: number, radius?: number, maxResults?: number, openNow?: boolean): Promise<string> {
+  const authHeaders = getGoogleAuthHeaders();
+  if (!Object.keys(authHeaders).length) throw new Error('No Google auth available');
+
   const body: any = { textQuery: query, maxResultCount: maxResults || 5 };
   if (lat && lng) {
     body.locationBias = { circle: { center: { latitude: lat, longitude: lng }, radius: radius || 5000 } };
@@ -12,8 +37,8 @@ async function googleTextSearch(query: string, apiKey: string, lat?: number, lng
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Goog-Api-Key': apiKey,
       'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.location,places.types',
+      ...authHeaders,
     },
     body: JSON.stringify(body),
   });
@@ -92,13 +117,10 @@ export function registerPlacesTools(registry: ToolRegistry): void {
       open_now: z.boolean().default(false).describe('Only show places open now'),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-      let result = '';
-
-      if (apiKey) {
+      if (hasGoogleAuth()) {
         try {
-          result = await googleTextSearch(
-            args.text_query, apiKey,
+          const result = await googleTextSearch(
+            args.text_query,
             args.latitude || undefined, args.longitude || undefined,
             args.radius, args.max_results, args.open_now,
           );
@@ -107,7 +129,7 @@ export function registerPlacesTools(registry: ToolRegistry): void {
       }
 
       try {
-        result = await osmTextSearch(
+        const result = await osmTextSearch(
           args.text_query,
           args.latitude || undefined, args.longitude || undefined,
           args.max_results,
@@ -134,10 +156,9 @@ export function registerPlacesTools(registry: ToolRegistry): void {
       rank_by: z.string().default('POPULARITY').describe('Rank by POPULARITY or DISTANCE'),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-
-      if (apiKey) {
+      if (hasGoogleAuth()) {
         try {
+          const authHeaders = getGoogleAuthHeaders();
           const body: any = {
             includedTypes: args.included_types,
             maxResultCount: args.max_results,
@@ -150,8 +171,8 @@ export function registerPlacesTools(registry: ToolRegistry): void {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-Goog-Api-Key': apiKey,
               'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.rating,places.location,places.types',
+              ...authHeaders,
             },
             body: JSON.stringify(body),
           });
@@ -187,14 +208,20 @@ export function registerPlacesTools(registry: ToolRegistry): void {
     'Set up Google Cloud authentication and enable the Places API. Call this when a Places API request fails with auth errors.',
     z.object({}),
     async (_args, _ctx) => {
+      const authHeaders = getGoogleAuthHeaders();
+      const hasAuth = Object.keys(authHeaders).length > 0;
+      const method = authHeaders.Authorization ? 'gcloud OAuth' : authHeaders['X-Goog-Api-Key'] ? 'API key' : 'none';
       const steps = [
-        '1. Go to https://console.cloud.google.com/apis/credentials',
-        '2. Create a new API key or use an existing one',
-        '3. Enable the "Places API (New)" in the API Library',
-        '4. Set the GOOGLE_PLACES_API_KEY environment variable:',
-        '   export GOOGLE_PLACES_API_KEY="your-api-key"',
+        'Google Places API authentication options:',
         '',
-        'Current status: ' + (process.env.GOOGLE_PLACES_API_KEY ? 'API key is set' : 'No API key found'),
+        'Option 1 (recommended): Use gcloud CLI',
+        '  gcloud auth application-default login',
+        '  # Ensure Places API is enabled in your project',
+        '',
+        'Option 2: Use an API key',
+        '  export GOOGLE_PLACES_API_KEY="your-api-key"',
+        '',
+        `Current status: ${hasAuth ? `Authenticated via ${method}` : 'No authentication found'}`,
       ];
       return steps.join('\n');
     },

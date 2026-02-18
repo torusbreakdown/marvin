@@ -66,6 +66,9 @@ export class OpenAICompatProvider implements Provider {
 
       if (!response.ok) {
         const errBody = await response.text();
+        // SECURITY NOTE: errBody is truncated to 500 chars. The API key is sent via
+        // Authorization header, not the body, so it should not appear in error responses.
+        // If a provider ever echoes auth headers in errors, this would need scrubbing.
         throw new Error(`${response.status} ${response.statusText}: ${errBody.slice(0, 500)}`);
       }
 

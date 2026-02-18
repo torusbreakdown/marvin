@@ -157,6 +157,20 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
     async (args, _ctx) => {
       try {
         if (!args.redirect_url) {
+          // Check if we already have valid tokens
+          const existing = loadTokens();
+          if (existing?.refresh_token && existing.access_token) {
+            try {
+              const token = await getToken();
+              if (token) {
+                const me = await api('/me');
+                if (!me.error) {
+                  return `Already authenticated as ${me.display_name || me.id}. Spotify tools are active.`;
+                }
+              }
+            } catch { /* tokens invalid, proceed with new auth */ }
+          }
+
           // Step 1: generate PKCE, build auth URL, save verifier
           const { clientId } = loadCreds();
           const { verifier, challenge } = generatePKCE();

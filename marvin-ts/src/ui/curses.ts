@@ -41,6 +41,7 @@ export class CursesUI implements UI {
   private liveStatus: StatusBarData;
   private clockInterval: ReturnType<typeof setInterval> | null = null;
   private origStderrWrite: typeof process.stderr.write | null = null;
+  private cursorPos = 0;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -132,6 +133,63 @@ export class CursesUI implements UI {
     // readInput() adds internal listeners on each call; raise the cap
     (this.inputBox as any).setMaxListeners(100);
 
+    // Override textarea's _listener to support cursor movement (left/right)
+    const self = this;
+    (this.inputBox as any)._listener = function(ch: string, key: any) {
+      if (key.name === 'return' || key.name === 'enter') return;
+      if (key.name === 'escape') {
+        (self.inputBox as any)._done(null, null);
+        return;
+      }
+
+      const val = self.inputBox.value;
+
+      if (key.name === 'left') {
+        if (self.cursorPos > 0) self.cursorPos--;
+        self.renderInputCursor();
+        return;
+      }
+      if (key.name === 'right') {
+        if (self.cursorPos < val.length) self.cursorPos++;
+        self.renderInputCursor();
+        return;
+      }
+      if (key.name === 'home' || (key.ctrl && key.name === 'a')) {
+        self.cursorPos = 0;
+        self.renderInputCursor();
+        return;
+      }
+      if (key.name === 'end' || (key.ctrl && key.name === 'e')) {
+        self.cursorPos = val.length;
+        self.renderInputCursor();
+        return;
+      }
+      if (key.name === 'backspace') {
+        if (self.cursorPos > 0) {
+          self.inputBox.value = val.slice(0, self.cursorPos - 1) + val.slice(self.cursorPos);
+          self.cursorPos--;
+          self.screen.render();
+        }
+        return;
+      }
+      if (key.name === 'delete') {
+        if (self.cursorPos < val.length) {
+          self.inputBox.value = val.slice(0, self.cursorPos) + val.slice(self.cursorPos + 1);
+          self.screen.render();
+        }
+        return;
+      }
+      // Up/down handled in our own keypress handler
+      if (key.name === 'up' || key.name === 'down') return;
+
+      // Normal character input
+      if (ch && !/^[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]$/.test(ch)) {
+        self.inputBox.value = val.slice(0, self.cursorPos) + ch + val.slice(self.cursorPos);
+        self.cursorPos++;
+        self.screen.render();
+      }
+    };
+
     // ── Keyboard bindings ──
     this.screen.key(['C-q', 'C-d'], () => {
       if (this.inputResolve) {
@@ -178,6 +236,7 @@ export class CursesUI implements UI {
     const doSubmit = () => {
       const text = this.inputBox.getValue().trim();
       this.inputBox.clearValue();
+      this.cursorPos = 0;
       this.screen.render();
 
       if (!text) return;
@@ -236,6 +295,7 @@ export class CursesUI implements UI {
           this.historyIdx--;
         }
         this.inputBox.setValue(this.history[this.historyIdx]);
+        this.cursorPos = this.inputBox.value.length;
         this.screen.render();
         return;
       }
@@ -248,10 +308,10 @@ export class CursesUI implements UI {
           this.historyIdx = -1;
           this.inputBox.setValue(this.currentInput);
         }
+        this.cursorPos = this.inputBox.value.length;
         this.screen.render();
         return;
       }
-      // Left/right arrow keys are handled natively by textarea
     });
 
     this.inputBox.on('cancel', () => {
@@ -422,6 +482,17 @@ export class CursesUI implements UI {
   }
 
   // ── Helpers ──
+
+  private renderInputCursor(): void {
+    // Move blessed's cursor to our tracked position
+    const box = this.inputBox as any;
+    if (box.screen && box.lpos) {
+      const y = box.lpos.yi + box.itop;
+      const x = box.lpos.xi + box.ileft + this.cursorPos;
+      this.screen.program.cup(y, x);
+    }
+    this.screen.render();
+  }
 
   private ensureInputFocus(): void {
     if (this.screen.focused !== this.inputBox) {

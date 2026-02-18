@@ -331,6 +331,7 @@ function createSession(args: CliArgs, hooks?: { onProfileSwitch?: (name: string)
 
   registerAllTools(registry, {
     getUsage: () => session.getUsage().getSessionUsage(),
+    queryCostLog: (since, until) => session.getUsage().queryCostLog(since, until),
     onProfileSwitch: hooks?.onProfileSwitch,
   });
 

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionUsage } from './types.js';
 
@@ -19,6 +19,15 @@ const COST_TABLE: Record<string, [number, number]> = {
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
   const rates = COST_TABLE[model] ?? [0.50, 1.50]; // fallback
   return (inputTokens / 1_000_000) * rates[0] + (outputTokens / 1_000_000) * rates[1];
+}
+
+export interface CostLogEntry {
+  ts: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
 }
 
 interface PersistedUsage {
@@ -48,6 +57,16 @@ export class UsageTracker {
     this.sessionCost += cost;
     this.sessionModelTurns[model] = (this.sessionModelTurns[model] ?? 0) + 1;
     this.sessionModelCost[model] = (this.sessionModelCost[model] ?? 0) + cost;
+
+    // Append to timestamped cost log
+    const entry: CostLogEntry = {
+      ts: new Date().toISOString(),
+      provider, model, inputTokens, outputTokens, costUsd: cost,
+    };
+    try {
+      mkdirSync(this.persistDir, { recursive: true });
+      appendFileSync(join(this.persistDir, 'cost-log.jsonl'), JSON.stringify(entry) + '\n');
+    } catch { /* ignore */ }
   }
 
   recordToolCall(toolName: string): void {
@@ -125,5 +144,34 @@ export class UsageTracker {
     } catch {
       this.lifetime = null;
     }
+  }
+
+  queryCostLog(since?: string, until?: string): { entries: CostLogEntry[]; totalCost: number; totalMessages: number; totalInput: number; totalOutput: number; byModel: Record<string, { cost: number; messages: number }> } {
+    const logPath = join(this.persistDir, 'cost-log.jsonl');
+    const entries: CostLogEntry[] = [];
+    try {
+      if (!existsSync(logPath)) return { entries: [], totalCost: 0, totalMessages: 0, totalInput: 0, totalOutput: 0, byModel: {} };
+      const lines = readFileSync(logPath, 'utf-8').split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const e = JSON.parse(line) as CostLogEntry;
+          if (since && e.ts < since) continue;
+          if (until && e.ts > until) continue;
+          entries.push(e);
+        } catch { /* skip malformed */ }
+      }
+    } catch { /* ignore */ }
+
+    let totalCost = 0, totalInput = 0, totalOutput = 0;
+    const byModel: Record<string, { cost: number; messages: number }> = {};
+    for (const e of entries) {
+      totalCost += e.costUsd;
+      totalInput += e.inputTokens;
+      totalOutput += e.outputTokens;
+      if (!byModel[e.model]) byModel[e.model] = { cost: 0, messages: 0 };
+      byModel[e.model].cost += e.costUsd;
+      byModel[e.model].messages += 1;
+    }
+    return { entries, totalCost, totalMessages: entries.length, totalInput, totalOutput, byModel };
   }
 }

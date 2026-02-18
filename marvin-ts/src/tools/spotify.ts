@@ -244,7 +244,7 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
     z.object({
       query: z.string().describe('Track search query (e.g. "Bohemian Rhapsody Queen"), or leave empty if using ISRC'),
       isrc: z.string().default('').describe('ISRC code from MusicBrainz recording lookup (most precise match)'),
-      max_results: z.number().default(5).describe('Max results for text search (1-20). ISRC always returns best match.'),
+      max_results: z.number().default(5).describe('Max results for text search (1-10). ISRC always returns best match.'),
     }),
     async (args, _ctx) => {
       try {
@@ -256,7 +256,7 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
         }
 
         // Text search (multi-result)
-        const limit = Math.min(Math.max(args.max_results, 1), 20);
+        const limit = Math.min(Math.max(args.max_results, 1), 10);
         const d = await api(`/search?q=${encodeURIComponent(args.query)}&type=track&limit=${limit}`);
         if (d.error) return d.error;
         const items = d?.tracks?.items || [];
@@ -285,10 +285,7 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
     }),
     async (args, _ctx) => {
       try {
-        const me = await api('/me');
-        if (me.error) return me.error;
-
-        const playlist = await api(`/users/${me.id}/playlists`, {
+        const playlist = await api('/me/playlists', {
           method: 'POST',
           body: JSON.stringify({ name: args.name, description: args.description, public: args.public }),
         });
@@ -334,7 +331,7 @@ export function registerSpotifyTools(registry: ToolRegistry): void {
         // Spotify accepts up to 100 URIs per request
         for (let i = 0; i < uris.length; i += 100) {
           const batch = uris.slice(i, i + 100);
-          const result = await api(`/playlists/${args.playlist_id}/tracks`, {
+          const result = await api(`/playlists/${args.playlist_id}/items`, {
             method: 'POST',
             body: JSON.stringify({ uris: batch }),
           });

@@ -271,11 +271,35 @@ export class CursesUI implements UI {
     };
 
     // ── Keyboard bindings ──
+    this.screen.key(['escape'], () => {
+      if (this.reverseSearchMode) {
+        this.exitReverseSearch(false);
+        return;
+      }
+      if (this.confirmResolve) {
+        const cb = this.confirmResolve;
+        this.confirmResolve = null;
+        cb(false);
+        return;
+      }
+      if (this.inputResolve) {
+        const cb = this.inputResolve;
+        this.inputResolve = null;
+        cb('quit');
+        return;
+      }
+      // Hard quit if we're blocked (e.g., during streaming)
+      this.destroy();
+      process.exit(0);
+    });
     this.screen.key(['C-q', 'C-d'], () => {
       if (this.inputResolve) {
         this.inputResolve('quit');
         this.inputResolve = null;
+        return;
       }
+      this.destroy();
+      process.exit(0);
     });
 
     // Scrolling

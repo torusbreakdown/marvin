@@ -34,8 +34,11 @@ import { registerWeatherTools } from './weather.js';
 import { registerWebTools } from './web.js';
 import { registerWikiTools } from './wiki.js';
 
+import type { CostLogEntry } from '../usage.js';
+
 export interface RegisterAllToolsOptions {
   getUsage: () => SessionUsage;
+  queryCostLog: (since?: string, until?: string) => { entries: CostLogEntry[]; totalCost: number; totalMessages: number; totalInput: number; totalOutput: number; byModel: Record<string, { cost: number; messages: number }> };
   onExit?: (message: string) => void;
   onProfileSwitch?: (profileName: string) => void;
 }

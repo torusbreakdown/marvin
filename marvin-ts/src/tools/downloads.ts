@@ -1,9 +1,20 @@
 import { z } from 'zod';
 import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import type { ToolRegistry } from './registry.js';
+
+/** Deterministic filename from URL + format: first 8 chars of sha256 */
+function ytFilenamePrefix(url: string, format: string): string {
+  const hash = createHash('sha256').update(`${url}::${format}`).digest('hex').slice(0, 8);
+  // Extract video ID if YouTube
+  const match = url.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
+  const id = match ? match[1] : hash;
+  const fmt = format.includes('audio') ? 'audio' : 'video';
+  return `${id}-${fmt}-${hash}`;
+}
 
 export function registerDownloadsTools(registry: ToolRegistry): void {
   registry.registerTool(
@@ -21,6 +32,10 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
         }
         const resolvedFilename = filename || basename(new URL(url).pathname) || 'download';
         const filePath = join(downloadDir, resolvedFilename);
+        if (existsSync(filePath)) {
+          const stats = statSync(filePath);
+          return `File already exists: ${filePath} (${stats.size} bytes). No need to download again.`;
+        }
         execSync(`curl -fSL -o ${JSON.stringify(filePath)} ${JSON.stringify(url)}`, {
           stdio: 'pipe',
         });
@@ -47,12 +62,34 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
         if (!existsSync(outputDir)) {
           mkdirSync(outputDir, { recursive: true });
         }
-        const outputTemplate = join(outputDir, '%(title)s.%(ext)s');
+        const prefix = ytFilenamePrefix(url, format);
+        // Check if we already downloaded this exact URL+format
+        const existing = readdirSync(outputDir).find(f => f.startsWith(prefix));
+        if (existing) {
+          const fullPath = join(outputDir, existing);
+          const stats = statSync(fullPath);
+          return `Already downloaded: ${fullPath} (${stats.size} bytes)`;
+        }
+        // Download to temp name, then rename with our prefix
+        const tmpTemplate = join(outputDir, '%(title)s.%(ext)s');
         const output = execSync(
-          `yt-dlp --no-playlist -f ${JSON.stringify(format)} -o ${JSON.stringify(outputTemplate)} ${JSON.stringify(url)}`,
+          `yt-dlp --no-playlist --print filename -f ${JSON.stringify(format)} -o ${JSON.stringify(tmpTemplate)} ${JSON.stringify(url)}`,
+          { stdio: 'pipe', encoding: 'utf-8', timeout: 10_000, env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` } },
+        ).trim();
+        // output is the filename yt-dlp would use — now actually download
+        const actualTemplate = join(outputDir, `${prefix}-%(title).50s.%(ext)s`);
+        const dlOutput = execSync(
+          `yt-dlp --no-playlist -f ${JSON.stringify(format)} -o ${JSON.stringify(actualTemplate)} ${JSON.stringify(url)}`,
           { stdio: 'pipe', encoding: 'utf-8', timeout: 300_000, env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` } },
         );
-        return output.trim() || 'Download complete.';
+        // Find the file we just created
+        const downloaded = readdirSync(outputDir).find(f => f.startsWith(prefix));
+        if (downloaded) {
+          const fullPath = join(outputDir, downloaded);
+          const stats = statSync(fullPath);
+          return `Downloaded: ${fullPath} (${stats.size} bytes)`;
+        }
+        return dlOutput.trim() || 'Download complete.';
       } catch (error: unknown) {
         if (error instanceof Error && 'stderr' in error) {
           const stderr = (error as { stderr: string }).stderr;

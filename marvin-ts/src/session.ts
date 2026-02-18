@@ -305,18 +305,31 @@ export class SessionManager {
       recentCount++;
       recentTokens += msgTokens;
     }
-    if (recentCount === 0) recentCount = 1; // always keep at least 1
+    if (recentCount === 0) recentCount = 1;
 
-    const recentMessages = messages.slice(-recentCount);
-    const olderMessages = messages.slice(1, -recentCount);
+    // Expand the boundary so we don't split tool_call/tool_result pairs.
+    // Walk backwards from the split point: if the first "older" message is a
+    // tool result, include it (and its siblings) in "recent" until we reach
+    // a non-tool message.
+    let splitIdx = messages.length - recentCount;
+    while (splitIdx > 1 && messages[splitIdx].role === 'tool') {
+      splitIdx--;
+    }
+    // If we landed on an assistant with tool_calls, include it too
+    if (splitIdx > 1 && messages[splitIdx].tool_calls?.length) {
+      splitIdx--;
+    }
+
+    const recentMessages = messages.slice(splitIdx);
+    const olderMessages = messages.slice(1, splitIdx);
 
     if (olderMessages.length === 0) return messages; // nothing to compact
 
-    // Build a text summary of what happened in the older messages
+    // Strip tool_calls and tool results from older messages for summarization
     const olderText = olderMessages
-      .filter(m => m.content)
+      .filter(m => m.content && m.role !== 'tool')
       .map(m => {
-        const role = m.role === 'tool' ? `tool(${m.name})` : m.role;
+        const role = m.role;
         const content = m.content!.slice(0, 300);
         return `[${role}]: ${content}`;
       })

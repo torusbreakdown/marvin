@@ -60,11 +60,17 @@ export function compactContext(messages: Message[], backupDir: string): Message[
   const lines = messages.map(m => JSON.stringify(m)).join('\n');
   writeFileSync(backupPath, lines + '\n');
 
-  // 2. Split: keep system prompt + last 8 messages
+  // 2. Split: keep system prompt + last 8 messages, avoiding tool_call/result splits
   const systemMsg = messages[0];
-  const keepCount = 8;
-  const keptMessages = messages.slice(-keepCount);
-  const droppedMessages = messages.slice(1, -keepCount);
+  let splitIdx = Math.max(1, messages.length - 8);
+  while (splitIdx > 1 && messages[splitIdx].role === 'tool') {
+    splitIdx--;
+  }
+  if (splitIdx > 1 && messages[splitIdx].tool_calls?.length) {
+    splitIdx--;
+  }
+  const keptMessages = messages.slice(splitIdx);
+  const droppedMessages = messages.slice(1, splitIdx);
 
   // 3. Generate summary from dropped messages
   const userTopics = droppedMessages

@@ -36,6 +36,7 @@ export class CursesUI implements UI {
   private pendingInput: string | null = null;
   private inputReady = false;
   private liveStatus: StatusBarData;
+  private clockInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -161,6 +162,12 @@ export class CursesUI implements UI {
 
     // Set up persistent input handling
     this.setupInput();
+
+    // Tick the clock every 30s
+    this.clockInterval = setInterval(() => {
+      this.renderStatus();
+      this.screen.render();
+    }, 30_000);
 
     this.screen.render();
   }
@@ -352,20 +359,22 @@ export class CursesUI implements UI {
 
   private renderStatus(): void {
     const s = this.liveStatus;
+    const now = new Date();
+    const hour = now.getHours();
+    const dayNight = (hour >= 6 && hour < 18) ? '☀️' : '🌙';
+    const clock = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const modeEmoji: Record<string, string> = { surf: '🌊', coding: '🔧', lockin: '🔒' };
-    const parts = [
-      `${s.providerEmoji} ${s.model}`,
-      `Profile: ${s.profileName}`,
-      `Messages: ${s.messageCount}`,
-    ];
-    if (s.costUsd > 0) parts.push(`$${s.costUsd.toFixed(4)} (${Math.round(s.totalTokens / 1000)}K tok)`);
+
+    const left = `  Marvin │ ${s.profileName} │ ${s.model} $${s.costUsd.toFixed(4)}`;
     const flags: string[] = [];
-    if (s.codingMode) flags.push('🔧 CODING');
+    if (s.codingMode) flags.push('🔧 CODE');
     if (s.shellMode) flags.push('🐚 SHELL');
     flags.push(`${modeEmoji[s.mode] || '🌊'} ${s.mode.toUpperCase()}`);
-    parts.push(flags.join(' '));
+    const right = `${flags.join(' ')} │ ${s.messageCount} msgs │ ${dayNight} ${clock}  `;
 
-    this.statusBar.setContent(` ${parts.join(' │ ')}`);
+    const width = (this.statusBar as any).width ?? 80;
+    const pad = Math.max(0, width - left.length - right.length);
+    this.statusBar.setContent(left + ' '.repeat(pad) + right);
   }
 
   // ── Helpers ──
@@ -379,6 +388,7 @@ export class CursesUI implements UI {
   }
 
   destroy(): void {
+    if (this.clockInterval) clearInterval(this.clockInterval);
     try {
       this.screen?.destroy();
     } catch { /* ignore */ }

@@ -15,7 +15,7 @@ import { UsageTracker } from './usage.js';
 import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
 import { buildSystemMessage } from './system-prompt.js';
-import { appendChatLog, popChatLogEntries } from './history.js';
+import { appendChatLog, popChatLogEntries, loadChatLog } from './history.js';
 
 // 'always'-category tools that are useful in coding mode as reference/research aids.
 const CODING_REFERENCE_TOOLS = new Set([
@@ -234,10 +234,17 @@ export class SessionManager {
    */
   undoLast(): string | null {
     const msgs = this.state.messages;
-    if (msgs.length === 0) return null;
-    const last = msgs.pop()!;
+    if (msgs.length > 0) {
+      const last = msgs.pop()!;
+      popChatLogEntries(this.profile.profileDir, 1);
+      return last.role;
+    }
+    // No in-memory messages, but still try the persistent chat log
+    const log = loadChatLog(this.profile.profileDir);
+    if (log.length === 0) return null;
+    const last = log[log.length - 1];
     popChatLogEntries(this.profile.profileDir, 1);
-    return last.role;
+    return last.role === 'you' ? 'user' : last.role;
   }
 
   private getToolsForMode(): OpenAIFunctionDef[] {

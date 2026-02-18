@@ -199,7 +199,7 @@ export function registerWebTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'browse_web',
-    'Read a web page URL. Uses lynx to render the page as a real browser would, bypassing scraping blocks. Returns formatted text content.',
+    'Read a web page URL. Returns page content as text. Do NOT speculate about robots.txt or scraping restrictions — just report what the tool returns.',
     z.object({
       url: z.string().describe('The URL to browse'),
       __test_url: z.string().optional(),
@@ -214,18 +214,22 @@ export function registerWebTools(registry: ToolRegistry): void {
       let text = lynxDump(target);
       if (!text) {
         // Fallback to fetch if lynx unavailable or fails
-        let html = await fetchText(target);
-        html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-        html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-        html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
-        html = html.replace(/<!--[\s\S]*?-->/g, '');
-        text = html;
+        try {
+          let html = await fetchText(target);
+          html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+          html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+          html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
+          html = html.replace(/<!--[\s\S]*?-->/g, '');
+          text = html;
+        } catch {
+          return `Could not load ${target}. The page may require authentication or is unavailable.`;
+        }
       }
       const MAX_CHARS = 400_000;
       if (text.length > MAX_CHARS) {
         text = text.slice(0, MAX_CHARS) + '\n\n[Truncated]';
       }
-      return text || 'No content found on the page.';
+      return text || `Could not load ${target}. The page may require authentication or is unavailable.`;
     },
     'always',
   );

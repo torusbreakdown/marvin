@@ -3,10 +3,13 @@ import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import type { ToolRegistry } from './registry.js';
 import type { ToolContext, SessionUsage } from '../types.js';
+import { switchProfile } from '../profiles/manager.js';
+import { savePreferences } from '../profiles/prefs.js';
 
 export interface SystemToolsOptions {
   getUsage: () => SessionUsage;
   onExit?: (message: string) => void;
+  onProfileSwitch?: (profileName: string) => void;
 }
 
 export function registerSystemTools(registry: ToolRegistry, options: SystemToolsOptions): void {
@@ -56,8 +59,12 @@ export function registerSystemTools(registry: ToolRegistry, options: SystemTools
     z.object({
       name: z.string().describe('Profile name to switch to'),
     }),
-    async (args, _ctx) => {
-      return `Switched to profile: ${args.name}`;
+    async (args, ctx) => {
+      const newProfile = switchProfile(args.name);
+      // Update the live context so subsequent tool calls use the new profile
+      Object.assign(ctx.profile, newProfile);
+      options.onProfileSwitch?.(args.name);
+      return `Switched to profile: ${args.name}. Preferences and history loaded.`;
     },
     'always',
   );
@@ -75,6 +82,7 @@ export function registerSystemTools(registry: ToolRegistry, options: SystemTools
         return `Error: Reserved key "${args.key}" is not allowed.`;
       }
       (ctx.profile.preferences as Record<string, unknown>)[args.key] = args.value;
+      savePreferences(ctx.profileDir, ctx.profile.preferences as Record<string, unknown>);
       return `Updated preference: ${args.key} = ${args.value}`;
     },
     'always',

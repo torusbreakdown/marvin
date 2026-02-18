@@ -90,6 +90,7 @@ export class OpenAICompatProvider implements Provider {
     const message: Message = {
       role: 'assistant',
       content: msg?.content ?? null,
+      ...(msg?.reasoning_content ? { reasoning_content: msg.reasoning_content } : {}),
       ...(msg?.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
     };
 
@@ -104,6 +105,7 @@ export class OpenAICompatProvider implements Provider {
 
   private async parseStreamingResponse(response: Response, onDelta?: (text: string) => void): Promise<ChatResult> {
     const contentParts: string[] = [];
+    const reasoningParts: string[] = [];
     const toolCallAccum = new Map<number, { id: string; name: string; args: string[] }>();
     let usage = { inputTokens: 0, outputTokens: 0 };
 
@@ -133,6 +135,11 @@ export class OpenAICompatProvider implements Provider {
 
         const delta = chunk.choices?.[0]?.delta;
         if (delta) {
+          // Kimi reasoning_content comes before content
+          if (delta.reasoning_content) {
+            reasoningParts.push(delta.reasoning_content);
+          }
+
           if (delta.content) {
             contentParts.push(delta.content);
             onDelta?.(delta.content);
@@ -170,6 +177,7 @@ export class OpenAICompatProvider implements Provider {
     const message: Message = {
       role: 'assistant',
       content: contentParts.length > 0 ? contentParts.join('') : null,
+      ...(reasoningParts.length > 0 ? { reasoning_content: reasoningParts.join('') } : {}),
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
     };
 

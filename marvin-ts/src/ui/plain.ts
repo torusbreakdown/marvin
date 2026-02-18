@@ -99,7 +99,7 @@ export class PlainUI implements UI {
     });
   }
 
-  showStatus(_status: StatusBarData): void {
+  showStatus(_status: Partial<StatusBarData>): void {
     // Plain mode doesn't have a status bar; no-op
   }
 

@@ -85,7 +85,8 @@ export class SessionManager {
     this.usage = new UsageTracker(config.persistDir);
     this.usage.load();
 
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    let resolve!: () => void, reject!: (err: any) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
     this.state = {
       busy: false,
       messages: [],
@@ -109,6 +110,10 @@ export class SessionManager {
     return this.usage;
   }
 
+  getProfile(): UserProfile {
+    return this.profile;
+  }
+
   getContextBudget(): ContextBudgetManager {
     return this.contextBudget;
   }
@@ -119,7 +124,8 @@ export class SessionManager {
     }
 
     this.state.busy = true;
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    let resolve!: () => void, reject!: (err: any) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
     this.state.done = { promise, resolve, reject };
     this.state.abortController = new AbortController();
 

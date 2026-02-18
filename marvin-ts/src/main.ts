@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { CliArgs, StreamCallbacks, Message, ProviderConfig, AppMode } from './types.js';
 import type { UI } from './ui/shared.js';
 import { PlainUI } from './ui/plain.js';
+import { CursesUI } from './ui/curses.js';
 import { runNonInteractive } from './non-interactive.js';
 import { SessionManager } from './session.js';
 import { ToolRegistry } from './tools/registry.js';
@@ -85,6 +86,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
   return {
     provider: values.provider,
     plain: values.plain ?? false,
+    curses: values.curses ?? false,
     nonInteractive: values['non-interactive'] ?? false,
     mode,
     codingMode: mode === 'coding' || mode === 'lockin',
@@ -243,6 +245,23 @@ function makeStreamCallbacks(ui: UI): StreamCallbacks {
   };
 }
 
+function refreshStatus(ui: UI, session: SessionManager, providerConfig: ProviderConfig): void {
+  const state = session.getState();
+  const usage = session.getUsage().getSessionUsage();
+  const profile = session.getProfile();
+  ui.showStatus({
+    providerEmoji: '🤖',
+    model: providerConfig.model,
+    profileName: profile.name,
+    messageCount: state.messages.length,
+    costUsd: usage.totalCostUsd,
+    totalTokens: 0,
+    codingMode: state.codingMode,
+    shellMode: state.shellMode,
+    mode: state.mode,
+  });
+}
+
 function resolveProviderConfig(args: CliArgs): ProviderConfig {
   const providerName = args.provider ?? process.env['MARVIN_PROVIDER'] ?? 'ollama';
   const defaults: Record<string, { model: string; baseUrl?: string }> = {
@@ -252,6 +271,7 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
     groq:          { model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
     gemini:        { model: 'gemini-3-pro-preview', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
     'openai-compat': { model: 'default' },
+    moonshot:       { model: 'kimi-k2.5', baseUrl: 'https://api.moonshot.ai/v1' },
     'llama-server':  { model: 'default', baseUrl: 'http://localhost:8080/v1' },
   };
   if (!(providerName in defaults)) {
@@ -276,15 +296,26 @@ function createProvider(config: ProviderConfig) {
   return new OpenAICompatProvider(config);
 }
 
-function createSession(args: CliArgs) {
+function createSession(args: CliArgs, hooks?: { onProfileSwitch?: (name: string) => void }) {
   const providerConfig = resolveProviderConfig(args);
   const provider = createProvider(providerConfig);
 
   const profileManager = new ProfileManager();
-  const profile = profileManager.load('default');
+  // Restore last active profile, fall back to 'default'
+  const lastProfilePath = join(
+    process.env.HOME ?? process.env.USERPROFILE ?? '/tmp',
+    '.config', 'local-finder', 'profiles', 'last_profile',
+  );
+  let profileName = 'default';
+  try {
+    if (existsSync(lastProfilePath)) {
+      const saved = readFileSync(lastProfilePath, 'utf-8').trim();
+      if (saved) profileName = saved;
+    }
+  } catch { /* ignore */ }
+  const profile = profileManager.load(profileName);
 
   const registry = new ToolRegistry();
-  const usage = { getSessionUsage: () => ({ totalCostUsd: 0, llmTurns: 0, modelTurns: {}, modelCost: {}, toolCallCounts: {} }) };
 
   const session = new SessionManager({
     provider,
@@ -300,6 +331,7 @@ function createSession(args: CliArgs) {
 
   registerAllTools(registry, {
     getUsage: () => session.getUsage().getSessionUsage(),
+    onProfileSwitch: hooks?.onProfileSwitch,
   });
 
   return { session, profile, providerConfig };
@@ -353,15 +385,23 @@ export async function main(): Promise<void> {
   }
 
   // --- Interactive mode ---
-  showSplash();
-
-  const { session, profile, providerConfig } = createSession(args);
-  const ui: UI = new PlainUI({
+  // Use a mutable ref so the profile-switch callback can reach the UI
+  let uiRef: UI | null = null;
+  const { session, profile, providerConfig } = createSession(args, {
+    onProfileSwitch: (name) => uiRef?.showStatus({ profileName: name }),
+  });
+  const useCurses = args.curses || (!args.plain && process.stdin.isTTY && process.stdout.isTTY);
+  const uiOpts = {
     provider: providerConfig.provider,
     model: providerConfig.model,
     profile: profile.name,
-  });
+  };
+  const ui: UI = useCurses ? new CursesUI(uiOpts) : new PlainUI(uiOpts);
+  uiRef = ui;
+
+  if (!useCurses) showSplash();
   await ui.start();
+  refreshStatus(ui, session, providerConfig);
 
   const slashCtx: SlashCommandContext = {
     session,
@@ -377,6 +417,7 @@ export async function main(): Promise<void> {
     } catch {
       // error already reported via callbacks.onError
     }
+    refreshStatus(ui, session, providerConfig);
   }
 
   // Signal handling — register BEFORE the REPL so Ctrl+C works during conversation
@@ -412,6 +453,7 @@ export async function main(): Promise<void> {
     } catch {
       // error already reported via callbacks.onError
     }
+    refreshStatus(ui, session, providerConfig);
   }
 
   await session.destroy();

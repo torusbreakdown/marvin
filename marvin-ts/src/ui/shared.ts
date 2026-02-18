@@ -11,7 +11,7 @@ export interface UI {
   endStream(): void;
   promptInput(): Promise<string>;
   promptConfirm(command: string): Promise<boolean>;
-  showStatus(status: StatusBarData): void;
+  showStatus(status: Partial<StatusBarData>): void;
   destroy(): void;
 }
 

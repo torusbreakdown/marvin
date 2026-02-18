@@ -43,6 +43,7 @@ export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 export interface Message {
   role: MessageRole;
   content: string | null;
+  reasoning_content?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -60,7 +61,7 @@ export interface ToolCall {
 // === Provider ===
 
 export interface ProviderConfig {
-  provider: 'copilot' | 'gemini' | 'groq' | 'openai' | 'ollama' | 'openai-compat' | 'llama-server';
+  provider: 'copilot' | 'gemini' | 'groq' | 'openai' | 'ollama' | 'openai-compat' | 'llama-server' | 'moonshot';
   model: string;
   apiKey?: string;
   baseUrl?: string;
@@ -197,6 +198,7 @@ export interface StatusBarData {
 export interface CliArgs {
   provider?: string;
   plain: boolean;
+  curses: boolean;
   nonInteractive: boolean;
   mode?: AppMode;
   codingMode?: boolean;

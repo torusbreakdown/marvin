@@ -20,6 +20,12 @@ export function buildSystemMessage(
 
   // 2. Active profile
   parts.push(`\nActive profile: ${profile.name}`);
+  parts.push(
+    'If the user tells you their name or says "I\'m [name]", use switch_profile to switch ' +
+    'to their profile. If the profile is "default", ask the user their name so you can ' +
+    'personalize their experience. Use update_preferences to save dietary restrictions, ' +
+    'favorite cuisines, budget level, location preferences, etc.'
+  );
 
   // 3. User preferences
   const prefs = profile.preferences;

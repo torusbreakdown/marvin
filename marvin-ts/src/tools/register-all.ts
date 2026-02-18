@@ -37,6 +37,7 @@ import { registerWikiTools } from './wiki.js';
 export interface RegisterAllToolsOptions {
   getUsage: () => SessionUsage;
   onExit?: (message: string) => void;
+  onProfileSwitch?: (profileName: string) => void;
 }
 
 export function registerAllTools(registry: ToolRegistry, options: RegisterAllToolsOptions): void {

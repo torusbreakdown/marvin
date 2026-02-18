@@ -403,8 +403,7 @@ export class CursesUI implements UI {
       const color = COLORS[role] || 'grey';
       const label = role === 'user' ? '👤 You' : role === 'assistant' ? '🤖 Marvin' : role;
       const ts = entry.time ? new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-      const truncated = entry.text.length > 1000 ? entry.text.slice(0, 1000) + '…' : entry.text;
-      this.chatLog.log(`{grey-fg}${ts}{/grey-fg} {${color}-fg}${label}:{/${color}-fg} ${blessed.escape(truncated)}`);
+      this.chatLog.log(`{grey-fg}${ts}{/grey-fg} {${color}-fg}${label}:{/${color}-fg} ${blessed.escape(entry.text)}`);
     }
     this.chatLog.log('{grey-fg}── End of history ──{/grey-fg}');
     this.chatLog.log('');

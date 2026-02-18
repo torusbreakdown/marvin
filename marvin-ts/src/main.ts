@@ -417,6 +417,7 @@ export async function main(): Promise<void> {
 
   // Handle inline prompt (positional argument)
   if (args.inlinePrompt) {
+    ui.displayMessage('user', args.inlinePrompt);
     const callbacks = makeStreamCallbacks(ui);
     ui.beginStream();
     try {
@@ -453,6 +454,7 @@ export async function main(): Promise<void> {
       continue;
     }
 
+    ui.displayMessage('user', input);
     const callbacks = makeStreamCallbacks(ui);
     ui.beginStream();
     try {

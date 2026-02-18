@@ -29,12 +29,11 @@ const CODING_REFERENCE_TOOLS = new Set([
   'system_info', 'get_usage', 'exit_app',
 ]);
 
-// Tools EXCLUDED from surf mode (no file I/O, no shell, no blender, no downloads).
+// Tools EXCLUDED from surf mode (no file I/O, no shell, no blender).
 const SURF_EXCLUDE = new Set([
   'blender_get_scene', 'blender_get_object', 'blender_create_object',
   'blender_modify_object', 'blender_delete_object', 'blender_set_material',
   'blender_execute_code', 'blender_screenshot',
-  'download_file', 'yt_dlp_download',
   'github_clone', 'wiki_full', 'wiki_grep',
 ]);
 

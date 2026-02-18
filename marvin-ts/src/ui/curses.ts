@@ -170,23 +170,8 @@ export class CursesUI implements UI {
         return;
       }
 
-      // Escape: cancel or quit
+      // Escape: handled by screen.key('escape') — skip here to avoid double-fire
       if (key.name === 'escape') {
-        if (self.reverseSearchMode) {
-          self.exitReverseSearch(false);
-          return;
-        }
-        if (self.confirmResolve) {
-          const cb = self.confirmResolve;
-          self.confirmResolve = null;
-          cb(false);
-          return;
-        }
-        if (self.inputResolve) {
-          const cb = self.inputResolve;
-          self.inputResolve = null;
-          cb('quit');
-        }
         return;
       }
 
@@ -305,6 +290,24 @@ export class CursesUI implements UI {
       }
       this.destroy();
       process.exit(0);
+    });
+
+    this.screen.key(['escape'], () => {
+      if (this.reverseSearchMode) {
+        this.exitReverseSearch(false);
+        return;
+      }
+      if (this.confirmResolve) {
+        const cb = this.confirmResolve;
+        this.confirmResolve = null;
+        cb(false);
+        return;
+      }
+      if (this.inputResolve) {
+        const cb = this.inputResolve;
+        this.inputResolve = null;
+        cb('quit');
+      }
     });
 
     // Scrolling

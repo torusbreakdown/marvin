@@ -77,6 +77,22 @@ export interface ChatResult {
   usage: { inputTokens: number; outputTokens: number };
 }
 
+// === Provider Interface ===
+
+export interface ChatOptions {
+  tools?: OpenAIFunctionDef[];
+  stream?: boolean;
+  extraBody?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface Provider {
+  readonly name: string;
+  readonly model: string;
+  chat(messages: Message[], options?: ChatOptions): Promise<ChatResult>;
+  destroy(): void;
+}
+
 // === Session ===
 
 export interface SessionState {

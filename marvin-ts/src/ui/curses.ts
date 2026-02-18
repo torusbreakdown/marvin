@@ -25,7 +25,7 @@ export class CursesUI implements UI {
   private screen!: blessed.Widgets.Screen;
   private statusBar!: blessed.Widgets.BoxElement;
   private chatLog!: blessed.Widgets.Log;
-  private inputBox!: blessed.Widgets.TextboxElement;
+  private inputBox!: blessed.Widgets.TextareaElement;
   private opts: CursesUIOptions;
 
   private inputResolve: ((value: string) => void) | null = null;
@@ -120,7 +120,7 @@ export class CursesUI implements UI {
       style: { border: { fg: 'cyan' } },
     });
 
-    this.inputBox = blessed.textbox({
+    this.inputBox = blessed.textarea({
       parent: inputBorder,
       top: 0,
       left: 1,
@@ -134,19 +134,6 @@ export class CursesUI implements UI {
 
     // ── Keyboard bindings ──
     this.screen.key(['C-q', 'C-d'], () => {
-      if (this.inputResolve) {
-        this.inputResolve('quit');
-        this.inputResolve = null;
-      }
-    });
-
-    this.screen.key(['escape'], () => {
-      if (this.confirmResolve) {
-        this.confirmResolve(false);
-        this.confirmResolve = null;
-        this.refocusInput();
-        return;
-      }
       if (this.inputResolve) {
         this.inputResolve('quit');
         this.inputResolve = null;
@@ -188,9 +175,58 @@ export class CursesUI implements UI {
   }
 
   private setupInput(): void {
-    const onKeypress = (_ch: string, key: any) => {
+    const doSubmit = () => {
+      const text = this.inputBox.getValue().trim();
+      this.inputBox.clearValue();
+      this.screen.render();
+
+      if (!text) return;
+      this.history.push(text);
+      this.historyIdx = -1;
+      this.currentInput = '';
+
+      if (this.confirmResolve) {
+        const cb = this.confirmResolve;
+        this.confirmResolve = null;
+        cb(true);
+        return;
+      }
+
+      if (this.inputResolve) {
+        const cb = this.inputResolve;
+        this.inputResolve = null;
+        cb(text);
+      } else {
+        this.pendingInput = text;
+      }
+    };
+
+    this.inputBox.on('keypress', (_ch: string, key: any) => {
       if (!key) return;
 
+      // Enter submits (prevent newline in textarea)
+      if (key.name === 'enter' || key.name === 'return') {
+        // Prevent the newline from being inserted
+        process.nextTick(() => doSubmit());
+        return;
+      }
+
+      // Escape: cancel confirm dialog
+      if (key.name === 'escape') {
+        if (this.confirmResolve) {
+          const cb = this.confirmResolve;
+          this.confirmResolve = null;
+          cb(false);
+        }
+        // Re-enter input mode (cancel exits readInput in textarea)
+        process.nextTick(() => {
+          this.inputBox.readInput();
+          this.screen.render();
+        });
+        return;
+      }
+
+      // History navigation
       if (key.name === 'up') {
         if (this.history.length === 0) return;
         if (this.historyIdx === -1) {
@@ -215,45 +251,15 @@ export class CursesUI implements UI {
         this.screen.render();
         return;
       }
-    };
+      // Left/right arrow keys are handled natively by textarea
+    });
 
-    const onSubmit = (value: string) => {
-      const text = value.trim();
-      this.inputBox.clearValue();
-
-      // Immediately re-enter input mode so typing never stops
-      this.inputBox.readInput();
-      this.screen.render();
-
-      if (!text) return;
-      this.history.push(text);
-      this.historyIdx = -1;
-      this.currentInput = '';
-
-      if (this.confirmResolve) {
-        const cb = this.confirmResolve;
-        this.confirmResolve = null;
-        cb(true);
-        return;
-      }
-
-      if (this.inputResolve) {
-        const cb = this.inputResolve;
-        this.inputResolve = null;
-        cb(text);
-      } else {
-        // Busy — queue the input for when promptInput is next called
-        this.pendingInput = text;
-      }
-    };
-
-    this.inputBox.on('keypress', onKeypress);
-    this.inputBox.on('submit', onSubmit);
-    // neo-blessed fires 'cancel' on Escape — re-enter input mode immediately
     this.inputBox.on('cancel', () => {
+      // Re-enter input mode on escape
       this.inputBox.readInput();
       this.screen.render();
     });
+
     this.inputBox.focus();
     this.inputBox.readInput();
     this.inputReady = true;

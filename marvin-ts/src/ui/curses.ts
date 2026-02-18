@@ -271,27 +271,6 @@ export class CursesUI implements UI {
     };
 
     // ── Keyboard bindings ──
-    this.screen.key(['escape'], () => {
-      if (this.reverseSearchMode) {
-        this.exitReverseSearch(false);
-        return;
-      }
-      if (this.confirmResolve) {
-        const cb = this.confirmResolve;
-        this.confirmResolve = null;
-        cb(false);
-        return;
-      }
-      if (this.inputResolve) {
-        const cb = this.inputResolve;
-        this.inputResolve = null;
-        cb('quit');
-        return;
-      }
-      // Hard quit if we're blocked (e.g., during streaming)
-      this.destroy();
-      process.exit(0);
-    });
     this.screen.key(['C-q', 'C-d'], () => {
       if (this.inputResolve) {
         this.inputResolve('quit');
@@ -375,10 +354,12 @@ export class CursesUI implements UI {
 
     this.inputBox.focus();
     this.inputBox.readInput();
-    // Prevent blur from killing the readInput session
-    if ((this.inputBox as any).__done) {
-      this.inputBox.removeListener('blur', (this.inputBox as any).__done);
-    }
+    // Prevent blur from killing the readInput session (defer since __done is set after readInput)
+    process.nextTick(() => {
+      if ((this.inputBox as any).__done) {
+        this.inputBox.removeListener('blur', (this.inputBox as any).__done);
+      }
+    });
   }
 
   private showSplash(): void {
@@ -550,6 +531,12 @@ export class CursesUI implements UI {
     // If __listener was removed (by blur/_done), re-enter readInput
     if (!(this.inputBox as any).__listener) {
       this.inputBox.readInput();
+      // Prevent blur from killing the new readInput session
+      process.nextTick(() => {
+        if ((this.inputBox as any).__done) {
+          this.inputBox.removeListener('blur', (this.inputBox as any).__done);
+        }
+      });
     }
   }
 

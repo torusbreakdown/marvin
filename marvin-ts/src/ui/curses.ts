@@ -94,10 +94,11 @@ export class CursesUI implements UI {
       padding: { left: 1, right: 1 },
     });
 
-    // Track manual scrolling
+    // Track manual scrolling, then return focus to input
     this.chatLog.on('scroll', () => {
       const maxScroll = Math.max(0, (this.chatLog as any).getScrollHeight() - (this.chatLog as any).height);
       this.userScrolled = (this.chatLog as any).getScroll() < maxScroll;
+      this.ensureInputFocus();
     });
 
     // ── Input area (bottom) ──
@@ -169,6 +170,7 @@ export class CursesUI implements UI {
     // Tick the clock every 30s
     this.clockInterval = setInterval(() => {
       this.renderStatus();
+      this.ensureInputFocus();
       this.screen.render();
     }, 30_000);
 
@@ -237,6 +239,11 @@ export class CursesUI implements UI {
 
     this.inputBox.on('keypress', onKeypress);
     this.inputBox.on('submit', onSubmit);
+    // neo-blessed fires 'cancel' on Escape — re-enter input mode immediately
+    this.inputBox.on('cancel', () => {
+      this.inputBox.readInput();
+      this.screen.render();
+    });
     this.inputBox.focus();
     this.inputBox.readInput();
     this.inputReady = true;
@@ -316,6 +323,7 @@ export class CursesUI implements UI {
       this.chatLog.log('');
       this.streaming = false;
       this.autoScroll();
+      this.ensureInputFocus();
     }
   }
 
@@ -383,11 +391,22 @@ export class CursesUI implements UI {
 
   // ── Helpers ──
 
+  private ensureInputFocus(): void {
+    if (this.screen.focused !== this.inputBox) {
+      this.inputBox.focus();
+    }
+    if (!this.inputReady) {
+      this.inputBox.readInput();
+      this.inputReady = true;
+    }
+  }
+
   private autoScroll(): void {
     if (!this.userScrolled) {
       this.chatLog.setScrollPerc(100);
     }
     this.renderStatus();
+    this.ensureInputFocus();
     this.screen.render();
   }
 

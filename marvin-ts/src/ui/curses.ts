@@ -137,8 +137,14 @@ export class CursesUI implements UI {
     const self = this;
     (this.inputBox as any)._listener = function(ch: string, key: any) {
       if (key.name === 'return' || key.name === 'enter') return;
+
+      // Swallow escape — don't let it exit readInput mode
       if (key.name === 'escape') {
-        (self.inputBox as any)._done(null, null);
+        if (self.confirmResolve) {
+          const cb = self.confirmResolve;
+          self.confirmResolve = null;
+          cb(false);
+        }
         return;
       }
 
@@ -265,23 +271,7 @@ export class CursesUI implements UI {
 
       // Enter submits (prevent newline in textarea)
       if (key.name === 'enter' || key.name === 'return') {
-        // Prevent the newline from being inserted
         process.nextTick(() => doSubmit());
-        return;
-      }
-
-      // Escape: cancel confirm dialog
-      if (key.name === 'escape') {
-        if (this.confirmResolve) {
-          const cb = this.confirmResolve;
-          this.confirmResolve = null;
-          cb(false);
-        }
-        // Re-enter input mode (cancel exits readInput in textarea)
-        process.nextTick(() => {
-          this.inputBox.readInput();
-          this.screen.render();
-        });
         return;
       }
 
@@ -312,12 +302,6 @@ export class CursesUI implements UI {
         this.screen.render();
         return;
       }
-    });
-
-    this.inputBox.on('cancel', () => {
-      // Re-enter input mode on escape
-      this.inputBox.readInput();
-      this.screen.render();
     });
 
     this.inputBox.focus();
@@ -433,16 +417,6 @@ export class CursesUI implements UI {
       this.historyIdx = -1;
       this.currentInput = '';
     });
-  }
-
-  private refocusInput(): void {
-    this.inputBox.clearValue();
-    this.inputBox.focus();
-    if (!this.inputReady) {
-      this.inputBox.readInput();
-      this.inputReady = true;
-    }
-    this.screen.render();
   }
 
   promptConfirm(command: string): Promise<boolean> {

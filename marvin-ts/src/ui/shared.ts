@@ -6,6 +6,7 @@ export interface UI {
   displaySystem(text: string): void;
   displayError(text: string): void;
   displayToolCall(toolNames: string[]): void;
+  displayHistory(entries: Array<{ role: string; text: string; time: string }>): void;
   beginStream(): void;
   streamDelta(text: string): void;
   endStream(): void;

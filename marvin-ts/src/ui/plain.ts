@@ -52,6 +52,10 @@ export class PlainUI implements UI {
     process.stdout.write(`  🔧 ${toolNames.join(', ')}\n`);
   }
 
+  displayHistory(_entries: Array<{ role: string; text: string; time: string }>): void {
+    // Plain mode doesn't replay history on startup
+  }
+
   beginStream(): void {
     this.streaming = true;
   }

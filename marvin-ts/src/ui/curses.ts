@@ -40,6 +40,7 @@ export class CursesUI implements UI {
   private inputReady = false;
   private liveStatus: StatusBarData;
   private clockInterval: ReturnType<typeof setInterval> | null = null;
+  private origStderrWrite: typeof process.stderr.write | null = null;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -57,6 +58,13 @@ export class CursesUI implements UI {
   }
 
   async start(): Promise<void> {
+    // Redirect stderr so warnings/errors don't corrupt the TUI
+    this.origStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk: any, ...args: any[]) => {
+      // Swallow stderr in curses mode — could optionally log to chatLog
+      return true;
+    };
+
     this.screen = blessed.screen({
       smartCSR: true,
       title: 'Marvin',
@@ -121,6 +129,8 @@ export class CursesUI implements UI {
       inputOnFocus: false,
       style: { fg: 'white', bg: 'default' },
     });
+    // readInput() adds internal listeners on each call; raise the cap
+    (this.inputBox as any).setMaxListeners(100);
 
     // ── Keyboard bindings ──
     this.screen.key(['C-q', 'C-d'], () => {
@@ -264,6 +274,22 @@ export class CursesUI implements UI {
   }
 
   // ── Display methods ──
+
+  displayHistory(entries: Array<{ role: string; text: string; time: string }>): void {
+    if (entries.length === 0) return;
+    this.chatLog.log('{grey-fg}── Recent history ──{/grey-fg}');
+    for (const entry of entries) {
+      const role = entry.role === 'you' ? 'user' : entry.role;
+      const color = COLORS[role] || 'grey';
+      const label = role === 'user' ? '👤 You' : role === 'assistant' ? '🤖 Marvin' : role;
+      const ts = entry.time ? new Date(entry.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      const truncated = entry.text.length > 300 ? entry.text.slice(0, 300) + '…' : entry.text;
+      this.chatLog.log(`{grey-fg}${ts}{/grey-fg} {${color}-fg}${label}:{/${color}-fg} ${blessed.escape(truncated)}`);
+    }
+    this.chatLog.log('{grey-fg}── End of history ──{/grey-fg}');
+    this.chatLog.log('');
+    this.autoScroll();
+  }
 
   displayMessage(role: string, text: string): void {
     const color = COLORS[role] || 'white';
@@ -412,6 +438,7 @@ export class CursesUI implements UI {
 
   destroy(): void {
     if (this.clockInterval) clearInterval(this.clockInterval);
+    if (this.origStderrWrite) process.stderr.write = this.origStderrWrite;
     try {
       this.screen?.destroy();
     } catch { /* ignore */ }

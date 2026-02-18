@@ -401,6 +401,13 @@ export async function main(): Promise<void> {
 
   if (!useCurses) showSplash();
   await ui.start();
+
+  // Display recent chat history in the UI
+  if (profile.chatLog.length > 0) {
+    const recent = profile.chatLog.slice(-10);
+    ui.displayHistory(recent);
+  }
+
   refreshStatus(ui, session, providerConfig);
 
   const slashCtx: SlashCommandContext = {

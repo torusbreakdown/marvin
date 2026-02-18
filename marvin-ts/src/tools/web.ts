@@ -186,25 +186,28 @@ export function registerWebTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'browse_web',
-    'Read a web page URL. Fetches the page and returns readable text content (HTML stripped).',
+    'Read a web page URL. Fetches the page and returns HTML content for the LLM to interpret directly.',
     z.object({
       url: z.string().describe('The URL to browse'),
-      max_length: z.number().default(4000).describe('Maximum characters to return (1-8000)'),
+      max_length: z.number().default(8000).describe('Maximum characters to return (1-16000)'),
       __test_url: z.string().optional(),
     }),
     async (args) => {
       const target = args.__test_url || args.url;
-      // SECURITY: SSRF protection — block internal/private URLs (skip for test URLs)
       if (!args.__test_url) {
         const urlErr = validateUrl(target);
         if (urlErr) return urlErr;
       }
-      const html = await fetchText(target);
-      let text = stripHtml(html);
-      if (text.length > args.max_length) {
-        text = text.slice(0, args.max_length) + '\n\n[Truncated]';
+      let html = await fetchText(target);
+      // Strip script/style blocks to save tokens but keep structural HTML
+      html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+      html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+      html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
+      html = html.replace(/<!--[\s\S]*?-->/g, '');
+      if (html.length > args.max_length) {
+        html = html.slice(0, args.max_length) + '\n\n[Truncated]';
       }
-      return text || 'No readable content found on the page.';
+      return html || 'No content found on the page.';
     },
     'always',
   );

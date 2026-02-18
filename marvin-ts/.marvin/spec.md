@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-Marvin is a local CLI assistant with ~115 tools spanning web search, location,
+Marvin is a local CLI assistant with ~105 tools spanning web search, location,
 news, media, notes, coding, calendar, and more. It runs as an interactive
 terminal application or as a single-shot non-interactive subprocess.
 
@@ -30,13 +30,14 @@ marvin                    # curses TUI (default)
 marvin --plain            # readline-based plain terminal
 marvin --curses           # explicitly request curses
 marvin --provider gemini  # override LLM provider
+marvin --mode lockin      # start in lockin mode
 ```
 
 - Curses TUI with colored chat, scrolling, status bar, input history
 - Loads conversation history from `chat_log.json` (last 20 entries seeded into LLM
   as full user/assistant messages)
 - Loads user preferences, saved places, active profile
-- All ~115 tools available
+- Tools filtered by mode (see §2.5)
 - Coding mode toggleable via `!code`
 - Shell mode toggleable via `!shell` / `!sh`
 - Voice input via `!voice` (continuous) or `!v [N]` (one-shot, N seconds)
@@ -85,6 +86,7 @@ integrators should NOT pass these as prompts.
 | `!voice` | Toggle continuous voice input mode |
 | `!v [N]` | One-shot voice recording (N seconds, default 5) |
 | `!blender` | Check Blender MCP connection status |
+| `!mode [MODE]` | Switch operating mode (surf/coding/lockin) or show current |
 | `!pro PROMPT` | Force Copilot SDK for one query |
 | `!COMMAND` | Execute COMMAND as a shell command |
 | `preferences` | Open `preferences.yaml` in `$EDITOR` |
@@ -92,6 +94,21 @@ integrators should NOT pass these as prompts.
 | `usage` | Show cost summary |
 | `saved` | List saved places |
 | `quit` / `exit` / Ctrl+D | Exit application |
+
+### 2.5 Operating Modes
+
+Marvin has three operating modes that control which tools are available. Modes
+can be set at startup with `--mode` or switched at runtime with `!mode`.
+
+| Mode     | Tools | Description |
+|----------|-------|-------------|
+| `surf`   | ~70   | Default. All general-purpose tools minus blender, downloads, and filesystem-writing tools. Best for browsing, research, and everyday queries. |
+| `coding` | ~40   | Coding-focused. File ops, git, shell, tickets, packages, plus reference tools (web search, wiki, stack). Activated by `!code` or `--working-dir`. |
+| `lockin` | ~68   | Productivity superset. Coding tools + blender + calendar + alarms + notes + research + downloads + notifications. For deep work sessions. |
+
+Mode filtering is implemented via tool category tags. Each tool is tagged with
+a category (`'always'`, `'coding'`, `'blender'`, `'downloads'`), and each mode
+defines which categories and specific tools to include or exclude.
 
 ---
 
@@ -104,6 +121,7 @@ integrators should NOT pass these as prompts.
 | groq          | `GROQ_API_KEY`         | `llama-3.3-70b-versatile`   |
 | openai        | `OPENAI_API_KEY`       | `gpt-5.1`                   |
 | ollama        | (local)                | `qwen3-coder:30b`           |
+| moonshot      | `MOONSHOT_API_KEY`     | `kimi-latest`               |
 | openai-compat | `OPENAI_COMPAT_API_KEY`| `qwen/qwen3-32b`            |
 
 All non-Copilot providers use the OpenAI-compatible chat completion API.
@@ -117,6 +135,14 @@ Provider selected via `LLM_PROVIDER` env var or `--provider` flag.
 - `OPENAI_COMPAT_MODEL` — override OpenAI-compatible model
 - `OPENAI_COMPAT_URL` — OpenAI-compatible endpoint URL (default: `https://openrouter.ai/api/v1/chat/completions`)
 - `OLLAMA_URL` — Ollama server URL (default: `http://localhost:11434`)
+- `MOONSHOT_API_KEY` — Moonshot API key (fallback: `~/.ssh/MOONSHOT_API_KEY`)
+- `MARVIN_API_KEY` — generic API key override (used with `--provider openai-compat`)
+- `MARVIN_BASE_URL` — generic base URL override
+
+**Ollama context window**: Ollama defaults to `num_ctx: 4096` which is far too
+small for 70+ tool schemas. The Ollama provider injects `num_ctx: 32768` by
+default. qwen3-coder:30b supports up to 262K context, but values above 32K
+cause significant prompt eval latency on CPU.
 
 **API key fallbacks**: `GROQ_API_KEY` and `GEMINI_API_KEY` fall back to
 reading from `~/.ssh/GROQ_API_KEY` and `~/.ssh/GEMINI_API_KEY` respectively.
@@ -128,11 +154,12 @@ The tool loop (`runToolLoop`) runs up to 50 rounds (coding mode) or 10 rounds
 
 ## 4. Tool Categories
 
-> **Tool gating**: In interactive mode, all ~115 tools are available. In coding
-> mode (`!code` or `--non-interactive`), coding-specific tools (file ops, git,
-> shell, tickets, agents) are added. When `MARVIN_READONLY=1`, write tools
-> (`create_file`, `apply_patch`, `file_apply_patch`, `git_commit`,
-> `git_checkout`, `run_command`) are stripped.
+> **Tool gating**: Tools are filtered by operating mode (see §2.5). In `surf`
+> mode, ~70 general-purpose tools are available. In `coding` mode, ~40
+> coding-focused tools are sent. In `lockin` mode, ~68 tools spanning coding
+> and productivity. When `MARVIN_READONLY=1`, write tools (`create_file`,
+> `apply_patch`, `file_apply_patch`, `git_commit`, `git_checkout`,
+> `run_command`) are stripped.
 
 ### 4.1 Location & Geolocation
 - `get_my_location` — CoreLocation (macOS) or GeoClue (Linux) with IP fallback
@@ -223,7 +250,7 @@ The tool loop (`runToolLoop`) runs up to 50 rounds (coding mode) or 10 rounds
 - `get_working_dir` — get current working directory
 - `code_grep` — ripgrep search with regex, glob filter, context lines
 - `tree` — directory tree listing (respects `.gitignore` by default)
-- `install_packages` — install packages via `uv` into project venv
+- `install_packages` — install packages via auto-detected manager (npm, pip, or apt)
 - Path security: reject absolute paths, reject `..` traversal, block `.tickets/`
 - Error messages must include working dir + directory tree listing
 
@@ -288,21 +315,14 @@ The tool loop (`runToolLoop`) runs up to 50 rounds (coding mode) or 10 rounds
 - `ticket_list` — list tickets with optional status/tag filter
 - `ticket_dep_tree` — show dependency tree
 
-### 4.24 Sub-Agent Dispatch (Coding Mode)
-- `launch_agent` — spawn sub-agent as child process with:
-  - `ticket_id` (required) — from `tk`
-  - `prompt` (required) — task description
-  - `model` — `auto`/`codex`/`opus`
-  - `working_dir`, `design_first`, `tdd` flags
-
-### 4.25 Downloads
+### 4.24 Downloads
 - `yt_dlp_download` — download video/audio from YouTube or other sites
   (requires `yt-dlp` installed)
 - `download_file` — generic URL file download to `~/Downloads/`
 
-### 4.26 Utilities
-- `convert_units` — unit conversion (km↔mi, kg↔lbs, °C↔°F, etc.) and
-  currency conversion via Frankfurter API
+### 4.25 Utilities
+- `convert_units` — unit conversion (50+ units across length, weight, volume,
+  data, time, speed, temperature) and currency conversion via exchangerate.host
 - `dictionary_lookup` — word definitions, pronunciation, synonyms
   (dictionaryapi.dev, free)
 - `translate_text` — text translation via MyMemory API (free, ISO 639-1 codes)
@@ -312,12 +332,12 @@ The tool loop (`runToolLoop`) runs up to 50 rounds (coding mode) or 10 rounds
 - `system_info` — OS, CPU, memory, disk, uptime, battery
 - `read_rss` — fetch and display RSS/Atom feed entries
 
-### 4.27 Bookmarks
+### 4.26 Bookmarks
 - `bookmark_save` — save URL with title, tags, notes
 - `bookmark_list` — list bookmarks (optional tag filter)
 - `bookmark_search` — search bookmarks by title/URL/notes/tags
 
-### 4.28 Blender (MCP Integration)
+### 4.27 Blender (MCP Integration)
 - `blender_get_scene` — get current scene info
 - `blender_get_object` — get object details (mesh, materials, transforms)
 - `blender_create_object` — create primitive 3D object
@@ -456,7 +476,7 @@ both success and error.
 
 | Variable                    | Description                                    |
 |-----------------------------|------------------------------------------------|
-| `LLM_PROVIDER`              | Active provider (copilot/gemini/groq/ollama/openai/openai-compat) |
+| `LLM_PROVIDER`              | Active provider (copilot/gemini/groq/ollama/moonshot/openai/openai-compat) |
 
 ### Model Configuration
 

@@ -7,6 +7,8 @@ import type {
   ChatResult,
   UserProfile,
   ToolContext,
+  AppMode,
+  OpenAIFunctionDef,
 } from './types.js';
 import { ContextBudgetManager } from './context.js';
 import { UsageTracker } from './usage.js';
@@ -15,11 +17,50 @@ import { runToolLoop } from './llm/router.js';
 import { buildSystemMessage } from './system-prompt.js';
 import { appendChatLog } from './history.js';
 
+// 'always'-category tools that are useful in coding mode as reference/research aids.
+const CODING_REFERENCE_TOOLS = new Set([
+  'web_search', 'search_news', 'browse_web', 'scrape_page',
+  'stack_search', 'stack_answers',
+  'wiki_search', 'wiki_summary', 'wiki_full', 'wiki_grep',
+  'search_papers', 'search_arxiv',
+  'github_clone', 'github_read_file', 'github_grep',
+  'system_info', 'get_usage', 'exit_app',
+]);
+
+// Tools EXCLUDED from surf mode (no file I/O, no shell, no blender, no downloads).
+const SURF_EXCLUDE = new Set([
+  'blender_get_scene', 'blender_get_object', 'blender_create_object',
+  'blender_modify_object', 'blender_delete_object', 'blender_set_material',
+  'blender_execute_code', 'blender_screenshot',
+  'download_file', 'yt_dlp_download',
+  'github_clone', 'wiki_full', 'wiki_grep',
+]);
+
+// Tools included in lockin mode: coding + focus/productivity, no entertainment.
+const LOCKIN_EXTRAS = new Set([
+  'blender_get_scene', 'blender_get_object', 'blender_create_object',
+  'blender_modify_object', 'blender_delete_object', 'blender_set_material',
+  'blender_execute_code', 'blender_screenshot',
+  'calendar_list_upcoming', 'calendar_add_event', 'calendar_delete_event',
+  'set_alarm', 'list_alarms', 'cancel_alarm',
+  'timer_start', 'timer_check', 'timer_stop',
+  'write_note', 'read_note', 'notes_ls', 'notes_mkdir', 'search_notes',
+  'web_search', 'browse_web', 'scrape_page',
+  'stack_search', 'stack_answers',
+  'wiki_search', 'wiki_summary', 'wiki_full', 'wiki_grep',
+  'search_papers', 'search_arxiv',
+  'github_clone', 'github_read_file', 'github_grep',
+  'download_file', 'yt_dlp_download',
+  'system_info', 'get_usage', 'exit_app',
+  'generate_ntfy_topic', 'ntfy_subscribe', 'ntfy_unsubscribe', 'ntfy_publish', 'ntfy_list',
+]);
+
 export interface SessionManagerConfig {
   provider: Provider;
   providerConfig: ProviderConfig;
   profile: UserProfile;
   registry: ToolRegistry;
+  mode: AppMode;
   codingMode: boolean;
   workingDir: string | null;
   nonInteractive: boolean;
@@ -48,6 +89,7 @@ export class SessionManager {
     this.state = {
       busy: false,
       messages: [],
+      mode: config.mode,
       codingMode: config.codingMode,
       shellMode: false,
       workingDir: config.workingDir,
@@ -93,6 +135,7 @@ export class SessionManager {
       // Build system message
       const systemMessage = buildSystemMessage(this.profile, {
         codingMode: this.state.codingMode,
+        mode: this.state.mode,
       });
 
       // Build tool context
@@ -113,10 +156,8 @@ export class SessionManager {
         };
       }
 
-      // Get OpenAI function definitions
-      const tools = this.registry.getOpenAISchemas(
-        this.state.codingMode ? undefined : 'always',
-      );
+      // Get tool definitions for current mode.
+      const tools = this.getToolsForMode();
 
       // Run tool loop
       const result = await runToolLoop({
@@ -170,6 +211,33 @@ export class SessionManager {
   toggleCodingMode(): boolean {
     this.state.codingMode = !this.state.codingMode;
     return this.state.codingMode;
+  }
+
+  setMode(mode: AppMode): void {
+    this.state.mode = mode;
+    this.state.codingMode = mode === 'coding' || mode === 'lockin';
+  }
+
+  getMode(): AppMode {
+    return this.state.mode;
+  }
+
+  private getToolsForMode(): OpenAIFunctionDef[] {
+    const mode = this.state.mode;
+    if (mode === 'coding') {
+      return this.registry.getOpenAISchemasMulti({
+        categories: ['coding'],
+        names: CODING_REFERENCE_TOOLS,
+      });
+    }
+    if (mode === 'lockin') {
+      return this.registry.getOpenAISchemasMulti({
+        categories: ['coding'],
+        names: LOCKIN_EXTRAS,
+      });
+    }
+    // surf mode (default): all 'always' tools minus excluded ones
+    return this.registry.getOpenAISchemasExclude(SURF_EXCLUDE);
   }
 
   toggleShellMode(): boolean {

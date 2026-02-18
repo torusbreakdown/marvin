@@ -70,7 +70,7 @@ User Input (CLI args / TUI / stdin)
                        │
                        ▼
 ┌── tools/*.ts ───────────────────────────────────────┐
-│   ~115 tools across 25+ categories                   │
+│   ~105 tools across 25+ categories                   │
 │   Each tool: Zod schema + async handler → string     │
 └─────────────────────────────────────────────────────┘
                        │
@@ -162,8 +162,12 @@ if (args.nonInteractive) {
 **Dependencies**: `llm/router.ts`, `profiles/manager.ts`, `system-prompt.ts`, `history.ts`, `usage.ts`, `context.ts`, `tools/registry.ts`, `tools/ntfy.ts`
 
 **Responsibilities**:
-- Hold all session-level state (provider, profile, coding mode, working dir, busy/done)
+- Hold all session-level state (provider, profile, mode, coding mode, working dir, busy/done)
 - Coordinate message submission: build system prompt → run tool loop → stream response
+- **Mode system**: three operating modes (`surf`, `coding`, `lockin`) controlling tool availability
+  - `getToolsForMode()` filters tools based on active mode using category tags and include/exclude sets
+  - `setMode()` / `getMode()` for runtime switching via `!mode` command
+  - `SURF_EXCLUDE`, `LOCKIN_EXTRAS`, `CODING_REFERENCE_TOOLS` sets define mode boundaries
 - ntfy polling hook: on every message submission, check subscribed topics
 - Profile switching: reload preferences, saved places, rebuild SDK session
 - Coding mode toggle: adjust tool set, timeout, notes directory
@@ -330,6 +334,8 @@ class CopilotProvider implements LLMProvider {
 - Stream chat completions
 - Handle tool calls (Ollama supports OpenAI-compatible tool calling)
 - Model override via `OLLAMA_MODEL` env var (default `qwen3-coder:30b`)
+- **Critical**: Injects `num_ctx: 32768` via `extraBody` options — Ollama
+  defaults to 4096 which is far too small for 70+ tool schemas
 - No API key needed
 
 ### 2.7 `src/tools/registry.ts` — Tool Registry
@@ -885,6 +891,7 @@ const PROVIDER_DEFAULTS: Record<ProviderName, { model: string; baseUrl?: string;
   openai:        { model: 'gpt-5.1', baseUrl: 'https://api.openai.com/v1', envKey: 'OPENAI_API_KEY' },
   ollama:        { model: 'qwen3-coder:30b', baseUrl: 'http://localhost:11434' },
   'openai-compat': { model: 'qwen/qwen3-32b', baseUrl: 'https://openrouter.ai/api/v1/chat/completions', envKey: 'OPENAI_COMPAT_API_KEY' },
+  moonshot:       { model: 'kimi-latest', baseUrl: 'https://api.moonshot.ai/v1', envKey: 'MOONSHOT_API_KEY', envFallback: '~/.ssh/MOONSHOT_API_KEY' },
 };
 ```
 
@@ -1924,13 +1931,11 @@ These features exist in the Python implementation but are NOT included in the Ty
 | Feature | Reason | Alternative |
 |---------|--------|-------------|
 | `--design-first` TDD pipeline | Broken, overly complex | Use Copilot CLI directly |
-| `launch_agent` tool | Pipeline-only | Use Copilot CLI |
 | `tk` tool (coding-mode) | Pipeline ticket gating | Non-coding `create_ticket` tools retained |
-| `install_packages` tool | Python/uv specific | `run_command` is sufficient |
 | `MARVIN_DEPTH` / `MARVIN_TICKET` | Pipeline env vars | Not needed without pipeline |
 | Pipeline model tier env vars | Pipeline-only | `MARVIN_CODE_MODEL_LOW`/`HIGH` retained |
 | Voice input (`!voice`, `!v`) | Requires Groq Whisper | Low priority for v1 |
-| Blender MCP bridge | Niche use case | Add when needed |
+| Blender MCP bridge | Niche use case | Tools registered as stubs, needs MCP server |
 
 ---
 

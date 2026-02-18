@@ -19,15 +19,16 @@ describe('CopilotProvider', () => {
   });
 
   describe('Lifecycle invariants', () => {
-    it('session is null initially (lazy creation)', () => {
+    it('copilotToken is null initially (lazy creation)', () => {
       const provider = new CopilotProvider(config);
-      expect((provider as any).session).toBeNull();
+      expect((provider as any).copilotToken).toBeNull();
     });
 
-    it('destroy() sets session to null', () => {
+    it('destroy() clears token state', () => {
       const provider = new CopilotProvider(config);
       provider.destroy();
-      expect((provider as any).session).toBeNull();
+      expect((provider as any).copilotToken).toBeNull();
+      expect((provider as any).githubToken).toBeNull();
     });
 
     it('destroy() can be called multiple times without error', () => {

@@ -75,6 +75,7 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry,
+      mode: codingMode ? 'coding' : 'surf',
       codingMode,
       workingDir: tmpDir,
       nonInteractive: true,
@@ -125,6 +126,7 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry: new ToolRegistry(),
+      mode: 'surf',
       codingMode: false,
       workingDir: tmpDir,
       nonInteractive: true,
@@ -157,6 +159,7 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry: new ToolRegistry(),
+      mode: 'surf',
       codingMode: false,
       workingDir: tmpDir,
       nonInteractive: true,
@@ -198,6 +201,7 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry: new ToolRegistry(),
+      mode: 'surf',
       codingMode: false,
       workingDir: tmpDir,
       nonInteractive: true,
@@ -226,7 +230,7 @@ describe('SessionManager', () => {
       'A test tool',
       z.object({ q: z.string() }),
       async () => 'result',
-      'always',
+      'coding',
     );
 
     const session = new SessionManager({
@@ -234,7 +238,8 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry,
-      codingMode: false,
+      mode: 'coding',
+      codingMode: true,
       workingDir: tmpDir,
       nonInteractive: true,
       persistDir: tmpDir,
@@ -243,7 +248,8 @@ describe('SessionManager', () => {
     await session.submit('do something');
     expect(capturedOptions?.tools).toBeDefined();
     expect(capturedOptions!.tools!.length).toBeGreaterThan(0);
-    expect(capturedOptions!.tools![0].function.name).toBe('test_tool');
+    const toolNames = capturedOptions!.tools!.map(t => t.function.name);
+    expect(toolNames).toContain('test_tool');
   });
 
   it('wires tool execution through registry', async () => {
@@ -290,6 +296,7 @@ describe('SessionManager', () => {
       providerConfig,
       profile: makeProfile(tmpDir),
       registry,
+      mode: 'surf',
       codingMode: false,
       workingDir: tmpDir,
       nonInteractive: true,

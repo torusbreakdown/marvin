@@ -23,11 +23,12 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
     provider,
     history = [],
     maxRounds = 10,
-    tools,
     signal,
     onToolCall,
     onDelta,
   } = options;
+
+  const tools = options.tools;
 
   // Build messages array: system + history + user prompt
   const messages: Message[] = [

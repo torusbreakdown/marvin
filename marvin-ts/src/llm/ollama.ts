@@ -28,8 +28,16 @@ export class OllamaProvider implements Provider {
   }
 
   async chat(messages: Message[], options?: ChatOptions): Promise<ChatResult> {
+    // Set num_ctx for Ollama — default 4096 is too small for tool-calling
+    const ollamaOptions = {
+      ...options,
+      extraBody: {
+        ...options?.extraBody,
+        options: { num_ctx: 32768 },
+      },
+    };
     try {
-      return await this.inner.chat(messages, options);
+      return await this.inner.chat(messages, ollamaOptions);
     } catch (err) {
       const msg = (err as Error).message;
       if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {

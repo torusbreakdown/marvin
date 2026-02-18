@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import { execSync } from 'node:child_process';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { homedir } from 'node:os';
 import type { ToolRegistry } from './registry.js';
 
 export function registerDownloadsTools(registry: ToolRegistry): void {
@@ -9,7 +13,23 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
       url: z.string().describe('URL to download'),
       filename: z.string().default('').describe('Optional filename'),
     }),
-    async () => 'Not yet implemented',
+    async ({ url, filename }) => {
+      try {
+        const downloadDir = join(homedir(), 'Downloads');
+        if (!existsSync(downloadDir)) {
+          mkdirSync(downloadDir, { recursive: true });
+        }
+        const resolvedFilename = filename || basename(new URL(url).pathname) || 'download';
+        const filePath = join(downloadDir, resolvedFilename);
+        execSync(`curl -fSL -o ${JSON.stringify(filePath)} ${JSON.stringify(url)}`, {
+          stdio: 'pipe',
+        });
+        const stats = statSync(filePath);
+        return `Downloaded to ${filePath} (${stats.size} bytes)`;
+      } catch (error) {
+        return `Download failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    },
     'always',
   );
 
@@ -18,9 +38,31 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
     'Download video/audio from YouTube or other sites',
     z.object({
       url: z.string().describe('Video URL'),
-      audio_only: z.boolean().default(false).describe('Download audio only'),
+      format: z.string().default('bestaudio').describe('Download format (default: bestaudio)'),
+      output_dir: z.string().default('').describe('Output directory (default: ~/Downloads/)'),
     }),
-    async () => 'Not yet implemented',
+    async ({ url, format, output_dir }) => {
+      try {
+        const outputDir = output_dir || join(homedir(), 'Downloads');
+        if (!existsSync(outputDir)) {
+          mkdirSync(outputDir, { recursive: true });
+        }
+        const outputTemplate = join(outputDir, '%(title)s.%(ext)s');
+        const output = execSync(
+          `yt-dlp --no-playlist -f ${JSON.stringify(format)} -o ${JSON.stringify(outputTemplate)} ${JSON.stringify(url)}`,
+          { stdio: 'pipe', encoding: 'utf-8' },
+        );
+        return output.trim();
+      } catch (error: unknown) {
+        if (error instanceof Error && 'stderr' in error) {
+          const stderr = (error as { stderr: string }).stderr;
+          if (stderr?.includes('command not found') || stderr?.includes('No such file')) {
+            return 'yt-dlp is not installed. Install it with: pip install yt-dlp';
+          }
+        }
+        return `yt-dlp download failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    },
     'always',
   );
 }

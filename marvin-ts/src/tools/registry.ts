@@ -28,6 +28,15 @@ export class ToolRegistry {
     return all.filter(t => t.category === category);
   }
 
+  getToolsMulti(filter: { categories?: ToolDef['category'][]; names?: Set<string> }): ToolDef[] {
+    const all = Array.from(this.tools.values());
+    return all.filter(t => {
+      if (filter.categories && filter.categories.includes(t.category)) return true;
+      if (filter.names && filter.names.has(t.name)) return true;
+      return false;
+    });
+  }
+
   getAll(): ToolDef[] {
     return this.getTools();
   }
@@ -41,6 +50,30 @@ export class ToolRegistry {
         parameters: zodToJsonSchema(tool.schema),
       },
     }));
+  }
+
+  getOpenAISchemasMulti(filter: { categories?: ToolDef['category'][]; names?: Set<string> }): OpenAIFunctionDef[] {
+    return this.getToolsMulti(filter).map(tool => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: zodToJsonSchema(tool.schema),
+      },
+    }));
+  }
+
+  getOpenAISchemasExclude(exclude: Set<string>): OpenAIFunctionDef[] {
+    return this.getTools('always')
+      .filter(t => !exclude.has(t.name))
+      .map(tool => ({
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: zodToJsonSchema(tool.schema),
+        },
+      }));
   }
 
   async executeTool(

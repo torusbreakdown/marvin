@@ -54,6 +54,7 @@ Single line at the top. Always visible, never scrolls.
   - `🔧 CODING` — coding mode is on
   - `🐚 SHELL` — shell mode is on
   - `🎤 VOICE` — voice mode is on
+  - `🌊 SURF` / `🔧 CODING` / `🔒 LOCKIN` — active operating mode
 - Provider emoji: 🤖 Copilot, 💎 Gemini, ⚡ Groq, 🦙 Ollama, 🔮 OpenAI-compat
 
 ### 2.2 Chat Area
@@ -208,6 +209,7 @@ sending to the LLM.
 | `!code`        | Toggle coding mode on/off (see §9)                  |
 | `!shell` / `!sh` | Toggle shell mode on/off (see §5.3)              |
 | `!voice`       | Toggle continuous voice input mode (see §5.4)       |
+| `!mode [MODE]` | Switch operating mode: surf, coding, lockin (see §5.6) |
 
 ### 5.2 One-Shot Commands
 
@@ -252,6 +254,20 @@ a shell command. For example:
 - `!ls -la` → runs `ls -la` and shows output
 - `!git status` → runs `git status` and shows output
 - Output appears as a system message in the chat area
+
+### 5.6 Mode Switching (`!mode`)
+
+Switch the operating mode at runtime:
+- `!mode` — show current mode and available options
+- `!mode surf` — switch to surf mode (~70 general-purpose tools)
+- `!mode coding` — switch to coding mode (~40 coding-focused tools)
+- `!mode lockin` — switch to lockin mode (~68 coding + productivity tools)
+
+When the mode changes:
+- System message: `Mode switched to: {mode} ({n} tools)`
+- Status bar updates to show the new mode indicator
+- The tool set sent to the LLM on the next message is filtered accordingly
+- The mode persists for the remainder of the session
 
 ---
 

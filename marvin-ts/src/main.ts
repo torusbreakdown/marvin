@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
-import type { CliArgs, StreamCallbacks, Message, ProviderConfig } from './types.js';
+import type { CliArgs, StreamCallbacks, Message, ProviderConfig, AppMode } from './types.js';
 import type { UI } from './ui/shared.js';
 import { PlainUI } from './ui/plain.js';
 import { runNonInteractive } from './non-interactive.js';
@@ -24,6 +24,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       curses:            { type: 'boolean', default: false },
       'non-interactive': { type: 'boolean', default: false },
       'coding-mode':     { type: 'boolean', default: false },
+      mode:              { type: 'string' },
       prompt:            { type: 'string' },
       'working-dir':     { type: 'string' },
       ntfy:              { type: 'string' },
@@ -39,6 +40,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       `Usage: marvin [options] [prompt]\n\n` +
       `Options:\n` +
       `  --provider <name>    LLM provider (ollama, copilot, openai, groq, gemini, openai-compat, llama-server)\n` +
+      `  --mode <mode>        Tool mode: surf (default), coding, lockin\n` +
       `  --plain              Force plain readline UI\n` +
       `  --curses             Force curses TUI\n` +
       `  --non-interactive    Non-interactive mode (requires --prompt or piped stdin)\n` +
@@ -50,6 +52,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       `  -v, --version        Show version\n` +
       `\nSlash commands (interactive):\n` +
       `  !code         Toggle coding mode\n` +
+      `  !mode         Show/switch mode (!mode surf|coding|lockin)\n` +
       `  !sh / !shell  Toggle shell mode (or !sh <cmd> to run a command)\n` +
       `  !model        Show current provider/model (!model <provider> [model] to switch)\n` +
       `  !<cmd>        Run shell command\n` +
@@ -65,11 +68,26 @@ export function parseCliArgs(argv?: string[]): CliArgs {
     process.exit(0);
   }
 
+  const modeArg = values.mode as string | undefined;
+  const validModes: AppMode[] = ['surf', 'coding', 'lockin'];
+  const codingMode = (values['coding-mode'] ?? false) || !!values['working-dir'];
+  let mode: AppMode = 'surf';
+  if (modeArg) {
+    if (!validModes.includes(modeArg as AppMode)) {
+      process.stderr.write(`Error: invalid mode '${modeArg}'. Valid modes: ${validModes.join(', ')}\n`);
+      process.exit(1);
+    }
+    mode = modeArg as AppMode;
+  } else if (codingMode) {
+    mode = 'coding';
+  }
+
   return {
     provider: values.provider,
     plain: values.plain ?? false,
     nonInteractive: values['non-interactive'] ?? false,
-    codingMode: (values['coding-mode'] ?? false) || !!values['working-dir'],
+    mode,
+    codingMode: mode === 'coding' || mode === 'lockin',
     prompt: values.prompt,
     workingDir: values['working-dir'],
     ntfy: values.ntfy,
@@ -78,15 +96,17 @@ export function parseCliArgs(argv?: string[]): CliArgs {
 }
 
 // Known slash commands
-const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro', '!model']);
+const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro', '!model', '!mode']);
 const KEYWORD_COMMANDS = new Set(['quit', 'exit', 'preferences', 'profiles', 'usage', 'saved']);
 
 export interface SlashCommandContext {
   session: {
     toggleCodingMode: () => boolean;
     toggleShellMode: () => boolean;
+    setMode: (mode: AppMode) => void;
+    getMode: () => AppMode;
     getUsage: () => { summary: () => string };
-    getState: () => { codingMode: boolean; shellMode: boolean; provider: ProviderConfig };
+    getState: () => { codingMode: boolean; shellMode: boolean; provider: ProviderConfig; mode: AppMode };
     switchProvider: (provider: ReturnType<typeof createProvider>, config: ProviderConfig) => void;
   };
   ui: UI;
@@ -105,6 +125,24 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
   if (trimmed === '!code') {
     const on = ctx.session.toggleCodingMode();
     ctx.ui.displaySystem(on ? 'Coding mode ON 🔧' : 'Coding mode OFF');
+    return true;
+  }
+
+  // !mode — show or switch mode
+  if (trimmed === '!mode' || trimmed.startsWith('!mode ')) {
+    const arg = trimmed.slice(5).trim();
+    if (!arg) {
+      ctx.ui.displaySystem(`Mode: ${ctx.session.getMode()}`);
+      return true;
+    }
+    const valid: AppMode[] = ['surf', 'coding', 'lockin'];
+    if (!valid.includes(arg as AppMode)) {
+      ctx.ui.displaySystem(`Invalid mode '${arg}'. Valid: ${valid.join(', ')}`);
+      return true;
+    }
+    ctx.session.setMode(arg as AppMode);
+    const emoji = arg === 'surf' ? '🏄' : arg === 'coding' ? '🔧' : '🔒';
+    ctx.ui.displaySystem(`${emoji} Mode: ${arg}`);
     return true;
   }
 
@@ -253,6 +291,7 @@ function createSession(args: CliArgs) {
     providerConfig,
     profile,
     registry,
+    mode: args.mode ?? 'surf',
     codingMode: args.codingMode ?? false,
     workingDir: args.workingDir ?? process.cwd(),
     nonInteractive: args.nonInteractive,

@@ -2,12 +2,15 @@ import { z, ZodObject, ZodRawShape } from 'zod';
 
 // === Tool System ===
 
+export type ToolCategory = 'coding' | 'readonly' | 'always';
+export type AppMode = 'surf' | 'coding' | 'lockin';
+
 export interface ToolDef {
   name: string;
   description: string;
   schema: ZodObject<any>;
   handler: (args: any, ctx: ToolContext) => Promise<string>;
-  category: 'coding' | 'readonly' | 'always';
+  category: ToolCategory;
   requiresConfirmation?: boolean;
 }
 
@@ -99,6 +102,7 @@ export interface Provider {
 export interface SessionState {
   busy: boolean;
   messages: Message[];
+  mode: AppMode;
   codingMode: boolean;
   shellMode: boolean;
   workingDir: string | null;
@@ -187,14 +191,14 @@ export interface StatusBarData {
   totalTokens: number;
   codingMode: boolean;
   shellMode: boolean;
+  mode: AppMode;
 }
-
-// === CLI ===
 
 export interface CliArgs {
   provider?: string;
   plain: boolean;
   nonInteractive: boolean;
+  mode?: AppMode;
   codingMode?: boolean;
   prompt?: string;
   workingDir?: string;

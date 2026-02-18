@@ -185,7 +185,7 @@ export function registerFilesTools(registry: ToolRegistry): void {
       if (!content.includes(args.old_str)) {
         return `Error: old_str not found in ${args.path}. Make sure you copy the exact text including whitespace.`;
       }
-      const newContent = content.replace(args.old_str, args.new_str);
+      const newContent = content.replace(args.old_str, () => args.new_str);
       writeFileSync(fullPath, newContent, 'utf-8');
       return `Applied patch to ${args.path}`;
     },

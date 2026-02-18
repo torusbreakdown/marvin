@@ -2,6 +2,7 @@ import type { Message, ChatLogEntry, MessageRole, UserProfile } from './types.js
 
 export interface BuildSystemMessageOptions {
   codingMode?: boolean;
+  mode?: string;
   backgroundJobs?: Array<{ id: string; status: string; description: string }>;
 }
 

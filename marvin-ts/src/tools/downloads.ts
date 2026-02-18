@@ -50,7 +50,7 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
         const outputTemplate = join(outputDir, '%(title)s.%(ext)s');
         const output = execSync(
           `yt-dlp --no-playlist -f ${JSON.stringify(format)} -o ${JSON.stringify(outputTemplate)} ${JSON.stringify(url)}`,
-          { stdio: 'pipe', encoding: 'utf-8', timeout: 300_000 },
+          { stdio: 'pipe', encoding: 'utf-8', timeout: 300_000, env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` } },
         );
         return output.trim() || 'Download complete.';
       } catch (error: unknown) {

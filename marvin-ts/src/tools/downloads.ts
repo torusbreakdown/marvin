@@ -35,7 +35,7 @@ export function registerDownloadsTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'yt_dlp_download',
-    'Download video/audio from YouTube or other sites using yt-dlp. Supports YouTube, Vimeo, SoundCloud, and 1000+ other sites.',
+    'Download video/audio using yt-dlp (installed and ready). Supports YouTube, Vimeo, SoundCloud, and 1000+ sites. Just call this tool with the URL.',
     z.object({
       url: z.string().describe('Video/audio URL'),
       format: z.string().default('bestvideo+bestaudio/best').describe('Format: "bestvideo+bestaudio/best" for video, "bestaudio" for audio only'),

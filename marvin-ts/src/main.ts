@@ -429,6 +429,10 @@ export async function main(): Promise<void> {
         ui.displaySystem('Nothing to undo');
       }
     };
+    (ui as CursesUI).onAbort = () => {
+      session.abort();
+      ui.displaySystem('Aborted (Esc)');
+    };
   }
 
   // Handle inline prompt (positional argument)

@@ -47,6 +47,7 @@ export class CursesUI implements UI {
   private reverseSearchQuery = '';
   private reverseSearchIdx = -1;
   public onUndo: (() => void) | null = null;
+  public onAbort: (() => void) | null = null;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -307,7 +308,10 @@ export class CursesUI implements UI {
         const cb = this.inputResolve;
         this.inputResolve = null;
         cb('quit');
+        return;
       }
+      // During streaming/busy — abort the current request
+      if (this.onAbort) this.onAbort();
     });
 
     // Scrolling

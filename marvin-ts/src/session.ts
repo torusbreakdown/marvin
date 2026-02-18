@@ -16,6 +16,8 @@ import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
 import { buildSystemMessage } from './system-prompt.js';
 import { appendChatLog, popChatLogEntries, loadChatLog } from './history.js';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 // 'always'-category tools that are useful in coding mode as reference/research aids.
 const CODING_REFERENCE_TOOLS = new Set([
@@ -158,7 +160,21 @@ export class SessionManager {
       for (const tool of this.registry.getAll()) {
         toolFuncs[tool.name] = async (args: Record<string, unknown>) => {
           this.usage.recordToolCall(tool.name);
-          return this.registry.executeTool(tool.name, args, toolCtx);
+          const result = await this.registry.executeTool(tool.name, args, toolCtx);
+          // Debug log tool calls and results
+          try {
+            const logDir = this.profile.profileDir;
+            mkdirSync(logDir, { recursive: true });
+            const entry = {
+              ts: new Date().toISOString(),
+              tool: tool.name,
+              args,
+              resultLength: result.length,
+              resultPreview: result.slice(0, 500),
+            };
+            appendFileSync(join(logDir, 'tool-calls.jsonl'), JSON.stringify(entry) + '\n');
+          } catch { /* ignore logging errors */ }
+          return result;
         };
       }
 

@@ -8,15 +8,17 @@ export function validateUrl(url: string): string | null {
   return isPrivateUrl(url);
 }
 
-function lynxDump(url: string): string {
+function lynxDump(url: string): { text: string; error?: string } {
   try {
-    return execSync(
+    const result = execSync(
       `lynx -dump -nolist -nonumbers -width=120 -accept_all_cookies ${JSON.stringify(url)}`,
       { encoding: 'utf-8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
     );
+    return { text: result.trim() };
   } catch (e: any) {
-    // If lynx fails, fall back to fetch
-    return '';
+    const stderr = e.stderr?.toString()?.slice(0, 300) || '';
+    const msg = e.message?.slice(0, 300) || 'unknown error';
+    return { text: '', error: `lynx failed: ${msg} ${stderr}`.trim() };
   }
 }
 
@@ -211,7 +213,8 @@ export function registerWebTools(registry: ToolRegistry): void {
         if (urlErr) return urlErr;
       }
       // Try lynx first (handles JS-blocked sites, cookies, redirects)
-      let text = lynxDump(target);
+      const lynx = lynxDump(target);
+      let text = lynx.text;
       if (!text) {
         // Fallback to fetch if lynx unavailable or fails
         try {
@@ -222,14 +225,15 @@ export function registerWebTools(registry: ToolRegistry): void {
           html = html.replace(/<!--[\s\S]*?-->/g, '');
           text = html;
         } catch {
-          return `Could not load ${target}. The page may require authentication or is unavailable.`;
+          // Both lynx and fetch failed — report what we know
+          return lynx.error || `Could not load ${target}. The page may require authentication or is unavailable.`;
         }
       }
       const MAX_CHARS = 400_000;
       if (text.length > MAX_CHARS) {
         text = text.slice(0, MAX_CHARS) + '\n\n[Truncated]';
       }
-      return text || `Could not load ${target}. The page may require authentication or is unavailable.`;
+      return text || lynx.error || `Could not load ${target}. The page may require authentication or is unavailable.`;
     },
     'always',
   );

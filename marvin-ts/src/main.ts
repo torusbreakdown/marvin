@@ -15,6 +15,7 @@ import { OpenAICompatProvider } from './llm/openai.js';
 import { OllamaProvider } from './llm/ollama.js';
 import { CopilotProvider } from './llm/copilot.js';
 import { LlamaServerProvider } from './llm/llama-server.js';
+import { transcribe, speak, stopSpeaking, hasTTS, hasSTT } from './voice/voice.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -113,6 +114,7 @@ export interface SlashCommandContext {
     undoLast: () => string | null;
   };
   ui: UI;
+  voiceState?: { enabled: boolean };
 }
 
 /**
@@ -152,6 +154,31 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
   if (trimmed === '!shell' || trimmed === '!sh') {
     const on = ctx.session.toggleShellMode();
     ctx.ui.displaySystem(on ? 'Shell mode ON 🐚' : 'Shell mode OFF');
+    return true;
+  }
+
+  // !voice / !v — toggle voice mode
+  if (trimmed === '!voice' || trimmed === '!v') {
+    if (ctx.voiceState) {
+      ctx.voiceState.enabled = !ctx.voiceState.enabled;
+      if ('setVoiceEnabled' in ctx.ui) {
+        (ctx.ui as CursesUI).setVoiceEnabled(ctx.voiceState.enabled);
+      }
+      const stt = hasSTT();
+      const tts = hasTTS();
+      if (ctx.voiceState.enabled) {
+        const parts = ['🎙️ Voice ON'];
+        if (!stt) parts.push('⚠️  STT unavailable (need arecord + faster-whisper)');
+        if (!tts) parts.push('⚠️  TTS unavailable (need espeak-ng)');
+        if (stt && tts) parts.push('Ctrl+V to record, responses will be spoken');
+        ctx.ui.displaySystem(parts.join('\n'));
+      } else {
+        stopSpeaking();
+        ctx.ui.displaySystem('Voice OFF');
+      }
+    } else {
+      ctx.ui.displaySystem('Voice not available in this UI mode');
+    }
     return true;
   }
 
@@ -237,11 +264,17 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
   return false;
 }
 
-function makeStreamCallbacks(ui: UI): StreamCallbacks {
+function makeStreamCallbacks(ui: UI, speakResponse = false): StreamCallbacks {
+  let fullResponse = '';
   return {
-    onDelta: (text: string) => ui.streamDelta(text),
+    onDelta: (text: string) => { ui.streamDelta(text); if (speakResponse) fullResponse += text; },
     onToolCallStart: (names: string[]) => ui.displayToolCall(names),
-    onComplete: (_msg: Message) => ui.endStream(),
+    onComplete: (_msg: Message) => {
+      ui.endStream();
+      if (speakResponse && fullResponse.trim()) {
+        speak(fullResponse);
+      }
+    },
     onError: (err: Error) => ui.displayError(err.message),
   };
 }
@@ -413,9 +446,13 @@ export async function main(): Promise<void> {
 
   refreshStatus(ui, session, providerConfig);
 
+  // Voice state — shared between slash commands and curses callbacks
+  const voiceState = { enabled: false };
+
   const slashCtx: SlashCommandContext = {
     session,
     ui,
+    voiceState,
   };
 
   // Wire Ctrl+Z undo for curses UI
@@ -430,8 +467,32 @@ export async function main(): Promise<void> {
       }
     };
     (ui as CursesUI).onAbort = () => {
+      stopSpeaking();
       session.abort();
       ui.displaySystem('Aborted (Esc)');
+    };
+
+    // Voice input: Ctrl+V toggles recording, onVoiceInput fires when recording stops
+    (ui as CursesUI).onVoiceInput = async (wavPath: string) => {
+      const result = transcribe(wavPath);
+      if (result.error) {
+        ui.displayError(`STT error: ${result.error}`);
+        return;
+      }
+      if (!result.text) {
+        ui.displaySystem('No speech detected.');
+        return;
+      }
+      // Submit transcribed text as if user typed it
+      const text = result.text;
+      ui.displayMessage('user', `🎙️ ${text}`);
+      try { appendFileSync(join(profile.profileDir, 'history'), text + '\n'); } catch { /* ignore */ }
+      const callbacks = makeStreamCallbacks(ui, voiceState.enabled);
+      ui.beginStream();
+      try {
+        await session.submit(text, callbacks);
+      } catch { /* error reported via callbacks */ }
+      refreshStatus(ui, session, providerConfig);
     };
   }
 
@@ -450,6 +511,7 @@ export async function main(): Promise<void> {
 
   // Signal handling — register BEFORE the REPL so Ctrl+C works during conversation
   const cleanup = () => {
+    stopSpeaking();
     session.destroy().catch(() => {});
     ui.destroy();
     process.exit(0);
@@ -477,7 +539,7 @@ export async function main(): Promise<void> {
     ui.displayMessage('user', input);
     // Persist input to history file
     try { appendFileSync(join(profile.profileDir, 'history'), input + '\n'); } catch { /* ignore */ }
-    const callbacks = makeStreamCallbacks(ui);
+    const callbacks = makeStreamCallbacks(ui, voiceState.enabled);
     ui.beginStream();
     try {
       await session.submit(input, callbacks);

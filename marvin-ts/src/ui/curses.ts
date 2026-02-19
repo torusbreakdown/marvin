@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { UI } from './shared.js';
 import type { StatusBarData } from '../types.js';
+import { startRecording, stopRecording, isRecording } from '../voice/voice.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +49,10 @@ export class CursesUI implements UI {
   private reverseSearchIdx = -1;
   public onUndo: (() => void) | null = null;
   public onAbort: (() => void) | null = null;
+  /** Called when voice recording finishes — receives WAV path, should transcribe + submit */
+  public onVoiceInput: ((wavPath: string) => void) | null = null;
+  private voiceEnabled = false;
+  private voiceRecording = false;
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -185,6 +190,12 @@ export class CursesUI implements UI {
       // Ctrl+Z: undo last chat message
       if (key.ctrl && key.name === 'z') {
         if (self.onUndo) self.onUndo();
+        return;
+      }
+
+      // Ctrl+V: toggle voice recording (push-to-talk)
+      if (key.ctrl && key.name === 'v') {
+        self.toggleVoiceRecording();
         return;
       }
 
@@ -617,8 +628,9 @@ export class CursesUI implements UI {
   destroy(): void {
     if (this.clockInterval) clearInterval(this.clockInterval);
     if (this.origStderrWrite) process.stderr.write = this.origStderrWrite;
+    // Stop any active recording
+    if (isRecording()) stopRecording();
     try {
-      // Disable mouse tracking before destroying screen
       if (this.screen?.program) {
         this.screen.program.disableMouse();
         this.screen.program.showCursor();
@@ -626,11 +638,51 @@ export class CursesUI implements UI {
       }
       this.screen?.destroy();
     } catch { /* ignore */ }
-    // Belt-and-suspenders: write raw terminal reset sequences
     try {
-      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l'); // disable mouse modes
-      process.stdout.write('\x1b[?25h');  // show cursor
-      process.stdout.write('\x1b[?1049l'); // normal screen buffer
+      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l');
+      process.stdout.write('\x1b[?25h');
+      process.stdout.write('\x1b[?1049l');
     } catch { /* ignore */ }
+  }
+
+  // ── Voice ──
+
+  setVoiceEnabled(on: boolean): void {
+    this.voiceEnabled = on;
+  }
+
+  private toggleVoiceRecording(): void {
+    if (!this.voiceEnabled) {
+      this.displaySystem('Voice not enabled. Use !voice to enable.');
+      return;
+    }
+
+    if (this.voiceRecording) {
+      // Stop recording → transcribe
+      this.voiceRecording = false;
+      const wavPath = stopRecording();
+      this.updateInputBorder();
+      this.displaySystem('🎙️ Recording stopped — transcribing…');
+      if (wavPath && this.onVoiceInput) {
+        this.onVoiceInput(wavPath);
+      }
+    } else {
+      // Start recording
+      this.voiceRecording = true;
+      startRecording();
+      this.updateInputBorder();
+      this.displaySystem('🎙️ Recording… press Ctrl+V again to stop');
+    }
+  }
+
+  private updateInputBorder(): void {
+    const label = this.voiceRecording ? ' 🎙️ RECORDING (Ctrl+V to stop) ' : '';
+    this.inputBorder.setLabel(label);
+    if (this.voiceRecording) {
+      this.inputBorder.style.border = { fg: 'red' };
+    } else {
+      this.inputBorder.style.border = { fg: 'default' };
+    }
+    this.screen.render();
   }
 }

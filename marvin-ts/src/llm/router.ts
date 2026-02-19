@@ -3,6 +3,54 @@ import { estimateTokens } from '../context.js';
 
 type ToolFunc = (args: Record<string, unknown>) => Promise<string>;
 
+/**
+ * Validate tool_call/result pairing: ensure every tool result references a
+ * tool_call_id present in a preceding assistant message's tool_calls, and
+ * every assistant tool_call has a matching tool result after it.
+ * Removes orphaned messages to prevent API 400 errors.
+ */
+function repairToolPairs(messages: Message[]): Message[] {
+  // Pass 1: collect all tool_call IDs from assistant messages
+  const callIds = new Set<string>();
+  for (const m of messages) {
+    if (m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if (tc.id) callIds.add(tc.id);
+      }
+    }
+  }
+
+  // Pass 2: collect all tool_call_ids from tool result messages
+  const resultIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.tool_call_id) {
+      resultIds.add(m.tool_call_id);
+    }
+  }
+
+  // Pass 3: filter — drop orphaned tool results and strip dangling tool_calls
+  const result: Message[] = [];
+  for (const m of messages) {
+    if (m.role === 'tool' && m.tool_call_id && !callIds.has(m.tool_call_id)) {
+      continue; // orphaned tool result
+    }
+    if (m.tool_calls?.length) {
+      const validCalls = m.tool_calls.filter(tc => resultIds.has(tc.id));
+      if (validCalls.length === 0) {
+        // All tool_calls are dangling — emit as plain assistant message
+        result.push({ ...m, tool_calls: undefined });
+      } else if (validCalls.length < m.tool_calls.length) {
+        result.push({ ...m, tool_calls: validCalls });
+      } else {
+        result.push(m);
+      }
+      continue;
+    }
+    result.push(m);
+  }
+  return result;
+}
+
 export interface RunToolLoopOptions {
   prompt: string;
   toolFuncs: Record<string, ToolFunc>;
@@ -55,6 +103,9 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
     if (onCompact && estimateTokens(messages) > compactThreshold) {
       messages = await onCompact(messages);
     }
+
+    // Ensure no orphaned tool results (can happen after compaction)
+    messages = repairToolPairs(messages);
 
     const chatOptions: ChatOptions = {
       tools,

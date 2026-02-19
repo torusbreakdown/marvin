@@ -18,6 +18,7 @@ import { registerMediaTools } from './media.js';
 import { registerMusicTools } from './music.js';
 import { registerNotesTools } from './notes.js';
 import { registerNtfyTools } from './ntfy.js';
+import { registerOcrTools } from './ocr.js';
 import { registerPackagesTools } from './packages.js';
 import { registerPlacesTools } from './places.js';
 import { registerRecipesTools } from './recipes.js';
@@ -61,6 +62,7 @@ export function registerAllTools(registry: ToolRegistry, options: RegisterAllToo
   registerMusicTools(registry);
   registerNotesTools(registry);
   registerNtfyTools(registry);
+  registerOcrTools(registry);
   registerPackagesTools(registry);
   registerPlacesTools(registry);
   registerRecipesTools(registry);

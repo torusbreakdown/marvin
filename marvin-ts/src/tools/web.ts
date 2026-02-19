@@ -113,6 +113,18 @@ function deduplicateNews(articles: NewsArticle[]): NewsArticle[] {
 }
 
 export function registerWebTools(registry: ToolRegistry): void {
+  // In-memory page cache for browse_web pagination (URL → full text)
+  const pageCache = new Map<string, { text: string; ts: number }>();
+  const PAGE_CACHE_TTL = 5 * 60_000; // 5 minutes
+  const PAGE_CHUNK_SIZE = 10_000; // chars per page
+
+  function getCachedOrNull(url: string): string | null {
+    const entry = pageCache.get(url);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > PAGE_CACHE_TTL) { pageCache.delete(url); return null; }
+    return entry.text;
+  }
+
   registry.registerTool(
     'web_search',
     'Search the web using DuckDuckGo. Returns titles, URLs, and snippets.',
@@ -215,39 +227,63 @@ export function registerWebTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'browse_web',
-    'Read a web page URL. Returns page content as text. Do NOT speculate about robots.txt or scraping restrictions — just report what the tool returns.',
+    'Read a web page URL. Returns page content as text (paginated). Use start_index to continue reading if the result says "[Page truncated]". Do NOT speculate about robots.txt or scraping restrictions — just report what the tool returns.',
     z.object({
       url: z.string().describe('The URL to browse'),
+      start_index: z.number().default(0).describe('Character offset to start reading from (for pagination). Use the value from [Page truncated] to continue.'),
       __test_url: z.string().optional(),
     }),
     async (args) => {
       const target = args.__test_url || args.url;
+      const startIndex = args.start_index || 0;
+
       if (!args.__test_url) {
         const urlErr = validateUrl(target);
         if (urlErr) return urlErr;
       }
-      // Try lynx first (handles JS-blocked sites, cookies, redirects)
-      const lynx = lynxDump(target);
-      let text = lynx.text;
-      if (!text) {
-        // Fallback to fetch if lynx unavailable or fails
-        try {
-          let html = await fetchText(target);
-          html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-          html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
-          html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
-          html = html.replace(/<!--[\s\S]*?-->/g, '');
-          text = html;
-        } catch {
-          // Both lynx and fetch failed — report what we know
+
+      // Check cache first (for pagination continuations)
+      let fullText = getCachedOrNull(target);
+
+      if (fullText === null) {
+        // Try lynx first (handles JS-blocked sites, cookies, redirects)
+        const lynx = lynxDump(target);
+        fullText = lynx.text;
+        if (!fullText) {
+          // Fallback to fetch if lynx unavailable or fails
+          try {
+            let html = await fetchText(target);
+            html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+            html = html.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '');
+            html = html.replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '');
+            html = html.replace(/<!--[\s\S]*?-->/g, '');
+            fullText = html;
+          } catch {
+            return lynx.error || `Could not load ${target}. The page may require authentication or is unavailable.`;
+          }
+        }
+        if (!fullText) {
           return lynx.error || `Could not load ${target}. The page may require authentication or is unavailable.`;
         }
+        // Cache the full text for pagination
+        pageCache.set(target, { text: fullText, ts: Date.now() });
       }
-      const MAX_CHARS = 400_000;
-      if (text.length > MAX_CHARS) {
-        text = text.slice(0, MAX_CHARS) + '\n\n[Truncated]';
+
+      const totalLength = fullText.length;
+
+      if (startIndex >= totalLength) {
+        return `[End of page — no more content after index ${startIndex}. Total length: ${totalLength}]`;
       }
-      return text || lynx.error || `Could not load ${target}. The page may require authentication or is unavailable.`;
+
+      const chunk = fullText.slice(startIndex, startIndex + PAGE_CHUNK_SIZE);
+      const endIndex = startIndex + chunk.length;
+
+      if (endIndex < totalLength) {
+        const remaining = totalLength - endIndex;
+        return chunk + `\n\n[Page truncated. Showing ${startIndex}-${endIndex} of ${totalLength} chars. Call browse_web with start_index=${endIndex} to continue reading (${remaining} chars remaining).]`;
+      }
+
+      return chunk;
     },
     'always',
   );

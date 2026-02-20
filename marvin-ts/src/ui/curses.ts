@@ -84,14 +84,16 @@ export class CursesUI implements UI {
       smartCSR: true,
       title: 'Marvin',
       fullUnicode: true,
-      mouse: true,
+      mouse: false,
     });
 
     // Ensure terminal is reset on any exit path
     const resetTerminal = () => {
       try {
-        process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l');
-        process.stdout.write('\x1b[?25h\x1b[?1049l');
+        // Disable ALL mouse tracking modes (1000=vt200, 1002=cell, 1003=all, 1005=utf8, 1006=sgr, 1015=urxvt)
+        process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l');
+        process.stdout.write('\x1b[?25h');  // show cursor
+        process.stdout.write('\x1b[?1049l'); // normal screen buffer
       } catch { /* ignore */ }
     };
     process.on('exit', resetTerminal);
@@ -121,7 +123,7 @@ export class CursesUI implements UI {
       scrollable: true,
       alwaysScroll: true,
       scrollbar: { ch: '│', style: { fg: 'cyan' } },
-      mouse: true,
+      mouse: false,
       keys: true,
       vi: false,
       style: { fg: 'white', bg: 'default' },
@@ -630,6 +632,11 @@ export class CursesUI implements UI {
     if (this.origStderrWrite) process.stderr.write = this.origStderrWrite;
     // Stop any active recording
     if (isRecording()) stopRecording();
+    // Write mouse-disable BEFORE screen.destroy() — destroy can re-enable
+    try {
+      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l');
+      process.stdout.write('\x1b[?25h');
+    } catch { /* ignore */ }
     try {
       if (this.screen?.program) {
         this.screen.program.disableMouse();
@@ -638,8 +645,9 @@ export class CursesUI implements UI {
       }
       this.screen?.destroy();
     } catch { /* ignore */ }
+    // Belt-and-suspenders: write again AFTER destroy
     try {
-      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l');
+      process.stdout.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l');
       process.stdout.write('\x1b[?25h');
       process.stdout.write('\x1b[?1049l');
     } catch { /* ignore */ }

@@ -1,9 +1,0 @@
-github-copilot-sdk
-pydantic
-httpx
-ddgs
-beautifulsoup4
-pyyaml
-selenium
-feedparser
-sounddevice  # optional: voice input via Groq Whisper STT

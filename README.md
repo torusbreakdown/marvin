@@ -194,32 +194,31 @@ sudo apt install espeak-ng  # TTS voice output
 
 ## Architecture
 
+All source lives in `marvin-ts/`:
+
 ```
-marvin-ts/
-├── src/
-│   ├── main.ts          # CLI entry, REPL loop, slash commands
-│   ├── session.ts       # Session state, compaction, undo
-│   ├── context.ts       # Context budget management
-│   ├── system-prompt.ts # System prompt builder
-│   ├── types.ts         # Shared types
-│   ├── history.ts       # Chat log persistence
-│   ├── usage.ts         # Cost tracking
-│   ├── llm/
-│   │   ├── router.ts    # Tool loop, repairToolPairs
-│   │   ├── openai.ts    # OpenAI-compatible provider
-│   │   ├── ollama.ts    # Ollama provider
-│   │   ├── copilot.ts   # GitHub Copilot provider
-│   │   └── llama-server.ts
-│   ├── ui/
-│   │   ├── curses.ts    # neo-blessed TUI
-│   │   ├── plain.ts     # readline UI
-│   │   └── shared.ts    # UI interface
-│   ├── tools/           # 35 tool modules
-│   ├── voice/
-│   │   ├── voice.ts     # STT/TTS orchestration
-│   │   └── stt.py       # faster-whisper Python helper
-│   └── profiles/
-│       └── manager.ts   # Profile & preferences management
-├── .venv/               # Python venv (faster-whisper for STT)
-└── dist/                # Compiled JS output
+src/
+├── main.ts          # CLI entry, REPL loop, slash commands
+├── session.ts       # Session state, compaction, undo
+├── context.ts       # Context budget management
+├── system-prompt.ts # System prompt builder
+├── types.ts         # Shared types
+├── history.ts       # Chat log persistence
+├── usage.ts         # Cost tracking
+├── llm/
+│   ├── router.ts    # Tool loop, repairToolPairs
+│   ├── openai.ts    # OpenAI-compatible provider
+│   ├── ollama.ts    # Ollama provider
+│   ├── copilot.ts   # GitHub Copilot provider
+│   └── llama-server.ts
+├── ui/
+│   ├── curses.ts    # neo-blessed TUI
+│   ├── plain.ts     # readline UI
+│   └── shared.ts    # UI interface
+├── tools/           # 35 tool modules (107 tools)
+├── voice/
+│   ├── voice.ts     # STT/TTS orchestration
+│   └── stt.py       # faster-whisper Python helper
+└── profiles/
+    └── manager.ts   # Profile & preferences management
 ```

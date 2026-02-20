@@ -1,245 +1,225 @@
-# Local Finder
+# Marvin
 
-A multi-tool CLI assistant powered by the **GitHub Copilot SDK**. Finds nearby places, checks weather & traffic, searches the web, scrapes pages, looks up academic papers, reviews games & movies, manages notifications, takes notes, downloads videos, and more — all from one conversational interface.
+A multi-tool conversational CLI assistant with 107 tools. Searches the web, browses pages, downloads videos, writes code, manages files, checks weather, finds places, plays music, takes notes, does OCR, and more — all from one terminal interface.
+
+Built in TypeScript (Node.js). Supports multiple LLM providers: Ollama (local), OpenAI, Groq, Gemini, GitHub Copilot, and any OpenAI-compatible API.
 
 ## Quick Start
 
 ```bash
-# Clone and install
-cd local-finder
-uv venv && uv pip install -r requirements.txt
-source .venv/bin/activate
+cd marvin-ts
+npm install
+npm run build
 
-# Run (curses UI, default)
-python app.py
+# Run (curses TUI, default)
+node dist/main.js
+
+# Specify provider
+MARVIN_PROVIDER=ollama node dist/main.js
+MARVIN_PROVIDER=openai OPENAI_API_KEY=sk-... node dist/main.js
 
 # Plain terminal mode
-python app.py --plain
+node dist/main.js --plain
 
-# Single-shot mode
-python app.py "Find me good ramen near me"
+# Single-shot
+node dist/main.js "What's the weather like?"
 ```
 
-## Modes
+## UI Modes
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| **Curses** (default) | `python app.py` | Rich terminal UI with colored chat, scrolling, status bar, input history |
-| **Plain** | `python app.py --plain` | Original readline-based terminal |
-| **Single-shot** | `python app.py "query"` | One question, one answer, then exit |
+| **Curses TUI** (default) | `node dist/main.js` | Full-terminal UI with status bar, scrolling chat, input history |
+| **Plain** | `--plain` | Simple readline-based terminal |
+| **Non-interactive** | `--non-interactive --prompt "..."` | Pipe-friendly, single response |
 
-### Curses Mode Keybindings
+### Keybindings (Curses TUI)
 
 | Key | Action |
 |-----|--------|
 | Enter | Send message |
 | ↑ / ↓ | Browse input history |
-| PgUp / PgDn | Scroll chat output |
+| PgUp / PgDn / Shift+↑↓ | Scroll chat |
 | Ctrl+A / Ctrl+E | Jump to start/end of line |
 | Ctrl+U | Clear input line |
-| Ctrl+D or ESC | Quit |
+| Ctrl+R | Reverse search history |
+| Ctrl+Z | Undo last chat message |
+| Ctrl+V | Push-to-talk (voice mode) |
+| Escape | Abort current response / Quit |
+| Ctrl+Q / Ctrl+D | Quit |
 
-## API Setup
-
-### Required
-
-#### 1. GitHub Copilot (powers the LLM)
-The Copilot SDK authenticates via your GitHub account. You need **GitHub Copilot access** (Individual, Business, or Enterprise).
-
-```bash
-# Install GitHub CLI and authenticate
-gh auth login
-
-# Verify Copilot access
-gh copilot --version
-```
-
-The SDK's bundled `copilot` binary handles token exchange automatically.
-
-#### 2. Google Places API (place search & recommendations)
-
-> **Note:** If the Google Places API is unavailable (no key, quota exceeded, auth error), the app automatically falls back to **OpenStreetMap** (Nominatim + Overpass) — so this key is optional but gives richer results.
-
-**Option A — API Key (recommended):**
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project (or select existing)
-3. Enable **Places API (New)**: [Direct link](https://console.cloud.google.com/apis/library/places-backend.googleapis.com)
-4. Go to **APIs & Services → Credentials → Create Credentials → API Key**
-5. Set the key:
-```bash
-export GOOGLE_PLACES_API_KEY="your-key-here"
-```
-
-**Option B — gcloud auth (no API key needed):**
-```bash
-gcloud auth login
-gcloud auth application-default login
-gcloud services enable places-backend.googleapis.com
-
-# The app will auto-detect gcloud credentials and set the quota project.
-# If you get 401/403 errors, tell the assistant "fix auth" and it will
-# call setup_google_auth to enable the API and set the quota project.
-```
-
-### Optional (free, enhance features)
-
-#### 3. OMDB — Movie & TV Reviews
-Free tier: 1,000 requests/day.
-
-1. Go to [omdbapi.com/apikey.aspx](https://www.omdbapi.com/apikey.aspx)
-2. Select **FREE** tier, enter your email
-3. Check email for your API key (check spam if delayed)
-4. Set the key:
-```bash
-export OMDB_API_KEY="your-key-here"
-```
-
-#### 4. RAWG — Video Game Reviews
-Free tier: 20,000 requests/month (non-commercial, requires attribution).
-
-1. Go to [rawg.io/apidocs](https://rawg.io/apidocs)
-2. Click **Get API Key** and create an account
-3. Copy your API key from the dashboard
-4. Set the key:
-```bash
-export RAWG_API_KEY="your-key-here"
-```
-
-### No Key Needed (free, built-in)
-
-These services require **no API key** and work out of the box:
-
-| Service | What it does | Limit |
-|---------|-------------|-------|
-| **OSRM** | Route planning & travel time | 1 req/sec (public demo) |
-| **Open-Meteo** | Weather data & forecasts | Unlimited (non-commercial) |
-| **OpenStreetMap / Nominatim** | Places fallback (text search) | 1 req/sec |
-| **OpenStreetMap / Overpass** | Places fallback (nearby search) | Reasonable use |
-| **DuckDuckGo** | Web search (via `ddgs` library) | Reasonable use |
-| **Semantic Scholar** | Academic paper search | ~100 req/5min |
-| **arXiv** | Preprint search | 1 req/3sec |
-| **ntfy.sh** | Push notifications | Unlimited |
-| **ip-api.com** | IP geolocation fallback | 45 req/min |
-| **Lynx** | Text-mode web browsing | Local (no network limit) |
-| **Selenium + Firefox** | JS-rendered page scraping | Local (rate-limited 3s) |
-| **yt-dlp** | YouTube/video downloads | Local (install separately) |
-
-### Optional CLI Tools
-
-These are used by some tools and should be installed separately:
-
-```bash
-# For yt-dlp_download tool
-pip install yt-dlp
-# or: sudo apt install yt-dlp
-
-# For browse_web tool
-sudo apt install lynx
-```
-
-## Recommended .bashrc / .profile
-
-Add all your keys in one place so they persist:
-
-```bash
-# ~/.bashrc or ~/.profile
-export GOOGLE_PLACES_API_KEY="AIza..."
-export OMDB_API_KEY="abc123..."
-export RAWG_API_KEY="def456..."
-```
-
-Then `source ~/.bashrc` or restart your terminal.
-
-## Usage
-
-```bash
-source .venv/bin/activate
-
-# Curses mode (default, recommended)
-python app.py
-
-# Plain terminal mode
-python app.py --plain
-
-# Single-shot mode
-python app.py "Find me good ramen near me"
-python app.py "Is Elden Ring worth playing?"
-python app.py "Find papers on multi-robot consensus from 2020-2024"
-```
-
-### Interactive Commands
+### Bang Commands
 
 | Command | Action |
 |---------|--------|
-| `preferences` | Open your preferences file in $EDITOR |
-| `profiles` | List available profiles |
-| `saved` | Show saved places |
-| `usage` | Show API usage & costs |
-| `quit` / `exit` / Ctrl+D | Exit the app |
+| `!voice` / `!v` | Toggle voice mode (STT input + TTS output) |
+| `!mode [surf\|coding\|lockin]` | Show or switch tool mode |
+| `!model [provider] [model]` | Show or switch LLM provider/model |
+| `!code` | Toggle coding mode |
+| `!shell` / `!sh` | Toggle shell mode |
+| `!sh <command>` | Run a shell command directly |
+| `usage` | Show session usage & costs |
+| `quit` / `exit` | Exit |
 
-### Example Prompts
+## LLM Providers
 
+| Provider | Env Vars | Default Model |
+|----------|----------|---------------|
+| **ollama** | — (localhost:11434) | qwen3-coder:30b |
+| **openai** | `OPENAI_API_KEY` | gpt-5.1 |
+| **groq** | `GROQ_API_KEY` | llama-3.3-70b-versatile |
+| **gemini** | `GEMINI_API_KEY` | gemini-3-pro-preview |
+| **copilot** | GitHub CLI auth (`gh auth login`) | claude-haiku-4.5 |
+| **llama-server** | — (localhost:8080) | default |
+| **openai-compat** | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | default |
+
+Set provider: `MARVIN_PROVIDER=openai` or `!model openai gpt-4o` at runtime.
+
+## Tool Modes
+
+| Mode | Description |
+|------|-------------|
+| **surf** (default) | All general tools — web, media, notes, places, weather, etc. No file I/O or shell |
+| **coding** | File read/write, git, shell, package management + web reference tools |
+| **lockin** | Coding tools only — no entertainment, no browsing distractions |
+
+## Voice Support
+
+STT (speech-to-text) via **faster-whisper** with CUDA + batched inference. TTS (text-to-speech) via **espeak-ng** with British English voice.
+
+```bash
+# Setup (one-time)
+cd marvin-ts
+uv venv .venv && uv pip install faster-whisper  # STT
+sudo apt install espeak-ng                       # TTS
+sudo apt install alsa-utils                      # arecord for mic input
 ```
-Find the best Thai food near me that delivers
-Is the new Dune movie good?
-Search arXiv for transformer architectures in robotics
-What's the weather like and how long to drive to LAX?
-Save my home address as 123 Main St, Anytown USA
-Set an alarm for 30 minutes — pizza is in the oven
-Create a notification channel for deal alerts
-I'm vegetarian and I don't like spicy food
-Browse the menu at joe's-crab-shack.com
-Write a note about today's meeting in notes/work/meetings.md
-Download that YouTube video as audio
-List my notes
+
+Toggle with `!voice`. Press Ctrl+V to record, press again to stop — transcription is submitted automatically. Responses are spoken aloud when voice mode is on.
+
+## OCR
+
+Extract text from images and PDFs via **OCR.space** API (free tier: 25K pages/month).
+
+```bash
+# Optional: set your own API key for higher limits
+export OCR_SPACE_API_KEY="your-key"
+```
+
+The LLM can call `ocr` on any image/PDF file and will clean up any artifacts.
+
+## Optional API Keys
+
+Most tools work with **zero API keys**. These are optional enhancements:
+
+| Key | What | Free Tier |
+|-----|------|-----------|
+| `GOOGLE_PLACES_API_KEY` | Richer place search (falls back to OSM) | $200/mo credit |
+| `OMDB_API_KEY` | Movie/TV details ([omdbapi.com](https://www.omdbapi.com/apikey.aspx)) | 1,000 req/day |
+| `RAWG_API_KEY` | Game details ([rawg.io](https://rawg.io/apidocs)) | 20,000 req/mo |
+| `GNEWS_API_KEY` | News search ([gnews.io](https://gnews.io)) | 100 req/day |
+| `OCR_SPACE_API_KEY` | OCR ([ocr.space](https://ocr.space)) | 25,000 pages/mo |
+| `SPOTIFY_CLIENT_ID` / `_SECRET` | Spotify playback control | Free |
+
+### No Key Needed (built-in)
+
+| Service | What | Limit |
+|---------|------|-------|
+| DuckDuckGo | Web search | Reasonable use |
+| Lynx | Web page reading (paginated) | Local |
+| Open-Meteo | Weather forecasts | Unlimited |
+| OpenStreetMap | Places fallback | 1 req/sec |
+| OSRM | Route planning & travel time | 1 req/sec |
+| Semantic Scholar / arXiv | Academic paper search | ~100 req/5min |
+| ntfy.sh | Push notifications | Unlimited |
+| ip-api.com | IP geolocation | 45 req/min |
+| yt-dlp | Video downloads | Local |
+| OCR.space | OCR (default key) | 25K pages/mo |
+
+### Optional CLI Tools
+
+```bash
+pip install yt-dlp     # Video downloads
+sudo apt install lynx   # Web browsing (highly recommended)
+sudo apt install espeak-ng  # TTS voice output
 ```
 
 ## Features
 
-- **Session context**: conversation history persists across restarts
-- **Profiles**: per-user preferences, history, saved places, ntfy subscriptions
-- **Auto-restore**: remembers last active profile on startup
-- **History summary**: shows recent queries on launch for context
-- **Timestamps**: each response is timestamped
-- **Usage tracking**: per-session and lifetime cost estimates
+- **107 tools** across web, coding, media, places, weather, notes, calendar, and more
+- **Curses TUI** with colored output, scrolling, status bar, input history, reverse search
+- **Multi-provider LLM** — switch models at runtime with `!model`
+- **Voice I/O** — speech-to-text input (faster-whisper/CUDA) + text-to-speech output (espeak-ng)
+- **OCR** — extract text from images and PDFs
+- **Context compaction** — LLM-powered summarization when context gets full
+- **Web pagination** — browse_web returns 10K chunks with continuation tokens
+- **Session persistence** — conversation history, profiles, preferences survive restarts
+- **Undo** — Ctrl+Z removes last chat message from all stores
+- **Abort** — Escape cancels in-flight LLM responses
+- **Usage tracking** — per-session and lifetime cost estimates
+- **Tool call logging** — debug log in `~/.config/local-finder/profiles/<name>/tool-calls.jsonl`
+- **SSRF protection** — blocks requests to private/internal network addresses
 
-### API Fallback Strategy
-
-The app is designed to work with **zero API keys** for most features:
-
-| Tool | Primary API | Fallback | Key Required? |
-|------|------------|----------|---------------|
-| Places search | Google Places | OpenStreetMap (Nominatim/Overpass) | No (OSM is free) |
-| Travel time | OSRM | — | No |
-| Weather | Open-Meteo | — | No |
-| Web search | DuckDuckGo | — | No |
-| Academic search | Semantic Scholar / arXiv | — | No |
-| Notifications | ntfy.sh | — | No |
-| Movies/TV | OMDB | DuckDuckGo web search | No (DDG is free) |
-| Games | RAWG | DuckDuckGo web search | No (DDG is free) |
-
-### Calendar Reminders
-
-When you add a calendar event, cron jobs are automatically scheduled to send notifications **1 hour** and **30 minutes** before the event via:
-- Desktop notifications (`notify-send`)
-- Push notifications via **ntfy.sh** (auto-creates a `reminders` topic if none exists)
-
-## All Tools (41)
+## All Tools (107)
 
 | Category | Tools |
 |----------|-------|
-| **Location** | `get_my_location` |
-| **Places** | `places_text_search`, `places_nearby_search` (Google → OSM fallback) |
-| **Travel** | `estimate_travel_time`, `estimate_traffic_adjusted_time` |
-| **Search** | `web_search`, `browse_web`, `scrape_page` |
+| **Web** | `web_search`, `search_news`, `browse_web`, `scrape_page` |
+| **Wiki** | `wiki_search`, `wiki_summary`, `wiki_full`, `wiki_grep` |
 | **Academic** | `search_papers`, `search_arxiv` |
-| **Reviews** | `search_movies`, `get_movie_details`, `search_games`, `get_game_details` |
-| **Address Book** | `save_place`, `remove_place`, `list_places` |
+| **Location** | `get_my_location`, `osm_search`, `overpass_query` |
+| **Places** | `places_text_search`, `places_nearby_search`, `setup_google_auth` |
+| **Weather** | `weather_forecast` |
+| **Travel** | `estimate_travel_time`, `get_directions` |
+| **Media** | `search_movies`, `get_movie_details`, `search_games`, `get_game_details` |
+| **Music** | `music_search`, `music_lookup` |
+| **Spotify** | `spotify_auth`, `spotify_search`, `spotify_create_playlist`, `spotify_add_tracks`, `spotify_playback`, `spotify_now_playing` |
+| **Steam** | `steam_search`, `steam_app_details`, `steam_featured`, `steam_player_stats`, `steam_user_games`, `steam_user_summary` |
+| **Downloads** | `download_file`, `yt_dlp_download` |
+| **OCR** | `ocr` |
+| **Notes** | `write_note`, `read_note`, `notes_ls`, `notes_mkdir`, `search_notes` |
+| **Bookmarks** | `bookmark_save`, `bookmark_list`, `bookmark_search` |
+| **Calendar** | `calendar_list_upcoming`, `calendar_add_event`, `calendar_delete_event` |
+| **Alarms & Timers** | `set_alarm`, `list_alarms`, `cancel_alarm`, `timer_start`, `timer_check`, `timer_stop` |
 | **Notifications** | `generate_ntfy_topic`, `ntfy_subscribe`, `ntfy_unsubscribe`, `ntfy_publish`, `ntfy_list` |
-| **Alarms** | `set_alarm`, `list_alarms`, `cancel_alarm` |
-| **Profile** | `switch_profile`, `update_preferences` |
-| **Notes** | `write_note`, `read_note`, `notes_mkdir`, `notes_ls` |
-| **Calendar** | `calendar_add_event`, `calendar_delete_event`, `calendar_view`, `calendar_list_upcoming` |
-| **File Editing** | `file_read_lines`, `file_apply_patch` |
-| **Downloads** | `yt_dlp_download` |
-| **System** | `setup_google_auth`, `get_usage`, `exit_app` |
+| **Recipes** | `recipe_search`, `recipe_lookup` |
+| **Stack Overflow** | `stack_search`, `stack_answers` |
+| **GitHub** | `github_clone`, `github_read_file`, `github_grep` |
+| **Utilities** | `convert_units`, `dictionary_lookup`, `translate_text`, `system_info`, `read_rss` |
+| **Profile** | `switch_profile`, `update_preferences`, `get_usage`, `exit_app` |
+| **Coding** | `set_working_dir`, `read_file`, `create_file`, `append_file`, `apply_patch`, `list_files`, `grep_files`, `find_files`, `review_codebase`, `review_status` |
+| **Git** | `git_status`, `git_diff`, `git_log`, `git_blame`, `git_commit`, `git_branch`, `git_checkout` |
+| **Shell** | `run_command`, `install_packages` |
+| **Blender** | `blender_get_scene`, `blender_get_object`, `blender_create_object`, `blender_modify_object`, `blender_delete_object`, `blender_set_material`, `blender_execute_code`, `blender_screenshot` |
+
+## Architecture
+
+```
+marvin-ts/
+├── src/
+│   ├── main.ts          # CLI entry, REPL loop, slash commands
+│   ├── session.ts       # Session state, compaction, undo
+│   ├── context.ts       # Context budget management
+│   ├── system-prompt.ts # System prompt builder
+│   ├── types.ts         # Shared types
+│   ├── history.ts       # Chat log persistence
+│   ├── usage.ts         # Cost tracking
+│   ├── llm/
+│   │   ├── router.ts    # Tool loop, repairToolPairs
+│   │   ├── openai.ts    # OpenAI-compatible provider
+│   │   ├── ollama.ts    # Ollama provider
+│   │   ├── copilot.ts   # GitHub Copilot provider
+│   │   └── llama-server.ts
+│   ├── ui/
+│   │   ├── curses.ts    # neo-blessed TUI
+│   │   ├── plain.ts     # readline UI
+│   │   └── shared.ts    # UI interface
+│   ├── tools/           # 35 tool modules
+│   ├── voice/
+│   │   ├── voice.ts     # STT/TTS orchestration
+│   │   └── stt.py       # faster-whisper Python helper
+│   └── profiles/
+│       └── manager.ts   # Profile & preferences management
+├── .venv/               # Python venv (faster-whisper for STT)
+└── dist/                # Compiled JS output
+```

@@ -16,6 +16,7 @@ import { OllamaProvider } from './llm/ollama.js';
 import { CopilotProvider } from './llm/copilot.js';
 import { LlamaServerProvider } from './llm/llama-server.js';
 import { transcribe, speak, stopSpeaking, hasTTS, hasSTT } from './voice/voice.js';
+import { createCopilotAcpSession, type CopilotAcpSession } from './llm/copilot-acp.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -99,7 +100,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
 }
 
 // Known slash commands
-const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro', '!model', '!mode']);
+const KNOWN_BANG_COMMANDS = new Set(['!code', '!shell', '!sh', '!voice', '!v', '!blender', '!pro', '!model', '!mode', '!copilot']);
 const KEYWORD_COMMANDS = new Set(['quit', 'exit', 'preferences', 'profiles', 'usage', 'saved']);
 
 export interface SlashCommandContext {
@@ -115,6 +116,7 @@ export interface SlashCommandContext {
   };
   ui: UI;
   voiceState?: { enabled: boolean };
+  copilotAcp: { session: CopilotAcpSession | null; active: boolean };
 }
 
 /**
@@ -191,6 +193,39 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
     } catch (err) {
       ctx.ui.displayError(`Shell command failed: ${(err as Error).message}`);
     }
+    return true;
+  }
+
+  // !copilot — toggle copilot ACP mode
+  if (trimmed === '!copilot' || trimmed.startsWith('!copilot ')) {
+    const arg = trimmed.slice(8).trim();
+    const cop = ctx.copilotAcp;
+    if (arg === 'off' || (cop.active && !arg)) {
+      // Turn off
+      cop.active = false;
+      cop.session?.destroy();
+      cop.session = null;
+      ctx.ui.displaySystem('🤖 Copilot mode OFF — back to Marvin');
+      return true;
+    }
+    // Turn on (optionally with model override: !copilot claude-sonnet-4.5)
+    const model = arg || undefined;
+    if (cop.active && cop.session?.ready) {
+      ctx.ui.displaySystem(`🤖 Copilot mode already active${model ? ` (restart with !copilot off first)` : ''}`);
+      return true;
+    }
+    ctx.ui.displaySystem(`🤖 Connecting to Copilot CLI via ACP (${model ?? 'claude-opus-4.6'})…`);
+    createCopilotAcpSession({ model, cwd: process.cwd(), allowAll: true })
+      .then(session => {
+        cop.session = session;
+        cop.active = true;
+        ctx.ui.displaySystem('🤖 Copilot mode ON — all input forwarded to Copilot CLI. Use !copilot off to return.');
+      })
+      .catch(err => {
+        ctx.ui.displayError(`Failed to start Copilot ACP: ${(err as Error).message}`);
+        cop.active = false;
+        cop.session = null;
+      });
     return true;
   }
 
@@ -449,10 +484,17 @@ export async function main(): Promise<void> {
   // Voice state — shared between slash commands and curses callbacks
   const voiceState = { enabled: false };
 
+  // Copilot ACP mode state
+  const copilotAcp: { session: CopilotAcpSession | null; active: boolean } = {
+    session: null,
+    active: false,
+  };
+
   const slashCtx: SlashCommandContext = {
     session,
     ui,
     voiceState,
+    copilotAcp,
   };
 
   // Wire Ctrl+Z undo for curses UI
@@ -512,6 +554,7 @@ export async function main(): Promise<void> {
   // Signal handling — register BEFORE the REPL so Ctrl+C works during conversation
   const cleanup = () => {
     stopSpeaking();
+    copilotAcp.session?.destroy();
     session.destroy().catch(() => {});
     ui.destroy();
     process.exit(0);
@@ -539,6 +582,17 @@ export async function main(): Promise<void> {
     ui.displayMessage('user', input);
     // Persist input to history file
     try { appendFileSync(join(profile.profileDir, 'history'), input + '\n'); } catch { /* ignore */ }
+
+    // Copilot ACP mode — forward to copilot-cli instead of Marvin's LLM
+    if (copilotAcp.active && copilotAcp.session?.ready) {
+      const callbacks = makeStreamCallbacks(ui, voiceState.enabled);
+      ui.beginStream();
+      try {
+        await copilotAcp.session.prompt(input, callbacks);
+      } catch { /* error reported via callbacks.onError */ }
+      continue;
+    }
+
     const callbacks = makeStreamCallbacks(ui, voiceState.enabled);
     ui.beginStream();
     try {
@@ -548,6 +602,9 @@ export async function main(): Promise<void> {
     }
     refreshStatus(ui, session, providerConfig);
   }
+
+  // Cleanup copilot ACP session on exit
+  copilotAcp.session?.destroy();
 
   await session.destroy();
   ui.destroy();

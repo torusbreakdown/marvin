@@ -208,14 +208,16 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
       ctx.ui.displaySystem('🤖 Copilot mode OFF — back to Marvin');
       return true;
     }
-    // Turn on (optionally with model override: !copilot claude-sonnet-4.5)
-    const model = arg || undefined;
+    // Turn on: !copilot [model] [directory]
+    const parts = arg.split(/\s+/);
+    const model = parts[0] || undefined;
+    const cwd = parts[1] || process.cwd();
     if (cop.active && cop.session?.ready) {
-      ctx.ui.displaySystem(`🤖 Copilot mode already active${model ? ` (restart with !copilot off first)` : ''}`);
+      ctx.ui.displaySystem(`🤖 Copilot mode already active${arg ? ` (restart with !copilot off first)` : ''}`);
       return true;
     }
-    ctx.ui.displaySystem(`🤖 Connecting to Copilot CLI via ACP (${model ?? 'claude-opus-4.6'})…`);
-    createCopilotAcpSession({ model, cwd: process.cwd(), allowAll: true })
+    ctx.ui.displaySystem(`🤖 Connecting to Copilot CLI via ACP (${model ?? 'claude-opus-4.6'}) in ${cwd}…`);
+    createCopilotAcpSession({ model, cwd, allowAll: true })
       .then(session => {
         cop.session = session;
         cop.active = true;

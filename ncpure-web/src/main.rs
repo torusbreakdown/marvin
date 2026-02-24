@@ -39,12 +39,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CorsLayer::permissive())
         .with_state(app_state.clone());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.port));
+    let addr = SocketAddr::from((config.bind, config.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_port = listener.local_addr()?.port();
 
     let url = format!("http://localhost:{}", actual_port);
     eprintln!("ncpure-web listening at {}", url);
+
+    // Show LAN-accessible addresses when binding to 0.0.0.0
+    if config.bind.is_unspecified() {
+        if let Ok(hostname) = std::process::Command::new("hostname").arg("-I").output() {
+            let ips = String::from_utf8_lossy(&hostname.stdout);
+            for ip in ips.split_whitespace().take(3) {
+                eprintln!("  LAN: http://{}:{}", ip.trim(), actual_port);
+            }
+        }
+    }
 
     // Open browser (best-effort)
     let _ = open::that(&url);

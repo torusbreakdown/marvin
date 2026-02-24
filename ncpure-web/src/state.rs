@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub port: u16,
+    pub bind: std::net::IpAddr,
     pub data_dir: PathBuf,
     pub images_dir: PathBuf,
     pub boards_dir: PathBuf,
@@ -23,6 +24,7 @@ impl Config {
         let config_path = data_dir.join("config.toml");
 
         let mut port: u16 = 9850;
+        let mut bind: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED); // 0.0.0.0
         let mut ai_bridge_url: Option<String> = None;
 
         if config_path.exists() {
@@ -31,6 +33,9 @@ impl Config {
             if let Some(p) = table.get("port").and_then(|v| v.as_integer()) {
                 port = p as u16;
             }
+            if let Some(b) = table.get("bind").and_then(|v| v.as_str()) {
+                bind = b.parse().unwrap_or(bind);
+            }
             if let Some(u) = table.get("ai_bridge_url").and_then(|v| v.as_str()) {
                 ai_bridge_url = Some(u.to_string());
             }
@@ -38,6 +43,7 @@ impl Config {
 
         Ok(Config {
             port,
+            bind,
             images_dir: data_dir.join("images"),
             boards_dir: data_dir.join("boards"),
             data_dir,

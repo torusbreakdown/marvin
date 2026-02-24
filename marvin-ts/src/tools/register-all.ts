@@ -12,6 +12,7 @@ import { registerFilesNotesTools } from './files-notes.js';
 import { registerFilesTools } from './files.js';
 import { registerGitTools } from './git.js';
 import { registerGithubTools } from './github.js';
+import { registerImageGenTools } from './image-gen.js';
 import { registerLocationTools } from './location.js';
 import { registerMapsTools } from './maps.js';
 import { registerMediaTools } from './media.js';
@@ -56,6 +57,7 @@ export function registerAllTools(registry: ToolRegistry, options: RegisterAllToo
   registerFilesTools(registry);
   registerGitTools(registry);
   registerGithubTools(registry);
+  registerImageGenTools(registry);
   registerLocationTools(registry);
   registerMapsTools(registry);
   registerMediaTools(registry);

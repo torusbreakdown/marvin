@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ncpure — Reference Board</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #1e1e1e; color: #ccc; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    #canvas { display: block; cursor: grab; }
+    #canvas.dragging { cursor: grabbing; }
+    #canvas.moving-image { cursor: move; }
+
+    #toolbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 40px;
+      background: rgba(30, 30, 30, 0.95); border-bottom: 1px solid #333;
+      display: flex; align-items: center; padding: 0 12px; gap: 8px; z-index: 100;
+    }
+    #toolbar.hidden { display: none; }
+    #toolbar button {
+      background: #333; color: #ccc; border: 1px solid #555; border-radius: 4px;
+      padding: 4px 10px; cursor: pointer; font-size: 12px;
+    }
+    #toolbar button:hover { background: #444; }
+    #search-input {
+      flex: 1; max-width: 400px; padding: 5px 10px; border-radius: 4px;
+      background: #2a2a2a; border: 1px solid #444; color: #eee; font-size: 13px;
+    }
+    #search-input::placeholder { color: #666; }
+    #status { margin-left: auto; font-size: 11px; color: #666; }
+
+    #context-menu {
+      display: none; position: fixed; background: #2a2a2a; border: 1px solid #444;
+      border-radius: 6px; padding: 4px 0; min-width: 160px; z-index: 200;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    #context-menu.visible { display: block; }
+    #context-menu div {
+      padding: 6px 16px; cursor: pointer; font-size: 13px;
+    }
+    #context-menu div:hover { background: #3a3a3a; }
+    #context-menu div.danger { color: #e55; }
+
+    #drop-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,100,255,0.15);
+      border: 3px dashed #4af; z-index: 300; pointer-events: none;
+      align-items: center; justify-content: center; font-size: 24px; color: #4af;
+    }
+    #drop-overlay.visible { display: flex; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="btn-new" title="New Board (Ctrl+N)">New</button>
+    <button id="btn-import" title="Import Image (Ctrl+O)">Import</button>
+    <input id="search-input" type="text" placeholder="Search images… (Ctrl+F)" />
+    <span id="status">ncpure</span>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div id="context-menu">
+    <div data-action="delete" class="danger">Delete</div>
+    <div data-action="bring-front">Bring to Front</div>
+    <div data-action="send-back">Send to Back</div>
+    <div data-action="copy-path">Copy Path</div>
+  </div>
+  <div id="drop-overlay">Drop images here</div>
+  <input id="file-input" type="file" accept="image/*" multiple style="display:none" />
+
+  <script>
+    const API = '';
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const toolbar = document.getElementById('toolbar');
+    const searchInput = document.getElementById('search-input');
+    const statusEl = document.getElementById('status');
+    const ctxMenu = document.getElementById('context-menu');
+    const dropOverlay = document.getElementById('drop-overlay');
+    const fileInput = document.getElementById('file-input');
+
+    // ── State ───────────────────────────────────────────────────
+    let viewport = { x: 0, y: 0, zoom: 1.0 };
+    let images = new Map();        // id -> { ref, img, loaded, width, height }
+    let selected = new Set();
+    let toolbarVisible = true;
+    let dragging = null;           // { type: 'pan' | 'image' | 'select', ... }
+    let contextTarget = null;
+
+    // ── Canvas sizing ───────────────────────────────────────────
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      render();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── Coordinate transforms ───────────────────────────────────
+    function screenToWorld(sx, sy) {
+      return {
+        x: (sx - viewport.x) / viewport.zoom,
+        y: (sy - viewport.y) / viewport.zoom,
+      };
+    }
+    function worldToScreen(wx, wy) {
+      return {
+        x: wx * viewport.zoom + viewport.x,
+        y: wy * viewport.zoom + viewport.y,
+      };
+    }
+
+    // ── Rendering ───────────────────────────────────────────────
+    function render() {
+      ctx.fillStyle = '#2a2a2a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      drawGrid();
+
+      const sorted = [...images.values()].sort((a, b) => (a.ref.z_index || 0) - (b.ref.z_index || 0));
+      for (const entry of sorted) {
+        drawImage(entry);
+      }
+
+      // Selection rubber-band
+      if (dragging?.type === 'select') {
+        ctx.strokeStyle = '#4af';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        const x = Math.min(dragging.startX, dragging.curX);
+        const y = Math.min(dragging.startY, dragging.curY);
+        const w = Math.abs(dragging.curX - dragging.startX);
+        const h = Math.abs(dragging.curY - dragging.startY);
+        ctx.strokeRect(x, y, w, h);
+        ctx.setLineDash([]);
+      }
+    }
+
+    function drawGrid() {
+      if (viewport.zoom < 0.3) return;
+      const gridSize = 100 * viewport.zoom;
+      ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+      ctx.lineWidth = 1;
+      const offX = viewport.x % gridSize;
+      const offY = viewport.y % gridSize;
+      for (let x = offX; x < canvas.width; x += gridSize) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+      }
+      for (let y = offY; y < canvas.height; y += gridSize) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+      }
+    }
+
+    function drawImage(entry) {
+      const ref = entry.ref;
+      const s = worldToScreen(ref.position.x, ref.position.y);
+      const w = (entry.width || 200) * ref.scale * viewport.zoom;
+      const h = (entry.height || 200) * ref.scale * viewport.zoom;
+
+      ctx.globalAlpha = ref.opacity ?? 1.0;
+
+      if (entry.loaded && entry.img) {
+        ctx.drawImage(entry.img, s.x, s.y, w, h);
+      } else {
+        ctx.fillStyle = '#333';
+        ctx.fillRect(s.x, s.y, w, h);
+        ctx.fillStyle = '#666';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('Loading…', s.x + 8, s.y + 20);
+      }
+
+      if (selected.has(ref.id)) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#4af';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(s.x - 1, s.y - 1, w + 2, h + 2);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Image loading ───────────────────────────────────────────
+    function loadImageElement(entry) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        entry.img = img;
+        entry.loaded = true;
+        entry.width = img.naturalWidth;
+        entry.height = img.naturalHeight;
+        render();
+      };
+      img.onerror = () => { entry.loaded = false; };
+      img.src = `${API}/api/images/${entry.ref.id}/file`;
+    }
+
+    // ── Data loading ────────────────────────────────────────────
+    async function loadImages() {
+      try {
+        const resp = await fetch(`${API}/api/images`);
+        const refs = await resp.json();
+        images.clear();
+        for (const ref of refs) {
+          const entry = { ref, img: null, loaded: false, width: 200, height: 200 };
+          images.set(ref.id, entry);
+          loadImageElement(entry);
+        }
+        statusEl.textContent = `${refs.length} images`;
+        render();
+      } catch (e) {
+        statusEl.textContent = 'Error loading images';
+      }
+    }
+
+    // ── Hit testing ─────────────────────────────────────────────
+    function hitTest(sx, sy) {
+      const sorted = [...images.values()].sort((a, b) => (b.ref.z_index || 0) - (a.ref.z_index || 0));
+      for (const entry of sorted) {
+        const s = worldToScreen(entry.ref.position.x, entry.ref.position.y);
+        const w = (entry.width || 200) * entry.ref.scale * viewport.zoom;
+        const h = (entry.height || 200) * entry.ref.scale * viewport.zoom;
+        if (sx >= s.x && sx <= s.x + w && sy >= s.y && sy <= s.y + h) {
+          return entry;
+        }
+      }
+      return null;
+    }
+
+    // ── Mouse events ────────────────────────────────────────────
+    canvas.addEventListener('mousedown', (e) => {
+      ctxMenu.classList.remove('visible');
+
+      if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+        // Middle click or shift+left = pan
+        dragging = { type: 'pan', startX: e.clientX, startY: e.clientY, vpX: viewport.x, vpY: viewport.y };
+        canvas.classList.add('dragging');
+        return;
+      }
+
+      if (e.button === 0) {
+        const hit = hitTest(e.clientX, e.clientY);
+        if (hit) {
+          if (!e.ctrlKey) selected.clear();
+          selected.add(hit.ref.id);
+          dragging = {
+            type: 'image', id: hit.ref.id,
+            startX: e.clientX, startY: e.clientY,
+            origX: hit.ref.position.x, origY: hit.ref.position.y,
+          };
+          canvas.classList.add('moving-image');
+        } else {
+          if (!e.ctrlKey) selected.clear();
+          dragging = { type: 'select', startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY };
+        }
+        render();
+      }
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      if (dragging.type === 'pan') {
+        viewport.x = dragging.vpX + (e.clientX - dragging.startX);
+        viewport.y = dragging.vpY + (e.clientY - dragging.startY);
+        render();
+      } else if (dragging.type === 'image') {
+        const entry = images.get(dragging.id);
+        if (entry) {
+          const dx = (e.clientX - dragging.startX) / viewport.zoom;
+          const dy = (e.clientY - dragging.startY) / viewport.zoom;
+          entry.ref.position.x = dragging.origX + dx;
+          entry.ref.position.y = dragging.origY + dy;
+          render();
+        }
+      } else if (dragging.type === 'select') {
+        dragging.curX = e.clientX;
+        dragging.curY = e.clientY;
+        render();
+      }
+    });
+
+    canvas.addEventListener('mouseup', async (e) => {
+      if (dragging?.type === 'image') {
+        const entry = images.get(dragging.id);
+        if (entry) {
+          await fetch(`${API}/api/images/${entry.ref.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: entry.ref.position }),
+          });
+        }
+      } else if (dragging?.type === 'select') {
+        // Select images inside rubber band
+        const x1 = Math.min(dragging.startX, dragging.curX);
+        const y1 = Math.min(dragging.startY, dragging.curY);
+        const x2 = Math.max(dragging.startX, dragging.curX);
+        const y2 = Math.max(dragging.startY, dragging.curY);
+        for (const entry of images.values()) {
+          const s = worldToScreen(entry.ref.position.x, entry.ref.position.y);
+          if (s.x >= x1 && s.y >= y1 && s.x <= x2 && s.y <= y2) {
+            selected.add(entry.ref.id);
+          }
+        }
+      }
+      dragging = null;
+      canvas.classList.remove('dragging', 'moving-image');
+      render();
+    });
+
+    // ── Zoom ────────────────────────────────────────────────────
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+      const newZoom = Math.max(0.05, Math.min(10, viewport.zoom * zoomFactor));
+      // Zoom toward cursor
+      viewport.x = e.clientX - (e.clientX - viewport.x) * (newZoom / viewport.zoom);
+      viewport.y = e.clientY - (e.clientY - viewport.y) * (newZoom / viewport.zoom);
+      viewport.zoom = newZoom;
+      render();
+    }, { passive: false });
+
+    // ── Context menu ────────────────────────────────────────────
+    canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const hit = hitTest(e.clientX, e.clientY);
+      if (hit) {
+        contextTarget = hit;
+        selected.add(hit.ref.id);
+        ctxMenu.style.left = e.clientX + 'px';
+        ctxMenu.style.top = e.clientY + 'px';
+        ctxMenu.classList.add('visible');
+        render();
+      }
+    });
+
+    ctxMenu.addEventListener('click', async (e) => {
+      const action = e.target.dataset.action;
+      if (!action || !contextTarget) return;
+      ctxMenu.classList.remove('visible');
+
+      if (action === 'delete') {
+        await fetch(`${API}/api/images/${contextTarget.ref.id}`, { method: 'DELETE' });
+        images.delete(contextTarget.ref.id);
+        selected.delete(contextTarget.ref.id);
+        render();
+      } else if (action === 'bring-front') {
+        const maxZ = Math.max(...[...images.values()].map(e => e.ref.z_index || 0));
+        contextTarget.ref.z_index = maxZ + 1;
+        await fetch(`${API}/api/images/${contextTarget.ref.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ z_index: contextTarget.ref.z_index }),
+        });
+        render();
+      } else if (action === 'send-back') {
+        const minZ = Math.min(...[...images.values()].map(e => e.ref.z_index || 0));
+        contextTarget.ref.z_index = minZ - 1;
+        await fetch(`${API}/api/images/${contextTarget.ref.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ z_index: contextTarget.ref.z_index }),
+        });
+        render();
+      } else if (action === 'copy-path') {
+        navigator.clipboard.writeText(contextTarget.ref.local_path);
+      }
+      contextTarget = null;
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!ctxMenu.contains(e.target)) ctxMenu.classList.remove('visible');
+    });
+
+    // ── Keyboard shortcuts ──────────────────────────────────────
+    document.addEventListener('keydown', async (e) => {
+      if (e.target === searchInput) return;
+
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        toolbarVisible = !toolbarVisible;
+        toolbar.classList.toggle('hidden', !toolbarVisible);
+        resize();
+      }
+      if (e.key === 'Delete') {
+        for (const id of selected) {
+          await fetch(`${API}/api/images/${id}`, { method: 'DELETE' });
+          images.delete(id);
+        }
+        selected.clear();
+        render();
+      }
+      if (e.ctrlKey && e.key === 'f') {
+        e.preventDefault();
+        searchInput.focus();
+      }
+      if (e.ctrlKey && e.key === 'o') {
+        e.preventDefault();
+        fileInput.click();
+      }
+      if (e.key === 'F11') {
+        e.preventDefault();
+        document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+      }
+    });
+
+    // ── File import ─────────────────────────────────────────────
+    fileInput.addEventListener('change', async () => {
+      for (const file of fileInput.files) {
+        const form = new FormData();
+        form.append('file', file);
+        const resp = await fetch(`${API}/api/images/upload`, { method: 'POST', body: form });
+        if (resp.ok) {
+          const ref = await resp.json();
+          const entry = { ref, img: null, loaded: false, width: 200, height: 200 };
+          images.set(ref.id, entry);
+          loadImageElement(entry);
+        }
+      }
+      fileInput.value = '';
+      render();
+    });
+
+    // ── Drag & Drop ─────────────────────────────────────────────
+    document.addEventListener('dragover', (e) => { e.preventDefault(); dropOverlay.classList.add('visible'); });
+    document.addEventListener('dragleave', (e) => { if (e.relatedTarget === null) dropOverlay.classList.remove('visible'); });
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropOverlay.classList.remove('visible');
+      for (const file of e.dataTransfer.files) {
+        if (!file.type.startsWith('image/')) continue;
+        const form = new FormData();
+        form.append('file', file);
+        const resp = await fetch(`${API}/api/images/upload`, { method: 'POST', body: form });
+        if (resp.ok) {
+          const ref = await resp.json();
+          // Place near drop location
+          const world = screenToWorld(e.clientX, e.clientY);
+          ref.position = world;
+          const entry = { ref, img: null, loaded: false, width: 200, height: 200 };
+          images.set(ref.id, entry);
+          loadImageElement(entry);
+          await fetch(`${API}/api/images/${ref.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: world }),
+          });
+        }
+      }
+      render();
+    });
+
+    // ── Search ──────────────────────────────────────────────────
+    searchInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') {
+        const q = searchInput.value.trim();
+        if (!q) { loadImages(); return; }
+        const resp = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}`);
+        const results = await resp.json();
+        // Highlight matching images
+        selected.clear();
+        for (const r of results) selected.add(r.id);
+        statusEl.textContent = `${results.length} matches`;
+        render();
+      }
+      if (e.key === 'Escape') { searchInput.blur(); }
+    });
+
+    // ── Toolbar buttons ─────────────────────────────────────────
+    document.getElementById('btn-new').addEventListener('click', async () => {
+      const name = prompt('Board name:');
+      if (name) {
+        await fetch(`${API}/api/boards`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        loadImages();
+      }
+    });
+    document.getElementById('btn-import').addEventListener('click', () => fileInput.click());
+
+    // ── WebSocket ───────────────────────────────────────────────
+    function connectWS() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'image_added') {
+            const ref = msg.payload;
+            const entry = { ref, img: null, loaded: false, width: 200, height: 200 };
+            images.set(ref.id, entry);
+            loadImageElement(entry);
+            statusEl.textContent = `${images.size} images`;
+          } else if (msg.type === 'image_removed') {
+            images.delete(msg.payload.id);
+            selected.delete(msg.payload.id);
+            statusEl.textContent = `${images.size} images`;
+          } else if (msg.type === 'image_updated') {
+            const existing = images.get(msg.payload.id);
+            if (existing) Object.assign(existing.ref, msg.payload);
+          } else if (msg.type === 'board_loaded') {
+            loadImages();
+          }
+          render();
+        } catch {}
+      };
+      ws.onclose = () => setTimeout(connectWS, 2000);
+      ws.onerror = () => ws.close();
+    }
+    connectWS();
+
+    // ── Init ────────────────────────────────────────────────────
+    loadImages();
+  </script>
+</body>
+</html>

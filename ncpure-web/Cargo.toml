@@ -1,0 +1,19 @@
+[package]
+name = "ncpure-web"
+version = "0.1.0"
+edition = "2024"
+description = "Open source PureRef alternative — infinite canvas reference board with web interface"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+notify = "7"
+open = "5"
+toml = "0.8"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }

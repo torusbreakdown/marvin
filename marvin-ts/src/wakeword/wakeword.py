@@ -164,7 +164,7 @@ def query_marvin_headless(prompt: str) -> str | None:
 
 
 def speak_text(text: str):
-    """Speak text using espeak-ng piped through aplay to the output device (blocking)."""
+    """Speak text using tts.py (Kokoro with Marvin voice, falls back to espeak-ng)."""
     output_device = os.environ.get("MARVIN_PLAYBACK_DEVICE", "")
     if not output_device:
         # Auto-detect USB sound card (not ReSpeaker, not HDMI)
@@ -179,22 +179,16 @@ def speak_text(text: str):
         except Exception:
             pass
     try:
+        tts_script = os.path.join(os.path.dirname(__file__), "..", "voice", "tts.py")
+        tts_python = os.path.join(os.path.dirname(__file__), "..", "..", ".tts-venv", "bin", "python")
+        if not os.path.isfile(tts_python):
+            tts_python = "python3"
+        cmd = [tts_python, tts_script, "--text", text]
         if output_device:
-            # Pipe espeak WAV through aplay on the chosen device
-            espeak = subprocess.Popen(
-                ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", "--stdout", text],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["aplay", "-D", output_device],
-                stdin=espeak.stdout, timeout=120, stderr=subprocess.DEVNULL,
-            )
-            espeak.wait()
-        else:
-            subprocess.run(
-                ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", text],
-                timeout=120,
-            )
+            cmd.extend(["--device", output_device])
+        env = os.environ.copy()
+        env["LD_PRELOAD"] = "/usr/lib/x86_64-linux-gnu/libstdc++.so.6"
+        subprocess.run(cmd, env=env, timeout=120, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
         log.error("espeak-ng not found — cannot speak response")
     except Exception as e:

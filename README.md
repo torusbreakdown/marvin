@@ -1,6 +1,6 @@
 # Marvin
 
-A multi-tool conversational CLI assistant with 107 tools. Searches the web, browses pages, downloads videos, writes code, manages files, checks weather, finds places, plays music, takes notes, does OCR, and more — all from one terminal interface.
+A multi-tool conversational CLI assistant with 108 tools. Searches the web, browses pages, downloads videos, writes code, manages files, checks weather, finds places, plays music, takes notes, does OCR, transcribes audio, and more — all from one terminal interface.
 
 Built in TypeScript (Node.js). Supports multiple LLM providers: Ollama (local), OpenAI, Groq, Gemini, GitHub Copilot, and any OpenAI-compatible API.
 
@@ -91,10 +91,10 @@ Full voice pipeline: STT (speech-to-text) via **faster-whisper** (large-v3 on CU
 
 | Backend | Speed | Quality | Notes |
 |---------|-------|---------|-------|
-| **Piper** (default) | ⚡ Sub-second | Good | Local ONNX model, British RP voice (en_GB-alan-medium) |
+| **Kokoro** (primary) | ⚡ ~0.6s | Excellent | 82M param PyTorch model, British male voice (bm_lewis), fine-tuned on Rickman+Marvin2 audio. GPU required |
+| **Piper** | ⚡ Sub-second | Good | Local ONNX model, British RP voice (en_GB-alan-medium) |
 | **espeak-ng** | ⚡ Instant | Robotic | Built-in fallback, British English |
 | **XTTS-v2** | 🐢 ~5-8s | Excellent | Voice cloning from reference WAV, GPU required |
-| **ElevenLabs** | 🌐 ~2-3s | Excellent | Cloud API, requires paid plan |
 
 ### Setup
 
@@ -107,7 +107,11 @@ uv venv .venv && uv pip install faster-whisper
 # TTS — espeak-ng (always available as fallback)
 sudo apt install espeak-ng
 
-# TTS — Piper (fast, recommended)
+# TTS — Kokoro (fast, high quality, recommended)
+uv pip install --python .tts-venv/bin/python kokoro soundfile
+# Fine-tuned voice + model weights in /data/marvin-tts/kokoro-finetune/
+
+# TTS — Piper (fallback)
 uv pip install --python .tts-venv/bin/python piper-tts
 # Models stored in /data/marvin-tts/piper/
 
@@ -178,10 +182,10 @@ sudo apt install espeak-ng  # TTS voice output
 
 ## Features
 
-- **107 tools** across web, coding, media, places, weather, notes, calendar, and more
+- **108 tools** across web, coding, media, places, weather, notes, calendar, transcription, and more
 - **Curses TUI** with colored output, scrolling, status bar, input history, reverse search
 - **Multi-provider LLM** — switch models at runtime with `!model`
-- **Voice I/O** — speech-to-text (faster-whisper large-v3/CUDA) + multi-backend TTS (Piper, espeak-ng, XTTS-v2, ElevenLabs)
+- **Voice I/O** — speech-to-text (faster-whisper large-v3/CUDA) + multi-backend TTS (Kokoro, Piper, espeak-ng, XTTS-v2)
 - **Wake word** — "Hey Marvin" hands-free activation via openWakeWord (systemd service)
 - **OCR** — extract text from images and PDFs
 - **Context compaction** — LLM-powered summarization when context gets full
@@ -193,7 +197,7 @@ sudo apt install espeak-ng  # TTS voice output
 - **Tool call logging** — debug log in `~/.config/local-finder/profiles/<name>/tool-calls.jsonl`
 - **SSRF protection** — blocks requests to private/internal network addresses
 
-## All Tools (107)
+## All Tools (108)
 
 | Category | Tools |
 |----------|-------|
@@ -210,6 +214,7 @@ sudo apt install espeak-ng  # TTS voice output
 | **Steam** | `steam_search`, `steam_app_details`, `steam_featured`, `steam_player_stats`, `steam_user_games`, `steam_user_summary` |
 | **Downloads** | `download_file`, `yt_dlp_download` |
 | **OCR** | `ocr` |
+| **Transcription** | `transcribe_audio` |
 | **Notes** | `write_note`, `read_note`, `notes_ls`, `notes_mkdir`, `search_notes` |
 | **Bookmarks** | `bookmark_save`, `bookmark_list`, `bookmark_search` |
 | **Calendar** | `calendar_list_upcoming`, `calendar_add_event`, `calendar_delete_event` |
@@ -248,11 +253,11 @@ src/
 │   ├── curses.ts    # neo-blessed TUI
 │   ├── plain.ts     # readline UI
 │   └── shared.ts    # UI interface
-├── tools/           # 35 tool modules (107 tools)
+├── tools/           # 36 tool modules (108 tools)
 ├── voice/
 │   ├── voice.ts     # STT/TTS orchestration
 │   ├── stt.py       # faster-whisper Python helper
-│   └── tts.py       # Multi-backend TTS (Piper, espeak-ng, XTTS-v2, ElevenLabs)
+│   └── tts.py       # Multi-backend TTS (Kokoro, Piper, espeak-ng, XTTS-v2)
 ├── wakeword/
 │   ├── wakeword.py  # Wake word detector ("Hey Marvin")
 │   └── train-model.sh # Custom wake word model training

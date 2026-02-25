@@ -31,6 +31,7 @@ import { registerSystemTools } from './system.js';
 import { registerTicketsTools } from './tickets.js';
 import { registerTimersTools } from './timers.js';
 import { registerTravelTools } from './travel.js';
+import { registerTranscribeTools } from './transcribe.js';
 import { registerUtilitiesTools } from './utilities.js';
 import { registerWeatherTools } from './weather.js';
 import { registerWebTools } from './web.js';
@@ -75,6 +76,7 @@ export function registerAllTools(registry: ToolRegistry, options: RegisterAllToo
   registerSystemTools(registry, options);
   registerTicketsTools(registry);
   registerTimersTools(registry);
+  registerTranscribeTools(registry);
   registerTravelTools(registry);
   registerUtilitiesTools(registry);
   registerWeatherTools(registry);

@@ -14,7 +14,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="$SCRIPT_DIR/training"
 MODEL_NAME="hey_marvin"
-VENV_DIR="$SCRIPT_DIR/../../.venv"
+# Training needs Python ≤3.12 for piper-phonemize; use a separate venv
+TRAIN_VENV="$WORK_DIR/.venv"
 
 echo "=== openWakeWord 'Hey Marvin' Model Training ==="
 echo "Work dir: $WORK_DIR"
@@ -25,11 +26,11 @@ cd "$WORK_DIR"
 
 # ── 1. Set up venv with training dependencies ──
 echo "[1/6] Installing training dependencies…"
-if [ ! -d "$VENV_DIR" ]; then
-    uv venv "$VENV_DIR"
+if [ ! -d "$TRAIN_VENV" ]; then
+    echo "Creating Python 3.11 training venv…"
+    uv venv --python python3.11 "$TRAIN_VENV"
 fi
-PYTHON="$VENV_DIR/bin/python"
-PIP="$VENV_DIR/bin/pip"
+PYTHON="$TRAIN_VENV/bin/python"
 
 uv pip install --python "$PYTHON" \
     openwakeword \

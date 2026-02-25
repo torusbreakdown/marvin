@@ -85,17 +85,49 @@ Set provider: `MARVIN_PROVIDER=openai` or `!model openai gpt-4o` at runtime.
 
 ## Voice Support
 
-STT (speech-to-text) via **faster-whisper** with CUDA + batched inference. TTS (text-to-speech) via **espeak-ng** with British English voice.
+Full voice pipeline: STT (speech-to-text) via **faster-whisper** (large-v3 on CUDA), TTS (text-to-speech) with multiple backends, and **wake word** detection ("Hey Marvin") via **openWakeWord**.
+
+### TTS Backends
+
+| Backend | Speed | Quality | Notes |
+|---------|-------|---------|-------|
+| **Piper** (default) | ⚡ Sub-second | Good | Local ONNX model, British RP voice (en_GB-alan-medium) |
+| **espeak-ng** | ⚡ Instant | Robotic | Built-in fallback, British English |
+| **XTTS-v2** | 🐢 ~5-8s | Excellent | Voice cloning from reference WAV, GPU required |
+| **ElevenLabs** | 🌐 ~2-3s | Excellent | Cloud API, requires paid plan |
+
+### Setup
 
 ```bash
-# Setup (one-time)
 cd marvin-ts
-uv venv .venv && uv pip install faster-whisper  # STT
-sudo apt install espeak-ng                       # TTS
-sudo apt install alsa-utils                      # arecord for mic input
+
+# STT (speech-to-text)
+uv venv .venv && uv pip install faster-whisper
+
+# TTS — espeak-ng (always available as fallback)
+sudo apt install espeak-ng
+
+# TTS — Piper (fast, recommended)
+uv pip install --python .tts-venv/bin/python piper-tts
+# Models stored in /data/marvin-tts/piper/
+
+# Audio I/O
+sudo apt install alsa-utils  # arecord/aplay for mic/speaker
 ```
 
-Toggle with `!voice`. Press Ctrl+V to record, press again to stop — transcription is submitted automatically. Responses are spoken aloud when voice mode is on.
+### Wake Word
+
+The `marvin-wakeword` systemd user service listens for "Hey Marvin" and triggers headless voice queries. Uses openWakeWord with a custom-trained model.
+
+```bash
+# Enable and start
+systemctl --user enable marvin-wakeword
+systemctl --user start marvin-wakeword
+```
+
+### Usage
+
+Toggle with `!voice`. Press Ctrl+V to record, press again to stop — transcription is submitted automatically. Responses are spoken aloud when voice mode is on. Say "Hey Marvin" when the wakeword service is running for hands-free queries.
 
 ## OCR
 
@@ -149,7 +181,8 @@ sudo apt install espeak-ng  # TTS voice output
 - **107 tools** across web, coding, media, places, weather, notes, calendar, and more
 - **Curses TUI** with colored output, scrolling, status bar, input history, reverse search
 - **Multi-provider LLM** — switch models at runtime with `!model`
-- **Voice I/O** — speech-to-text input (faster-whisper/CUDA) + text-to-speech output (espeak-ng)
+- **Voice I/O** — speech-to-text (faster-whisper large-v3/CUDA) + multi-backend TTS (Piper, espeak-ng, XTTS-v2, ElevenLabs)
+- **Wake word** — "Hey Marvin" hands-free activation via openWakeWord (systemd service)
 - **OCR** — extract text from images and PDFs
 - **Context compaction** — LLM-powered summarization when context gets full
 - **Web pagination** — browse_web returns 10K chunks with continuation tokens
@@ -218,7 +251,11 @@ src/
 ├── tools/           # 35 tool modules (107 tools)
 ├── voice/
 │   ├── voice.ts     # STT/TTS orchestration
-│   └── stt.py       # faster-whisper Python helper
+│   ├── stt.py       # faster-whisper Python helper
+│   └── tts.py       # Multi-backend TTS (Piper, espeak-ng, XTTS-v2, ElevenLabs)
+├── wakeword/
+│   ├── wakeword.py  # Wake word detector ("Hey Marvin")
+│   └── train-model.sh # Custom wake word model training
 └── profiles/
     └── manager.ts   # Profile & preferences management
 ```

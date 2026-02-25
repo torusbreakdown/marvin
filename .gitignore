@@ -7,3 +7,4 @@ coverage/
 .DS_Store
 .marvin/notes/
 target/
+marvin-ts/src/wakeword/training/

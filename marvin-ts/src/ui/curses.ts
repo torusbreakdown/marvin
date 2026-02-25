@@ -53,6 +53,7 @@ export class CursesUI implements UI {
   public onVoiceInput: ((wavPath: string) => void) | null = null;
   private voiceEnabled = false;
   private voiceRecording = false;
+  private voiceBusy = false; // guard against re-entrant toggle calls
 
   constructor(opts: CursesUIOptions) {
     this.opts = opts;
@@ -668,6 +669,7 @@ export class CursesUI implements UI {
   }
 
   private async toggleVoiceRecording(): Promise<void> {
+    if (this.voiceBusy) return; // prevent re-entrant calls
     if (!this.voiceEnabled) {
       this.displaySystem('Voice not enabled. Use !voice to enable.');
       return;
@@ -675,13 +677,18 @@ export class CursesUI implements UI {
 
     if (this.voiceRecording) {
       // Stop recording → transcribe
+      this.voiceBusy = true;
       this.voiceRecording = false;
       this.updateInputBorder();
       this.displaySystem('🎙️ Recording stopped — finalizing…');
-      const wavPath = await stopRecording();
-      this.displaySystem('🎙️ Transcribing…');
-      if (wavPath && this.onVoiceInput) {
-        this.onVoiceInput(wavPath);
+      try {
+        const wavPath = await stopRecording();
+        this.displaySystem('🎙️ Transcribing…');
+        if (wavPath && this.onVoiceInput) {
+          this.onVoiceInput(wavPath);
+        }
+      } finally {
+        this.voiceBusy = false;
       }
     } else {
       // Start recording

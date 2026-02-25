@@ -124,7 +124,13 @@ def transcribe_wav(wav_path: str) -> str | None:
             [python, stt_script, wav_path],
             encoding="utf-8",
             timeout=60,
-            env={**os.environ, "LD_PRELOAD": os.environ.get("LD_PRELOAD", "")},
+            env={
+                **os.environ,
+                "LD_PRELOAD": os.environ.get("LD_PRELOAD", ""),
+                "WHISPER_MODEL": os.environ.get("WHISPER_MODEL", "large-v3"),
+                "WHISPER_DEVICE": os.environ.get("WHISPER_DEVICE", "cuda"),
+                "WHISPER_COMPUTE": os.environ.get("WHISPER_COMPUTE", "float16"),
+            },
         ).strip()
         result = json.loads(out)
         if result.get("error"):

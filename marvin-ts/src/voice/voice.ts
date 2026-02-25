@@ -39,7 +39,7 @@ const DEFAULT_OPTS: Required<VoiceOptions> = {
   ttsVoice: 'en-gb',
   ttsSpeed: 140,
   ttsPitch: 30,
-  whisperModel: 'small',
+  whisperModel: 'large-v3',
   whisperDevice: 'cuda',
   whisperCompute: 'float16',
 };

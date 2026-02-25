@@ -11,16 +11,19 @@ WorkingDirectory=%h/copilot-assistant-thing/marvin-ts
 Restart=on-failure
 RestartSec=5
 
-# Environment overrides (uncomment and adjust as needed)
+# Node.js must be on PATH for headless Marvin queries (exclude conda to avoid lib conflicts)
+Environment=PATH=%h/.nvm/versions/node/v22.20.0/bin:/usr/local/bin:/usr/bin:/bin
+# Work around conda libstdc++ / libgcc_s conflicts
+Environment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+# Force ALSA to use the ReSpeaker as default capture device
+Environment=ALSA_CARD=ArrayUAC10
+
+# Tuning (uncomment and adjust as needed)
 # Environment=MARVIN_WAKE_THRESHOLD=0.5
 # Environment=MARVIN_WAKE_COOLDOWN=3.0
-# Environment=MARVIN_WAKE_MODEL=/path/to/hey_marvin.tflite
-# Environment=MARVIN_WAKE_NAME=hey_marvin
-# Environment=MARVIN_TERMINAL=kitty
-# Environment=MARVIN_CMD=node dist/main.js --curses
-# Environment=MARVIN_DIR=%h/copilot-assistant-thing/marvin-ts
+# Environment=MARVIN_WAKE_MODEL=/path/to/custom_model.onnx
 
-# Inherit user environment for DISPLAY, PULSE_SERVER, etc.
+# Inherit user session for audio access
 Environment=DISPLAY=:0
 PassEnvironment=DISPLAY PULSE_SERVER XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
 

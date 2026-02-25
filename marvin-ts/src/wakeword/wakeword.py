@@ -272,14 +272,39 @@ def main():
     # Set up audio — find the best input device (prefer ReSpeaker if available)
     pa = pyaudio.PyAudio()
     input_device = None
+
+    # Log all devices for debugging
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
-        if info["maxInputChannels"] > 0 and "respeaker" in info["name"].lower():
-            input_device = i
-            log.info("Using input device [%d]: %s", i, info["name"])
-            break
-    if input_device is None:
-        log.info("No ReSpeaker found — using default input device")
+        if info["maxInputChannels"] > 0:
+            log.info("  Input device [%d]: %s (%dch, %dHz)",
+                     i, info["name"], info["maxInputChannels"], int(info["defaultSampleRate"]))
+            if "respeaker" in info["name"].lower():
+                input_device = i
+
+    if input_device is not None:
+        log.info("Selected ReSpeaker at device index %d", input_device)
+    else:
+        # Fallback: check /proc/asound/cards for ReSpeaker and open via ALSA hw directly
+        try:
+            cards = open("/proc/asound/cards").read()
+            import re
+            m = re.search(r"^\s*(\d+)\s+\[.*(?:ReSpeaker|ArrayUAC)", cards, re.MULTILINE | re.IGNORECASE)
+            if m:
+                card_num = int(m.group(1))
+                # Find PyAudio device for this ALSA card (hw:N,0)
+                hw_name = f"hw:{card_num},0"
+                for i in range(pa.get_device_count()):
+                    info = pa.get_device_info_by_index(i)
+                    if info["maxInputChannels"] > 0 and hw_name in info.get("name", ""):
+                        input_device = i
+                        log.info("Found ReSpeaker via ALSA card %d → device [%d]", card_num, i)
+                        break
+        except Exception:
+            pass
+
+        if input_device is None:
+            log.info("No ReSpeaker found — using default input device")
 
     stream = pa.open(
         rate=SAMPLE_RATE,

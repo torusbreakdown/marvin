@@ -1,0 +1,28 @@
+[Unit]
+Description=Marvin Wake Word Detector (Hey Marvin)
+Documentation=https://github.com/dscripka/openWakeWord
+After=sound.target pulseaudio.service pipewire.service
+Wants=pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=%h/copilot-assistant-thing/marvin-ts/.venv/bin/python %h/copilot-assistant-thing/marvin-ts/src/wakeword/wakeword.py
+WorkingDirectory=%h/copilot-assistant-thing/marvin-ts
+Restart=on-failure
+RestartSec=5
+
+# Environment overrides (uncomment and adjust as needed)
+# Environment=MARVIN_WAKE_THRESHOLD=0.5
+# Environment=MARVIN_WAKE_COOLDOWN=3.0
+# Environment=MARVIN_WAKE_MODEL=/path/to/hey_marvin.tflite
+# Environment=MARVIN_WAKE_NAME=hey_marvin
+# Environment=MARVIN_TERMINAL=kitty
+# Environment=MARVIN_CMD=node dist/main.js --curses
+# Environment=MARVIN_DIR=%h/copilot-assistant-thing/marvin-ts
+
+# Inherit user environment for DISPLAY, PULSE_SERVER, etc.
+Environment=DISPLAY=:0
+PassEnvironment=DISPLAY PULSE_SERVER XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS
+
+[Install]
+WantedBy=default.target

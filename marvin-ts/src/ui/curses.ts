@@ -659,6 +659,14 @@ export class CursesUI implements UI {
     this.voiceEnabled = on;
   }
 
+  /** Externally trigger voice recording (e.g., from wake word IPC). Starts if not already recording. */
+  triggerVoiceRecording(): void {
+    if (!this.voiceRecording) {
+      this.voiceEnabled = true;
+      this.toggleVoiceRecording();
+    }
+  }
+
   private async toggleVoiceRecording(): Promise<void> {
     if (!this.voiceEnabled) {
       this.displaySystem('Voice not enabled. Use !voice to enable.');

@@ -17,6 +17,7 @@ import { CopilotProvider } from './llm/copilot.js';
 import { LlamaServerProvider } from './llm/llama-server.js';
 import { transcribe, speak, stopSpeaking, hasTTS, hasSTT } from './voice/voice.js';
 import { createCopilotAcpSession, type CopilotAcpSession } from './llm/copilot-acp.js';
+import { startIpcServer, stopIpcServer } from './ipc.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -553,9 +554,25 @@ export async function main(): Promise<void> {
     refreshStatus(ui, session, providerConfig);
   }
 
+  // IPC socket — allows external processes (e.g., wake word detector) to send commands
+  startIpcServer((cmd) => {
+    if (cmd === 'ping') return 'OK';
+    if (cmd === 'wake') {
+      // Enable voice and start recording if in curses mode
+      voiceState.enabled = true;
+      if ('setVoiceEnabled' in ui) {
+        (ui as CursesUI).setVoiceEnabled(true);
+        (ui as CursesUI).triggerVoiceRecording();
+      }
+      return 'OK';
+    }
+    return `ERR unknown command: ${cmd}`;
+  });
+
   // Signal handling — register BEFORE the REPL so Ctrl+C works during conversation
   const cleanup = () => {
     stopSpeaking();
+    stopIpcServer();
     copilotAcp.session?.destroy();
     session.destroy().catch(() => {});
     ui.destroy();
@@ -607,6 +624,7 @@ export async function main(): Promise<void> {
 
   // Cleanup copilot ACP session on exit
   copilotAcp.session?.destroy();
+  stopIpcServer();
 
   await session.destroy();
   ui.destroy();

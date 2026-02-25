@@ -91,10 +91,11 @@ Full voice pipeline: STT (speech-to-text) via **faster-whisper** (large-v3 on CU
 
 | Backend | Speed | Quality | Notes |
 |---------|-------|---------|-------|
-| **Kokoro** (primary) | ⚡ ~0.6s | Excellent | 82M param PyTorch model, British male voice (bm_lewis), fine-tuned on Rickman+Marvin2 audio. GPU required |
-| **Piper** | ⚡ Sub-second | Good | Local ONNX model, British RP voice (en_GB-alan-medium) |
+| **Kokoro** (primary) | ⚡ ~2-4s | Excellent | 82M param model, Rickman+Daniel hybrid voice with 8-level embedding quantization, micro-stutters, pitch-shifted post-filter. GPU required |
 | **espeak-ng** | ⚡ Instant | Robotic | Built-in fallback, British English |
 | **XTTS-v2** | 🐢 ~5-8s | Excellent | Voice cloning from reference WAV, GPU required |
+
+The Marvin voice pipeline: Kokoro generates speech using a hybrid voice embedding (Rickman fine-tuned prosody + Daniel acoustic channels, quantized to 8 levels for robotic character), adds random micro-stutters, then applies an ffmpeg post-filter (pitch down to 0.875×, light 10-bit crush, 9kHz bandpass). Both the CLI (`voice.ts`) and wake word service (`wakeword.py`) route through `tts.py`, which auto-selects kokoro → xtts → espeak-ng.
 
 ### Setup
 
@@ -108,12 +109,10 @@ uv venv .venv && uv pip install faster-whisper
 sudo apt install espeak-ng
 
 # TTS — Kokoro (fast, high quality, recommended)
-uv pip install --python .tts-venv/bin/python kokoro soundfile
-# Fine-tuned voice + model weights in /data/marvin-tts/kokoro-finetune/
-
-# TTS — Piper (fallback)
-uv pip install --python .tts-venv/bin/python piper-tts
-# Models stored in /data/marvin-tts/piper/
+uv venv .tts-venv --python 3.11
+uv pip install --python .tts-venv/bin/python kokoro soundfile torch torchaudio
+# Rickman voice checkpoint required at /data/marvin-tts/kokoro-finetune/bm_lewis_rickman_best.pt
+# Fine-tuning scripts in marvin-ts/scripts/
 
 # Audio I/O
 sudo apt install alsa-utils  # arecord/aplay for mic/speaker

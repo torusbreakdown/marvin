@@ -18,6 +18,7 @@ import { LlamaServerProvider } from './llm/llama-server.js';
 import { transcribe, speak, stopSpeaking, hasTTS, hasSTT } from './voice/voice.js';
 import { createCopilotAcpSession, type CopilotAcpSession } from './llm/copilot-acp.js';
 import { startIpcServer, stopIpcServer } from './ipc.js';
+import { getSecret } from './secrets.js';
 
 export function parseCliArgs(argv?: string[]): CliArgs {
   const { values, positionals } = parseArgs({
@@ -338,7 +339,7 @@ function refreshStatus(ui: UI, session: SessionManager, providerConfig: Provider
 }
 
 function resolveProviderConfig(args: CliArgs): ProviderConfig {
-  const providerName = args.provider ?? process.env['MARVIN_PROVIDER'] ?? 'ollama';
+  const providerName = args.provider ?? process.env['MARVIN_PROVIDER'] ?? 'moonshot';
   const defaults: Record<string, { model: string; baseUrl?: string }> = {
     ollama:        { model: 'qwen3-coder:30b', baseUrl: 'http://localhost:11434' },
     copilot:       { model: 'claude-haiku-4.5' },
@@ -354,10 +355,16 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
     throw new Error(`Unknown provider '${providerName}'. Valid providers: ${valid}`);
   }
   const d = defaults[providerName];
+
+  // Resolve API key: pass store → env vars
+  const apiKey = getSecret('MARVIN_API_KEY')
+    ?? getSecret(`${providerName.toUpperCase().replace(/-/g, '_')}_API_KEY`)
+    ?? getSecret('OPENAI_API_KEY');
+
   return {
     provider: providerName as ProviderConfig['provider'],
     model: process.env['MARVIN_MODEL'] ?? d.model,
-    apiKey: process.env['MARVIN_API_KEY'] ?? process.env['OPENAI_API_KEY'],
+    apiKey,
     baseUrl: process.env['MARVIN_BASE_URL'] ?? d.baseUrl,
     timeoutMs: 300_000,
     maxToolRounds: 15,

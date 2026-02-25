@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolRegistry } from './registry.js';
+import { getSecret } from '../secrets.js';
 
 async function ddgSearch(query: string): Promise<any[]> {
   const resp = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1`);
@@ -18,7 +19,7 @@ export function registerMediaTools(registry: ToolRegistry): void {
       type: z.string().default('').describe("Optional type: 'movie', 'series', or 'episode'"),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.OMDB_API_KEY;
+      const apiKey = getSecret('OMDB_API_KEY');
 
       if (apiKey) {
         const params = new URLSearchParams({ apikey: apiKey, s: args.query });
@@ -56,7 +57,7 @@ export function registerMediaTools(registry: ToolRegistry): void {
       imdb_id: z.string().default('').describe("IMDb ID like 'tt1234567'"),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.OMDB_API_KEY;
+      const apiKey = getSecret('OMDB_API_KEY');
       if (!apiKey) return 'Error: OMDB_API_KEY not set. Set the environment variable to use this tool.';
 
       const params = new URLSearchParams({ apikey: apiKey, plot: 'full' });
@@ -99,7 +100,7 @@ export function registerMediaTools(registry: ToolRegistry): void {
       max_results: z.number().default(5).describe('Max results (1-10)'),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.RAWG_API_KEY;
+      const apiKey = getSecret('RAWG_API_KEY');
 
       if (apiKey) {
         const params = new URLSearchParams({ key: apiKey, search: args.query, page_size: String(args.max_results) });
@@ -134,7 +135,7 @@ export function registerMediaTools(registry: ToolRegistry): void {
       game_id: z.number().describe('RAWG game ID (from search_games results)'),
     }),
     async (args, _ctx) => {
-      const apiKey = process.env.RAWG_API_KEY;
+      const apiKey = getSecret('RAWG_API_KEY');
       if (!apiKey) return 'Error: RAWG_API_KEY not set. Set the environment variable to use this tool.';
 
       const resp = await fetch(`https://api.rawg.io/api/games/${args.game_id}?key=${apiKey}`);

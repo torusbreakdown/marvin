@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'crypto';
 import { createServer } from 'http';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { homedir } from 'os';
+import { getSecret } from '../secrets.js';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import type { ToolRegistry } from './registry.js';
@@ -33,10 +34,10 @@ interface SpotifyTokens {
 }
 
 function loadCreds(): { clientId: string; clientSecret: string } {
-  const clientId = process.env['SPOTIFY_CLIENT_ID'];
-  const clientSecret = process.env['SPOTIFY_CLIENT_SECRET'];
+  const clientId = getSecret('SPOTIFY_CLIENT_ID') ?? process.env['SPOTIFY_CLIENT_ID'];
+  const clientSecret = getSecret('SPOTIFY_CLIENT_SECRET') ?? process.env['SPOTIFY_CLIENT_SECRET'];
   if (!clientId || !clientSecret) {
-    throw new Error('Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET environment variables');
+    throw new Error('Missing SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET. Add with: pass insert marvin/SPOTIFY_CLIENT_SECRET');
   }
   return { clientId, clientSecret };
 }

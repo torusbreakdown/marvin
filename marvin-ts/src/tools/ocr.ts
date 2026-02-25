@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { readFileSync, existsSync } from 'node:fs';
 import { basename, extname } from 'node:path';
 import type { ToolRegistry } from './registry.js';
+import { getSecret } from '../secrets.js';
 
 const OCR_API_URL = 'https://api.ocr.space/parse/image';
 
@@ -27,7 +28,7 @@ export function registerOcrTools(registry: ToolRegistry): void {
         return `Unsupported file type: ${ext}. Supported: ${allowedExts.join(', ')}`;
       }
 
-      const apiKey = process.env.OCR_SPACE_API_KEY || 'helloworld'; // free tier default key
+      const apiKey = getSecret('OCR_SPACE_API_KEY') ?? 'helloworld'; // free tier default key
       const fileData = readFileSync(file_path);
       const base64 = fileData.toString('base64');
       const mimeTypes: Record<string, string> = {

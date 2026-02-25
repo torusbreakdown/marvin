@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolRegistry } from './registry.js';
+import { getSecret } from '../secrets.js';
 
 export function registerSteamTools(registry: ToolRegistry): void {
   registry.registerTool(
@@ -112,7 +113,7 @@ export function registerSteamTools(registry: ToolRegistry): void {
       } catch { /* ignore */ }
 
       // Achievements (needs key)
-      const steamKey = process.env.STEAM_API_KEY;
+      const steamKey = getSecret('STEAM_API_KEY');
       if (steamKey) {
         try {
           const resp = await fetch(`https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v2/?gameid=${args.app_id}`);
@@ -141,7 +142,7 @@ export function registerSteamTools(registry: ToolRegistry): void {
       steam_id: z.string().describe("Steam user's 64-bit ID"),
     }),
     async (args, _ctx) => {
-      const key = process.env.STEAM_API_KEY;
+      const key = getSecret('STEAM_API_KEY');
       if (!key) return 'Error: STEAM_API_KEY not set.';
 
       const resp = await fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${key}&steamid=${args.steam_id}&include_appinfo=1&include_played_free_games=1&format=json`);
@@ -166,7 +167,7 @@ export function registerSteamTools(registry: ToolRegistry): void {
       steam_id: z.string().describe("Steam user's 64-bit ID"),
     }),
     async (args, _ctx) => {
-      const key = process.env.STEAM_API_KEY;
+      const key = getSecret('STEAM_API_KEY');
       if (!key) return 'Error: STEAM_API_KEY not set.';
 
       const resp = await fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${key}&steamids=${args.steam_id}`);

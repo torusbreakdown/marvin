@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { execSync } from 'node:child_process';
 import { isPrivateUrl } from './ssrf.js';
 import type { ToolRegistry } from './registry.js';
+import { getSecret } from '../secrets.js';
 
 // SECURITY: Block requests to internal/private network addresses (SSRF protection)
 export function validateUrl(url: string): string | null {
@@ -191,7 +192,7 @@ export function registerWebTools(registry: ToolRegistry): void {
         } catch {}
       } else {
         // Production: query GNews and DDG News
-        const gnewsKey = process.env.GNEWS_API_KEY;
+        const gnewsKey = getSecret('GNEWS_API_KEY');
         if (gnewsKey) {
           try {
             const gnewsUrl = `https://gnews.io/api/v4/search?q=${encodeURIComponent(query)}&max=${max_results}&apikey=${gnewsKey}&lang=en`;

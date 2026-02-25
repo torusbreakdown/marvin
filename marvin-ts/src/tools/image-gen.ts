@@ -3,6 +3,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { getSecret } from '../secrets.js';
 import { randomUUID } from 'node:crypto';
 import type { ToolRegistry } from './registry.js';
 
@@ -107,8 +108,8 @@ export function registerImageGenTools(registry: ToolRegistry): void {
 async function generateWithGemini(
   prompt: string, width: number, height: number, id: string, outDir: string,
 ): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set. Set it to use Gemini image generation.');
+  const apiKey = getSecret('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set. Add with: pass insert marvin/GEMINI_API_KEY');
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-image-generation:generateContent?key=${apiKey}`;
 

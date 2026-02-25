@@ -2,9 +2,11 @@
 """
 marvin-wakeword — "Hey Marvin" wake word detector using openWakeWord.
 
-Listens on the default microphone for the wake phrase. When detected:
-  1. If Marvin is already running (IPC socket exists), sends "wake" command.
-  2. Otherwise, launches Marvin in curses mode with voice enabled.
+Listens on the microphone for the wake phrase. When detected:
+  1. If Marvin is already running (IPC socket exists), sends "wake" command
+     to enable interactive voice input mode.
+  2. Otherwise, records a short utterance, transcribes it, runs Marvin in
+     non-interactive mode, and speaks the response via espeak-ng.
 
 Designed to run as a systemd user service.
 
@@ -18,7 +20,6 @@ import json
 import time
 import signal
 import socket
-import struct
 import logging
 import subprocess
 import tempfile
@@ -58,18 +59,11 @@ WAKEWORD_MODEL = os.environ.get("MARVIN_WAKE_MODEL", "")
 # The wake word name to monitor in predictions dict
 WAKEWORD_NAME = os.environ.get("MARVIN_WAKE_NAME", "")
 
-# Marvin launch command (when not already running)
-MARVIN_CMD = os.environ.get(
-    "MARVIN_CMD",
-    "node dist/main.js --curses",
-)
+# Marvin launch command (headless query mode — non-interactive with TTS)
 MARVIN_DIR = os.environ.get(
     "MARVIN_DIR",
     str(Path(__file__).resolve().parent.parent.parent),  # marvin-ts/
 )
-
-# Terminal emulator to launch Marvin in (when starting fresh)
-TERMINAL = os.environ.get("MARVIN_TERMINAL", "kitty")
 
 
 def is_marvin_running() -> bool:
@@ -98,29 +92,98 @@ def send_ipc_command(cmd: str, timeout: float = 2.0) -> str:
         sock.close()
 
 
-def launch_marvin():
-    """Launch Marvin in a new terminal window."""
-    log.info("Launching Marvin in %s…", TERMINAL)
-    # Build the shell command that cd's to Marvin dir and runs it
-    shell_cmd = f"cd {MARVIN_DIR} && {MARVIN_CMD}"
+def record_utterance(device_index: int | None, duration: float = 6.0) -> str | None:
+    """Record a short utterance after the wake word. Returns path to WAV or None."""
+    import wave
+
+    wav_path = os.path.join(tempfile.gettempdir(), f"marvin-wake-{int(time.time())}.wav")
+    pa = pyaudio.PyAudio()
+    try:
+        stream = pa.open(
+            rate=SAMPLE_RATE,
+            channels=CHANNELS,
+            format=pyaudio.paInt16,
+            input=True,
+            input_device_index=device_index,
+            frames_per_buffer=CHUNK_SAMPLES,
+        )
+        log.info("Recording %.1fs of speech…", duration)
+        frames = []
+        for _ in range(int(SAMPLE_RATE / CHUNK_SAMPLES * duration)):
+            frames.append(stream.read(CHUNK_SAMPLES, exception_on_overflow=False))
+        stream.stop_stream()
+        stream.close()
+    finally:
+        pa.terminate()
+
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(b"".join(frames))
+
+    log.info("Saved recording to %s", wav_path)
+    return wav_path
+
+
+def transcribe_wav(wav_path: str) -> str | None:
+    """Transcribe a WAV file using the same faster-whisper helper Marvin uses."""
+    stt_script = os.path.join(MARVIN_DIR, "src", "voice", "stt.py")
+    venv_python = os.path.join(MARVIN_DIR, ".venv", "bin", "python")
+    python = venv_python if os.path.exists(venv_python) else "python3"
 
     try:
-        if TERMINAL == "kitty":
-            subprocess.Popen(["kitty", "--title", "Marvin", "bash", "-c", shell_cmd])
-        elif TERMINAL == "gnome-terminal":
-            subprocess.Popen(["gnome-terminal", "--title", "Marvin", "--", "bash", "-c", shell_cmd])
-        elif TERMINAL == "alacritty":
-            subprocess.Popen(["alacritty", "--title", "Marvin", "-e", "bash", "-c", shell_cmd])
-        elif TERMINAL == "xterm":
-            subprocess.Popen(["xterm", "-title", "Marvin", "-e", "bash", "-c", shell_cmd])
-        else:
-            # Generic: try the terminal name directly
-            subprocess.Popen([TERMINAL, "-e", "bash", "-c", shell_cmd])
+        out = subprocess.check_output(
+            [python, stt_script, wav_path],
+            encoding="utf-8",
+            timeout=60,
+            env={**os.environ, "LD_PRELOAD": os.environ.get("LD_PRELOAD", "")},
+        ).strip()
+        result = json.loads(out)
+        if result.get("error"):
+            log.error("STT error: %s", result["error"])
+            return None
+        return result.get("text", "").strip() or None
+    except Exception as e:
+        log.error("Transcription failed: %s", e)
+        return None
+    finally:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+
+
+def query_marvin_headless(prompt: str) -> str | None:
+    """Run Marvin in non-interactive mode and capture the response."""
+    try:
+        out = subprocess.check_output(
+            ["node", "dist/main.js", "--non-interactive", "--prompt", prompt],
+            cwd=MARVIN_DIR,
+            encoding="utf-8",
+            timeout=120,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return out or None
+    except Exception as e:
+        log.error("Marvin query failed: %s", e)
+        return None
+
+
+def speak_text(text: str):
+    """Speak text using espeak-ng (blocking)."""
+    try:
+        subprocess.run(
+            ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", text],
+            timeout=120,
+        )
     except FileNotFoundError:
-        log.error("Terminal %r not found. Set MARVIN_TERMINAL env var.", TERMINAL)
+        log.error("espeak-ng not found — cannot speak response")
+    except Exception as e:
+        log.error("TTS failed: %s", e)
 
 
-def on_wake():
+def on_wake(audio_device_index: int | None):
     """Called when the wake word is detected."""
     log.info("🎙️  Wake word detected!")
 
@@ -130,21 +193,29 @@ def on_wake():
             resp = send_ipc_command("wake")
             log.info("IPC response: %s", resp)
         except Exception as e:
-            log.error("IPC failed: %s — launching new instance", e)
-            launch_marvin()
+            log.error("IPC failed: %s", e)
     else:
-        log.info("Marvin not running — launching new instance")
-        launch_marvin()
-        # Wait for Marvin to start and set up IPC, then send wake
-        for _ in range(20):  # up to 10 seconds
-            time.sleep(0.5)
-            if is_marvin_running():
-                try:
-                    send_ipc_command("wake")
-                    log.info("Sent wake command to newly launched Marvin")
-                except Exception:
-                    pass
-                break
+        # Headless mode: record → transcribe → query Marvin → speak response
+        log.info("Marvin not running — headless voice query")
+        # Brief chime/beep to signal listening
+        speak_text("Yes?")
+
+        wav_path = record_utterance(audio_device_index)
+        if not wav_path:
+            return
+
+        text = transcribe_wav(wav_path)
+        if not text:
+            speak_text("Sorry, I didn't catch that.")
+            return
+
+        log.info("Transcribed: %s", text)
+        response = query_marvin_headless(text)
+        if response:
+            log.info("Response: %s", response[:200])
+            speak_text(response)
+        else:
+            speak_text("Sorry, I couldn't come up with a response.")
 
 
 def main():
@@ -156,40 +227,66 @@ def main():
         log.error("openwakeword not installed. Run: pip install openwakeword")
         sys.exit(1)
 
-    # Download models if needed
+    # Download models if needed (v0.6+ has download_models, earlier versions ship built-in models)
     log.info("Initializing openWakeWord…")
-    openwakeword.utils.download_models()
+    if hasattr(openwakeword, 'utils') and hasattr(openwakeword.utils, 'download_models'):
+        openwakeword.utils.download_models()
 
     # Load model
     model_kwargs = {}
     if WAKEWORD_MODEL:
-        model_kwargs["wakeword_models"] = [WAKEWORD_MODEL]
+        model_kwargs["wakeword_model_paths"] = [WAKEWORD_MODEL]
         log.info("Using custom model: %s", WAKEWORD_MODEL)
     else:
-        model_kwargs["wakeword_models"] = ["hey_jarvis"]
-        log.info("Using built-in model: hey_jarvis (closest to 'hey marvin')")
+        # v0.4 ships hey_marvin_v0.1.onnx bundled; use it directly
+        import openwakeword as _oww
+        pkg_dir = os.path.dirname(_oww.__file__)
+        hey_marvin_path = os.path.join(pkg_dir, "resources", "models", "hey_marvin_v0.1.onnx")
+        if os.path.exists(hey_marvin_path):
+            model_kwargs["wakeword_model_paths"] = [hey_marvin_path]
+            log.info("Using bundled model: hey_marvin_v0.1.onnx")
+        else:
+            # Fallback to hey_jarvis
+            hey_jarvis_path = os.path.join(pkg_dir, "resources", "models", "hey_jarvis_v0.1.onnx")
+            model_kwargs["wakeword_model_paths"] = [hey_jarvis_path]
+            log.info("Using bundled model: hey_jarvis_v0.1.onnx (hey_marvin not found)")
 
-    model = Model(**model_kwargs, enable_speex_noise_suppression=True)
+    try:
+        model = Model(**model_kwargs, enable_speex_noise_suppression=True)
+    except (ImportError, ModuleNotFoundError):
+        log.warning("Speex noise suppression unavailable — running without it")
+        model = Model(**model_kwargs)
 
     # Determine which prediction key to watch
     wakeword_key = WAKEWORD_NAME
     if not wakeword_key:
-        # Auto-detect from model
-        keys = list(model.prediction_buffer.keys())
+        # Auto-detect from loaded models
+        keys = list(model.models.keys())
         if keys:
             wakeword_key = keys[0]
-            log.info("Watching prediction key: %s", wakeword_key)
+            log.info("Watching model key: %s", wakeword_key)
         else:
             log.error("No wake word models loaded!")
             sys.exit(1)
 
-    # Set up audio
+    # Set up audio — find the best input device (prefer ReSpeaker if available)
     pa = pyaudio.PyAudio()
+    input_device = None
+    for i in range(pa.get_device_count()):
+        info = pa.get_device_info_by_index(i)
+        if info["maxInputChannels"] > 0 and "respeaker" in info["name"].lower():
+            input_device = i
+            log.info("Using input device [%d]: %s", i, info["name"])
+            break
+    if input_device is None:
+        log.info("No ReSpeaker found — using default input device")
+
     stream = pa.open(
         rate=SAMPLE_RATE,
         channels=CHANNELS,
         format=FORMAT,
         input=True,
+        input_device_index=input_device,
         frames_per_buffer=CHUNK_SAMPLES,
     )
 
@@ -221,7 +318,20 @@ def main():
                 now = time.monotonic()
                 if now - last_trigger >= COOLDOWN:
                     last_trigger = now
-                    on_wake()
+                    # Pause the wake word stream while handling
+                    stream.stop_stream()
+                    pa.terminate()
+                    on_wake(input_device)
+                    # Resume listening
+                    pa = pyaudio.PyAudio()
+                    stream = pa.open(
+                        rate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        format=FORMAT,
+                        input=True,
+                        input_device_index=input_device,
+                        frames_per_buffer=CHUNK_SAMPLES,
+                    )
     finally:
         stream.stop_stream()
         stream.close()

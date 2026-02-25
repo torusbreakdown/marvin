@@ -26,6 +26,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       provider:          { type: 'string' },
       plain:             { type: 'boolean', default: false },
       curses:            { type: 'boolean', default: false },
+      voice:             { type: 'boolean', default: false },
       'non-interactive': { type: 'boolean', default: false },
       'coding-mode':     { type: 'boolean', default: false },
       mode:              { type: 'string' },
@@ -47,6 +48,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       `  --mode <mode>        Tool mode: surf (default), coding, lockin\n` +
       `  --plain              Force plain readline UI\n` +
       `  --curses             Force curses TUI\n` +
+      `  --voice              Enable voice mode (STT input + TTS output) on startup\n` +
       `  --non-interactive    Non-interactive mode (requires --prompt or piped stdin)\n` +
       `  --coding-mode        Enable coding tools (auto-enabled with --working-dir)\n` +
       `  --prompt <text>      Prompt text (non-interactive or single-shot)\n` +
@@ -90,6 +92,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
     provider: values.provider,
     plain: values.plain ?? false,
     curses: values.curses ?? false,
+    voice: values.voice ?? false,
     nonInteractive: values['non-interactive'] ?? false,
     mode,
     codingMode: mode === 'coding' || mode === 'lockin',
@@ -463,7 +466,7 @@ export async function main(): Promise<void> {
   const { session, profile, providerConfig } = createSession(args, {
     onProfileSwitch: (name) => uiRef?.showStatus({ profileName: name }),
   });
-  const useCurses = args.curses || (!args.plain && process.stdin.isTTY && process.stdout.isTTY);
+  const useCurses = args.curses || args.voice || (!args.plain && process.stdin.isTTY && process.stdout.isTTY);
   const uiOpts = {
     provider: providerConfig.provider,
     model: providerConfig.model,
@@ -485,7 +488,7 @@ export async function main(): Promise<void> {
   refreshStatus(ui, session, providerConfig);
 
   // Voice state — shared between slash commands and curses callbacks
-  const voiceState = { enabled: false };
+  const voiceState = { enabled: args.voice };
 
   // Copilot ACP mode state
   const copilotAcp: { session: CopilotAcpSession | null; active: boolean } = {
@@ -541,7 +544,10 @@ export async function main(): Promise<void> {
     };
   }
 
-  // Handle inline prompt (positional argument)
+  // --voice flag: auto-enable voice mode (TTS + STT) on startup
+  if (args.voice && 'setVoiceEnabled' in ui) {
+    (ui as CursesUI).setVoiceEnabled(true);
+  }
   if (args.inlinePrompt) {
     ui.displayMessage('user', args.inlinePrompt);
     const callbacks = makeStreamCallbacks(ui);

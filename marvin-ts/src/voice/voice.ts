@@ -2,7 +2,7 @@
  * Voice module: STT via faster-whisper (Python) and TTS via espeak-ng.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -61,9 +61,22 @@ export function startRecording(): string {
   recordPath = wavPath;
 
   // arecord: 16kHz mono 16-bit PCM — ideal for whisper
-  recordProc = spawn('arecord', [
-    '-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'wav', wavPath,
-  ], { stdio: 'ignore' });
+  // Use plughw:1,0 for ReSpeaker if available, otherwise default device
+  const arecordArgs = ['-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'wav'];
+  if (process.env['MARVIN_ALSA_DEVICE']) {
+    arecordArgs.push('-D', process.env['MARVIN_ALSA_DEVICE']);
+  } else {
+    // Auto-detect ReSpeaker
+    try {
+      const cards = readFileSync('/proc/asound/cards', 'utf-8');
+      if (/ReSpeaker|ArrayUAC/i.test(cards)) {
+        const match = cards.match(/^\s*(\d+)\s+\[.*(?:ReSpeaker|ArrayUAC)/m);
+        if (match) arecordArgs.push('-D', `plughw:${match[1]},0`);
+      }
+    } catch { /* use default */ }
+  }
+  arecordArgs.push(wavPath);
+  recordProc = spawn('arecord', arecordArgs, { stdio: 'ignore' });
 
   return wavPath;
 }

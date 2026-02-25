@@ -200,6 +200,7 @@ export interface CliArgs {
   plain: boolean;
   curses: boolean;
   nonInteractive: boolean;
+  voice: boolean;
   mode?: AppMode;
   codingMode?: boolean;
   prompt?: string;

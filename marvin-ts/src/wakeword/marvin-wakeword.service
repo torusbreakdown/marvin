@@ -6,7 +6,7 @@ Wants=pulseaudio.service
 
 [Service]
 Type=simple
-ExecStart=%h/copilot-assistant-thing/marvin-ts/.venv/bin/python %h/copilot-assistant-thing/marvin-ts/src/wakeword/wakeword.py
+ExecStart=/usr/bin/sg audio -c "%h/copilot-assistant-thing/marvin-ts/.venv/bin/python %h/copilot-assistant-thing/marvin-ts/src/wakeword/wakeword.py"
 WorkingDirectory=%h/copilot-assistant-thing/marvin-ts
 Restart=on-failure
 RestartSec=5

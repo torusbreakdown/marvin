@@ -11,7 +11,7 @@ Listens on the microphone for the wake phrase. When detected:
 Designed to run as a systemd user service.
 
 Requirements:
-  pip install openwakeword pyaudio
+  pip install openwakeword numpy
 """
 
 import os
@@ -25,7 +25,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import pyaudio
 import numpy as np
 
 logging.basicConfig(
@@ -45,7 +44,6 @@ PID_PATH = SOCK_DIR / "marvin.pid"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 CHUNK_SAMPLES = 1280  # 80ms at 16kHz — recommended by openWakeWord
-FORMAT = pyaudio.paInt16
 
 # Wake word detection threshold (0-1). Lower = more sensitive, higher = fewer false positives.
 THRESHOLD = float(os.environ.get("MARVIN_WAKE_THRESHOLD", "0.5"))
@@ -92,35 +90,24 @@ def send_ipc_command(cmd: str, timeout: float = 2.0) -> str:
         sock.close()
 
 
-def record_utterance(device_index: int | None, duration: float = 6.0) -> str | None:
-    """Record a short utterance after the wake word. Returns path to WAV or None."""
-    import wave
-
+def record_utterance(alsa_device: str, duration: float = 6.0) -> str | None:
+    """Record a short utterance after the wake word using arecord. Returns path to WAV or None."""
     wav_path = os.path.join(tempfile.gettempdir(), f"marvin-wake-{int(time.time())}.wav")
-    pa = pyaudio.PyAudio()
+    log.info("Recording %.1fs of speech on %s…", duration, alsa_device)
     try:
-        stream = pa.open(
-            rate=SAMPLE_RATE,
-            channels=CHANNELS,
-            format=pyaudio.paInt16,
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=CHUNK_SAMPLES,
+        subprocess.run(
+            ["arecord", "-D", alsa_device, "-f", "S16_LE", "-r", str(SAMPLE_RATE),
+             "-c", str(CHANNELS), "-t", "wav", "-d", str(int(duration)), wav_path],
+            timeout=duration + 5,
+            stderr=subprocess.DEVNULL,
         )
-        log.info("Recording %.1fs of speech…", duration)
-        frames = []
-        for _ in range(int(SAMPLE_RATE / CHUNK_SAMPLES * duration)):
-            frames.append(stream.read(CHUNK_SAMPLES, exception_on_overflow=False))
-        stream.stop_stream()
-        stream.close()
-    finally:
-        pa.terminate()
+    except Exception as e:
+        log.error("Recording failed: %s", e)
+        return None
 
-    with wave.open(wav_path, "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(b"".join(frames))
+    if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1000:
+        log.error("Recording too short or missing")
+        return None
 
     log.info("Saved recording to %s", wav_path)
     return wav_path
@@ -183,7 +170,7 @@ def speak_text(text: str):
         log.error("TTS failed: %s", e)
 
 
-def on_wake(audio_device_index: int | None):
+def on_wake(alsa_device: str):
     """Called when the wake word is detected."""
     log.info("🎙️  Wake word detected!")
 
@@ -200,7 +187,7 @@ def on_wake(audio_device_index: int | None):
         # Brief chime/beep to signal listening
         speak_text("Yes?")
 
-        wav_path = record_utterance(audio_device_index)
+        wav_path = record_utterance(alsa_device)
         if not wav_path:
             return
 
@@ -269,51 +256,35 @@ def main():
             log.error("No wake word models loaded!")
             sys.exit(1)
 
-    # Set up audio — find the best input device (prefer ReSpeaker if available)
-    pa = pyaudio.PyAudio()
-    input_device = None
+    # Set up audio — use arecord to capture directly from ALSA (bypasses PulseAudio)
+    # PyAudio often can't see ALSA hw devices when PulseAudio is running
+    import re as _re
 
-    # Log all devices for debugging
-    for i in range(pa.get_device_count()):
-        info = pa.get_device_info_by_index(i)
-        if info["maxInputChannels"] > 0:
-            log.info("  Input device [%d]: %s (%dch, %dHz)",
-                     i, info["name"], info["maxInputChannels"], int(info["defaultSampleRate"]))
-            if "respeaker" in info["name"].lower():
-                input_device = i
-
-    if input_device is not None:
-        log.info("Selected ReSpeaker at device index %d", input_device)
-    else:
-        # Fallback: check /proc/asound/cards for ReSpeaker and open via ALSA hw directly
+    alsa_device = os.environ.get("MARVIN_ALSA_DEVICE", "")
+    if not alsa_device:
         try:
             cards = open("/proc/asound/cards").read()
-            import re
-            m = re.search(r"^\s*(\d+)\s+\[.*(?:ReSpeaker|ArrayUAC)", cards, re.MULTILINE | re.IGNORECASE)
+            m = _re.search(r"^\s*(\d+)\s+\[.*(?:ReSpeaker|ArrayUAC)", cards, _re.MULTILINE | _re.IGNORECASE)
             if m:
-                card_num = int(m.group(1))
-                # Find PyAudio device for this ALSA card (hw:N,0)
-                hw_name = f"hw:{card_num},0"
-                for i in range(pa.get_device_count()):
-                    info = pa.get_device_info_by_index(i)
-                    if info["maxInputChannels"] > 0 and hw_name in info.get("name", ""):
-                        input_device = i
-                        log.info("Found ReSpeaker via ALSA card %d → device [%d]", card_num, i)
-                        break
+                alsa_device = f"plughw:{m.group(1)},0"
         except Exception:
             pass
+    if not alsa_device:
+        alsa_device = "default"
 
-        if input_device is None:
-            log.info("No ReSpeaker found — using default input device")
+    log.info("Audio capture device: %s", alsa_device)
 
-    stream = pa.open(
-        rate=SAMPLE_RATE,
-        channels=CHANNELS,
-        format=FORMAT,
-        input=True,
-        input_device_index=input_device,
-        frames_per_buffer=CHUNK_SAMPLES,
+    # arecord streams raw S16_LE 16kHz mono PCM to stdout
+    arecord_cmd = [
+        "arecord", "-D", alsa_device, "-f", "S16_LE", "-r", str(SAMPLE_RATE),
+        "-c", str(CHANNELS), "-t", "raw", "--buffer-size", str(CHUNK_SAMPLES * 4),
+    ]
+    arecord_proc = subprocess.Popen(
+        arecord_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
+    assert arecord_proc.stdout is not None
+
+    bytes_per_chunk = CHUNK_SAMPLES * 2  # 16-bit = 2 bytes per sample
 
     log.info(
         "Listening for wake word (threshold=%.2f, cooldown=%.1fs)… Press Ctrl+C to stop.",
@@ -333,7 +304,11 @@ def main():
 
     try:
         while running:
-            audio_bytes = stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
+            audio_bytes = arecord_proc.stdout.read(bytes_per_chunk)
+            if not audio_bytes or len(audio_bytes) < bytes_per_chunk:
+                if running:
+                    log.error("arecord stream ended unexpectedly")
+                break
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
 
             predictions = model.predict(audio_np)
@@ -343,24 +318,18 @@ def main():
                 now = time.monotonic()
                 if now - last_trigger >= COOLDOWN:
                     last_trigger = now
-                    # Pause the wake word stream while handling
-                    stream.stop_stream()
-                    pa.terminate()
-                    on_wake(input_device)
-                    # Resume listening
-                    pa = pyaudio.PyAudio()
-                    stream = pa.open(
-                        rate=SAMPLE_RATE,
-                        channels=CHANNELS,
-                        format=FORMAT,
-                        input=True,
-                        input_device_index=input_device,
-                        frames_per_buffer=CHUNK_SAMPLES,
+                    # Kill arecord while handling wake (free the mic)
+                    arecord_proc.terminate()
+                    arecord_proc.wait()
+                    on_wake(alsa_device)
+                    # Restart arecord
+                    arecord_proc = subprocess.Popen(
+                        arecord_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     )
+                    assert arecord_proc.stdout is not None
     finally:
-        stream.stop_stream()
-        stream.close()
-        pa.terminate()
+        arecord_proc.terminate()
+        arecord_proc.wait()
         log.info("Stopped.")
 
 

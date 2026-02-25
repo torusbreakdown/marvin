@@ -158,12 +158,37 @@ def query_marvin_headless(prompt: str) -> str | None:
 
 
 def speak_text(text: str):
-    """Speak text using espeak-ng (blocking)."""
+    """Speak text using espeak-ng piped through aplay to the output device (blocking)."""
+    output_device = os.environ.get("MARVIN_PLAYBACK_DEVICE", "")
+    if not output_device:
+        # Auto-detect USB sound card (not ReSpeaker, not HDMI)
+        try:
+            cards = open("/proc/asound/cards").read()
+            import re as _re2
+            for m in _re2.finditer(r"^\s*(\d+)\s+\[(\S+)\s*\]", cards, _re2.MULTILINE):
+                card_num, card_id = m.group(1), m.group(2)
+                if card_id not in ("NVidia", "ArrayUAC10"):
+                    output_device = f"plughw:{card_num},0"
+                    break
+        except Exception:
+            pass
     try:
-        subprocess.run(
-            ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", text],
-            timeout=120,
-        )
+        if output_device:
+            # Pipe espeak WAV through aplay on the chosen device
+            espeak = subprocess.Popen(
+                ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", "--stdout", text],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["aplay", "-D", output_device],
+                stdin=espeak.stdout, timeout=120, stderr=subprocess.DEVNULL,
+            )
+            espeak.wait()
+        else:
+            subprocess.run(
+                ["espeak-ng", "-v", "en-gb", "-s", "140", "-p", "30", text],
+                timeout=120,
+            )
     except FileNotFoundError:
         log.error("espeak-ng not found — cannot speak response")
     except Exception as e:
@@ -317,11 +342,13 @@ def main():
             if score >= THRESHOLD:
                 now = time.monotonic()
                 if now - last_trigger >= COOLDOWN:
-                    last_trigger = now
                     # Kill arecord while handling wake (free the mic)
                     arecord_proc.terminate()
                     arecord_proc.wait()
                     on_wake(alsa_device)
+                    # Reset model state to avoid retriggering on stale activations
+                    model.reset()
+                    last_trigger = time.monotonic()
                     # Restart arecord
                     arecord_proc = subprocess.Popen(
                         arecord_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

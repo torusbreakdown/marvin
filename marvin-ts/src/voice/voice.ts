@@ -13,6 +13,24 @@ const STT_SCRIPT = join(__dirname, '..', '..', 'src', 'voice', 'stt.py');
 // Resolve the venv python — walk up from dist/voice to marvin-ts/.venv
 const VENV_PYTHON = join(__dirname, '..', '..', '.venv', 'bin', 'python');
 
+/** Auto-detect a USB playback device (skip HDMI and ReSpeaker mic array). */
+let _cachedPlaybackDevice: string | null | undefined;
+function detectPlaybackDevice(): string | null {
+  if (_cachedPlaybackDevice !== undefined) return _cachedPlaybackDevice;
+  try {
+    const cards = readFileSync('/proc/asound/cards', 'utf-8');
+    for (const m of cards.matchAll(/^\s*(\d+)\s+\[(\S+)\s*\]/gm)) {
+      const [, num, id] = m;
+      if (id !== 'NVidia' && id !== 'ArrayUAC10') {
+        _cachedPlaybackDevice = `plughw:${num},0`;
+        return _cachedPlaybackDevice;
+      }
+    }
+  } catch { /* ignore */ }
+  _cachedPlaybackDevice = null;
+  return null;
+}
+
 export interface STTResult {
   text: string;
   language?: string;
@@ -168,12 +186,26 @@ export function speak(text: string, opts?: VoiceOptions): ChildProcess {
 
   if (!clean) return spawn('true');
 
-  const proc = spawn('espeak-ng', [
-    '-v', o.ttsVoice,
-    '-s', String(o.ttsSpeed),
-    '-p', String(o.ttsPitch),
-    '--', clean,
-  ], { stdio: 'ignore' });
+  // Route audio to the right output device
+  const playbackDevice = process.env['MARVIN_PLAYBACK_DEVICE'] || detectPlaybackDevice();
+  let proc: ChildProcess;
+
+  if (playbackDevice) {
+    // Pipe espeak WAV stdout through aplay on the chosen device
+    const espeak = spawn('espeak-ng', [
+      '-v', o.ttsVoice, '-s', String(o.ttsSpeed), '-p', String(o.ttsPitch),
+      '--stdout', '--', clean,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    proc = spawn('aplay', ['-D', playbackDevice], {
+      stdio: [espeak.stdout, 'ignore', 'ignore'],
+    });
+    espeak.on('exit', () => { if (!proc.killed) proc.stdin?.end?.(); });
+  } else {
+    proc = spawn('espeak-ng', [
+      '-v', o.ttsVoice, '-s', String(o.ttsSpeed), '-p', String(o.ttsPitch),
+      '--', clean,
+    ], { stdio: 'ignore' });
+  }
 
   currentTTS = proc;
   proc.on('exit', () => {

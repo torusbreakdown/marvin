@@ -70,15 +70,25 @@ export function startRecording(): string {
 
 /**
  * Stop recording and return the WAV file path.
+ * Waits for arecord to finalize the WAV header before returning.
  */
-export function stopRecording(): string | null {
-  if (recordProc) {
-    recordProc.kill('SIGINT');
-    recordProc = null;
-  }
+export function stopRecording(): Promise<string | null> {
+  const proc = recordProc;
   const p = recordPath;
+  recordProc = null;
   recordPath = null;
-  return p;
+
+  if (!proc || !p) return Promise.resolve(null);
+
+  return new Promise(resolve => {
+    proc.once('exit', () => {
+      // Small extra delay to ensure filesystem flush
+      setTimeout(() => resolve(p), 100);
+    });
+    proc.kill('SIGINT');
+    // Safety timeout — don't hang forever
+    setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} resolve(p); }, 3000);
+  });
 }
 
 export function isRecording(): boolean {

@@ -659,7 +659,7 @@ export class CursesUI implements UI {
     this.voiceEnabled = on;
   }
 
-  private toggleVoiceRecording(): void {
+  private async toggleVoiceRecording(): Promise<void> {
     if (!this.voiceEnabled) {
       this.displaySystem('Voice not enabled. Use !voice to enable.');
       return;
@@ -668,9 +668,10 @@ export class CursesUI implements UI {
     if (this.voiceRecording) {
       // Stop recording → transcribe
       this.voiceRecording = false;
-      const wavPath = stopRecording();
       this.updateInputBorder();
-      this.displaySystem('🎙️ Recording stopped — transcribing…');
+      this.displaySystem('🎙️ Recording stopped — finalizing…');
+      const wavPath = await stopRecording();
+      this.displaySystem('🎙️ Transcribing…');
       if (wavPath && this.onVoiceInput) {
         this.onVoiceInput(wavPath);
       }

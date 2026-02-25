@@ -1,5 +1,5 @@
 /**
- * Voice module: STT via faster-whisper (Python) and TTS via espeak-ng.
+ * Voice module: STT via faster-whisper (Python) and TTS via tts.py (Kokoro/espeak-ng).
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, unlinkSync, readFileSync } from 'node:fs';
@@ -9,9 +9,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STT_SCRIPT = join(__dirname, '..', '..', 'src', 'voice', 'stt.py');
+const TTS_SCRIPT = join(__dirname, '..', '..', 'src', 'voice', 'tts.py');
 
 // Resolve the venv python — walk up from dist/voice to marvin-ts/.venv
 const VENV_PYTHON = join(__dirname, '..', '..', '.venv', 'bin', 'python');
+const TTS_VENV_PYTHON = join(__dirname, '..', '..', '.tts-venv', 'bin', 'python');
 
 /** Auto-detect a USB playback device (skip HDMI and ReSpeaker mic array). */
 let _cachedPlaybackDevice: string | null | undefined;
@@ -165,7 +167,8 @@ export function transcribe(wavPath: string, opts?: VoiceOptions): STTResult {
 }
 
 /**
- * Speak text using espeak-ng. Non-blocking (fire and forget).
+ * Speak text using tts.py (Kokoro fine-tuned voice, falls back to espeak-ng).
+ * Non-blocking (fire and forget).
  */
 export function speak(text: string, opts?: VoiceOptions): ChildProcess {
   stopSpeaking();
@@ -186,26 +189,20 @@ export function speak(text: string, opts?: VoiceOptions): ChildProcess {
 
   if (!clean) return spawn('true');
 
-  // Route audio to the right output device
   const playbackDevice = process.env['MARVIN_PLAYBACK_DEVICE'] || detectPlaybackDevice();
-  let proc: ChildProcess;
 
-  if (playbackDevice) {
-    // Pipe espeak WAV stdout through aplay on the chosen device
-    const espeak = spawn('espeak-ng', [
-      '-v', o.ttsVoice, '-s', String(o.ttsSpeed), '-p', String(o.ttsPitch),
-      '--stdout', '--', clean,
-    ], { stdio: ['ignore', 'pipe', 'ignore'] });
-    proc = spawn('aplay', ['-D', playbackDevice], {
-      stdio: [espeak.stdout, 'ignore', 'ignore'],
-    });
-    espeak.on('exit', () => { if (!proc.killed) proc.stdin?.end?.(); });
-  } else {
-    proc = spawn('espeak-ng', [
-      '-v', o.ttsVoice, '-s', String(o.ttsSpeed), '-p', String(o.ttsPitch),
-      '--', clean,
-    ], { stdio: 'ignore' });
-  }
+  // Use tts.py which auto-selects kokoro > xtts > espeak
+  const python = existsSync(TTS_VENV_PYTHON) ? TTS_VENV_PYTHON : (existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3');
+  const args = [TTS_SCRIPT, '--text', clean];
+  if (playbackDevice) args.push('--device', playbackDevice);
+
+  const proc = spawn(python, args, {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      LD_PRELOAD: '/usr/lib/x86_64-linux-gnu/libstdc++.so.6',
+    },
+  });
 
   currentTTS = proc;
   proc.on('exit', () => {
@@ -226,9 +223,11 @@ export function stopSpeaking(): void {
 }
 
 /**
- * Check if espeak-ng is available.
+ * Check if TTS is available (kokoro via tts.py or espeak-ng fallback).
  */
 export function hasTTS(): boolean {
+  // Kokoro available via tts.py
+  if (existsSync(TTS_SCRIPT) && existsSync(TTS_VENV_PYTHON)) return true;
   try {
     execFileSync('espeak-ng', ['--version'], { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
     return true;

@@ -3,7 +3,7 @@ import { z, ZodObject, ZodRawShape } from 'zod';
 // === Tool System ===
 
 export type ToolCategory = 'coding' | 'readonly' | 'always';
-export type AppMode = 'surf' | 'coding' | 'lockin';
+export type AppMode = 'surf' | 'coding' | 'lockin' | 'full';
 
 export interface ToolDef {
   name: string;

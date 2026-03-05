@@ -14,6 +14,8 @@ export class OpenAICompatProvider implements Provider {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
 
+  private lastResponseId: string | null = null;
+
   constructor(config: ProviderConfig) {
     this.name = config.provider;
     this.model = config.model;
@@ -23,6 +25,13 @@ export class OpenAICompatProvider implements Provider {
   }
 
   async chat(messages: Message[], options?: ChatOptions): Promise<ChatResult> {
+    if (this.name === 'openai') {
+      return await this.chatResponses(messages, options);
+    }
+    return await this.chatCompletions(messages, options);
+  }
+
+  private async chatCompletions(messages: Message[], options?: ChatOptions): Promise<ChatResult> {
     const hasTools = options?.tools && options.tools.length > 0;
     // Force stream=false when tools are provided (tool calls can't stream reliably)
     const shouldStream = hasTools ? false : (options?.stream ?? false);
@@ -76,6 +85,79 @@ export class OpenAICompatProvider implements Provider {
         return await this.parseStreamingResponse(response, options?.onDelta);
       } else {
         return await this.parseNonStreamingResponse(response);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async chatResponses(messages: Message[], options?: ChatOptions): Promise<ChatResult> {
+    const hasTools = options?.tools && options.tools.length > 0;
+    // Force stream=false when tools are provided (tool calls can't stream reliably)
+    const shouldStream = hasTools ? false : (options?.stream ?? false);
+
+    const isToolContinuation = messages.length > 0 && messages[messages.length - 1].role === 'tool';
+
+    const effort = this.getOpenAIReasoningEffort();
+    const body: Record<string, unknown> = {
+      model: this.model,
+      ...(effort ? { reasoning: { effort } } : {}),
+      ...(hasTools ? { tools: options!.tools } : {}),
+      ...(options?.extraBody ?? {}),
+      ...(shouldStream ? { stream: true } : {}),
+    };
+
+    if (isToolContinuation) {
+      if (!this.lastResponseId) {
+        throw new Error('OpenAI Responses tool continuation missing previous response id');
+      }
+      const toolMsgs: Message[] = [];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (m.role !== 'tool') break;
+        toolMsgs.push(m);
+      }
+      toolMsgs.reverse();
+
+      body.previous_response_id = this.lastResponseId;
+      body.input = toolMsgs.map((m) => ({
+        type: 'function_call_output',
+        call_id: m.tool_call_id,
+        output: m.content ?? '',
+      }));
+    } else {
+      // Do NOT include prior tool messages in input; Responses API won't accept injected tool call history.
+      body.input = messages
+        .filter(m => m.role !== 'tool')
+        .map(m => ({ role: m.role, content: m.content ?? '' }));
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+    const signal = options?.signal
+      ? anySignal([options.signal, controller.signal])
+      : controller.signal;
+
+    try {
+      const response = await fetch(`${this.baseUrl}/responses`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify(body),
+        signal,
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        throw new Error(`${response.status} ${response.statusText}: ${errBody.slice(0, 500)}`);
+      }
+
+      if (shouldStream) {
+        return await this.parseResponsesStreamingResponse(response, options?.onDelta);
+      } else {
+        return await this.parseResponsesNonStreamingResponse(response);
       }
     } finally {
       clearTimeout(timeoutId);
@@ -192,6 +274,121 @@ export class OpenAICompatProvider implements Provider {
       return { thinking_budget: 2048 };
     }
     return null;
+  }
+
+  private getOpenAIReasoningEffort(): string | null {
+    // Only inject for the real OpenAI provider, not other OpenAI-compatible backends.
+    if (this.name !== 'openai') return null;
+    if (!this.model.startsWith('gpt-5')) return null;
+    return 'xhigh';
+  }
+
+  private async parseResponsesNonStreamingResponse(response: Response): Promise<ChatResult> {
+    const json = await response.json() as any;
+    if (json?.id) this.lastResponseId = json.id;
+
+    const toolCalls: ToolCall[] = (json?.output ?? [])
+      .filter((o: any) => o?.type === 'function_call' && o?.name)
+      .map((o: any) => ({
+        id: o.call_id ?? o.id ?? '',
+        type: 'function' as const,
+        function: {
+          name: o.name,
+          arguments: o.arguments ?? '{}',
+        },
+      }))
+      .filter((tc: ToolCall) => !!tc.id);
+
+    const content = this.extractResponsesOutputText(json);
+
+    const message: Message = {
+      role: 'assistant',
+      content,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    };
+
+    return {
+      message,
+      usage: {
+        inputTokens: json.usage?.input_tokens ?? 0,
+        outputTokens: json.usage?.output_tokens ?? 0,
+      },
+    };
+  }
+
+  private async parseResponsesStreamingResponse(response: Response, onDelta?: (text: string) => void): Promise<ChatResult> {
+    const contentParts: string[] = [];
+    let usage = { inputTokens: 0, outputTokens: 0 };
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (!data || data === '[DONE]') continue;
+
+        let chunk: any;
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          continue;
+        }
+
+        if (chunk?.type && typeof chunk.type === 'string' && chunk.type.endsWith('.delta') && typeof chunk.delta === 'string') {
+          contentParts.push(chunk.delta);
+          onDelta?.(chunk.delta);
+        }
+
+        if (chunk?.response?.id) {
+          this.lastResponseId = chunk.response.id;
+        }
+
+        const u = chunk?.response?.usage ?? chunk?.usage;
+        if (u) {
+          usage.inputTokens = u.input_tokens ?? usage.inputTokens;
+          usage.outputTokens = u.output_tokens ?? usage.outputTokens;
+        }
+      }
+    }
+
+    const message: Message = {
+      role: 'assistant',
+      content: contentParts.length > 0 ? contentParts.join('') : null,
+    };
+
+    return { message, usage };
+  }
+
+  private extractResponsesOutputText(json: any): string | null {
+    if (typeof json?.output_text === 'string') {
+      return json.output_text.length > 0 ? json.output_text : null;
+    }
+
+    const parts: string[] = [];
+    for (const item of json?.output ?? []) {
+      if (item?.type === 'message') {
+        for (const c of item.content ?? []) {
+          if (c?.type === 'output_text' && typeof c.text === 'string') {
+            parts.push(c.text);
+          }
+        }
+      }
+      if (item?.type === 'output_text' && typeof item.text === 'string') {
+        parts.push(item.text);
+      }
+    }
+
+    return parts.length > 0 ? parts.join('') : null;
   }
 
   destroy(): void {

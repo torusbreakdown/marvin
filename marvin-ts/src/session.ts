@@ -150,7 +150,7 @@ export class SessionManager {
       // Build tool context
       const toolCtx: ToolContext = {
         workingDir: this.state.workingDir,
-        codingMode: this.state.codingMode,
+        codingMode: this.state.codingMode || this.state.mode === 'full',
         nonInteractive: this.state.nonInteractive,
         profileDir: this.profile.profileDir,
         profile: this.profile,
@@ -240,7 +240,7 @@ export class SessionManager {
 
   setMode(mode: AppMode): void {
     this.state.mode = mode;
-    this.state.codingMode = mode === 'coding' || mode === 'lockin';
+    this.state.codingMode = mode === 'coding' || mode === 'lockin' || mode === 'full';
   }
 
   getMode(): AppMode {
@@ -268,6 +268,11 @@ export class SessionManager {
 
   private getToolsForMode(): OpenAIFunctionDef[] {
     const mode = this.state.mode;
+    if (mode === 'full') {
+      return this.registry.getOpenAISchemasMulti({
+        categories: ['always', 'readonly', 'coding'],
+      });
+    }
     if (mode === 'coding') {
       return this.registry.getOpenAISchemasMulti({
         categories: ['coding'],

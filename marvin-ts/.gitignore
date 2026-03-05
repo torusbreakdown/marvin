@@ -1,4 +1,4 @@
 node_modules/
 dist/
 *.tsbuildinfo
-.marvin/qa-report*.md
+.marvin/

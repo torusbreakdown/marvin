@@ -17,6 +17,9 @@ node dist/main.js
 # Specify provider
 MARVIN_PROVIDER=ollama node dist/main.js
 MARVIN_PROVIDER=openai OPENAI_API_KEY=sk-... node dist/main.js
+# or store it in pass:
+pass insert -e marvin/OPENAI_API_KEY  # (or `pass insert -e OPENAI_API_KEY`)
+MARVIN_PROVIDER=openai node dist/main.js
 
 # Plain terminal mode
 node dist/main.js --plain
@@ -53,7 +56,7 @@ node dist/main.js "What's the weather like?"
 | Command | Action |
 |---------|--------|
 | `!voice` / `!v` | Toggle voice mode (STT input + TTS output) |
-| `!mode [surf\|coding\|lockin]` | Show or switch tool mode |
+| `!mode [surf\|coding\|lockin\|full]` | Show or switch tool mode |
 | `!model [provider] [model]` | Show or switch LLM provider/model |
 | `!code` | Toggle coding mode |
 | `!shell` / `!sh` | Toggle shell mode |
@@ -66,7 +69,7 @@ node dist/main.js "What's the weather like?"
 | Provider | Env Vars | Default Model |
 |----------|----------|---------------|
 | **ollama** | — (localhost:11434) | qwen3-coder:30b |
-| **openai** | `OPENAI_API_KEY` | gpt-5.1 |
+| **openai** | `OPENAI_API_KEY` (or `pass marvin/OPENAI_API_KEY`) | gpt-5.4 (xhigh) |
 | **groq** | `GROQ_API_KEY` | llama-3.3-70b-versatile |
 | **gemini** | `GEMINI_API_KEY` | gemini-3-pro-preview |
 | **copilot** | GitHub CLI auth (`gh auth login`) | claude-haiku-4.5 |
@@ -82,6 +85,7 @@ Set provider: `MARVIN_PROVIDER=openai` or `!model openai gpt-4o` at runtime.
 | **surf** (default) | All general tools — web, media, notes, places, weather, etc. No file I/O or shell |
 | **coding** | File read/write, git, shell, package management + web reference tools |
 | **lockin** | Coding tools only — no entertainment, no browsing distractions |
+| **full** | Every tool enabled (always + readonly + coding) |
 
 ## Voice Support
 

@@ -34,6 +34,19 @@ export function getSecret(name: string): string | undefined {
     // pass not installed, key not found, or GPG locked — fall through
   }
 
+  // Fallback: allow secrets stored at the top level (e.g., `pass OPENAI_API_KEY`)
+  if (!value) {
+    try {
+      value = execFileSync('pass', [name], {
+        encoding: 'utf-8',
+        timeout: 5_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+    } catch {
+      // ignore
+    }
+  }
+
   // Fall back to environment variable
   if (!value) {
     value = process.env[name];

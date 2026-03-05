@@ -46,7 +46,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       `Usage: marvin [options] [prompt]\n\n` +
       `Options:\n` +
       `  --provider <name>    LLM provider (ollama, copilot, openai, groq, gemini, openai-compat, llama-server)\n` +
-      `  --mode <mode>        Tool mode: surf (default), coding, lockin\n` +
+      `  --mode <mode>        Tool mode: surf (default), coding, lockin, full\n` +
       `  --plain              Force plain readline UI\n` +
       `  --curses             Force curses TUI\n` +
       `  --voice              Enable voice mode (STT input + TTS output) on startup\n` +
@@ -59,7 +59,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
       `  -v, --version        Show version\n` +
       `\nSlash commands (interactive):\n` +
       `  !code         Toggle coding mode\n` +
-      `  !mode         Show/switch mode (!mode surf|coding|lockin)\n` +
+      `  !mode         Show/switch mode (!mode surf|coding|lockin|full)\n` +
       `  !sh / !shell  Toggle shell mode (or !sh <cmd> to run a command)\n` +
       `  !model        Show current provider/model (!model <provider> [model] to switch)\n` +
       `  !<cmd>        Run shell command\n` +
@@ -76,7 +76,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
   }
 
   const modeArg = values.mode as string | undefined;
-  const validModes: AppMode[] = ['surf', 'coding', 'lockin'];
+  const validModes: AppMode[] = ['surf', 'coding', 'lockin', 'full'];
   const codingMode = (values['coding-mode'] ?? false) || !!values['working-dir'];
   let mode: AppMode = 'surf';
   if (modeArg) {
@@ -96,7 +96,7 @@ export function parseCliArgs(argv?: string[]): CliArgs {
     voice: values.voice ?? false,
     nonInteractive: values['non-interactive'] ?? false,
     mode,
-    codingMode: mode === 'coding' || mode === 'lockin',
+    codingMode: mode === 'coding' || mode === 'lockin' || mode === 'full',
     prompt: values.prompt,
     workingDir: values['working-dir'],
     ntfy: values.ntfy,
@@ -147,13 +147,13 @@ export function handleSlashCommand(input: string, ctx: SlashCommandContext): boo
       ctx.ui.displaySystem(`Mode: ${ctx.session.getMode()}`);
       return true;
     }
-    const valid: AppMode[] = ['surf', 'coding', 'lockin'];
+    const valid: AppMode[] = ['surf', 'coding', 'lockin', 'full'];
     if (!valid.includes(arg as AppMode)) {
       ctx.ui.displaySystem(`Invalid mode '${arg}'. Valid: ${valid.join(', ')}`);
       return true;
     }
     ctx.session.setMode(arg as AppMode);
-    const emoji = arg === 'surf' ? '🏄' : arg === 'coding' ? '🔧' : '🔒';
+    const emoji = arg === 'surf' ? '🏄' : arg === 'coding' ? '🔧' : arg === 'lockin' ? '🔒' : '🧰';
     ctx.ui.displaySystem(`${emoji} Mode: ${arg}`);
     return true;
   }
@@ -339,11 +339,13 @@ function refreshStatus(ui: UI, session: SessionManager, providerConfig: Provider
 }
 
 function resolveProviderConfig(args: CliArgs): ProviderConfig {
-  const providerName = args.provider ?? process.env['MARVIN_PROVIDER'] ?? 'moonshot';
+  const providerName = args.provider
+    ?? process.env['MARVIN_PROVIDER']
+    ?? (args.mode === 'full' ? 'openai' : 'moonshot');
   const defaults: Record<string, { model: string; baseUrl?: string }> = {
     ollama:        { model: 'qwen3-coder:30b', baseUrl: 'http://localhost:11434' },
     copilot:       { model: 'claude-haiku-4.5' },
-    openai:        { model: 'gpt-5.1', baseUrl: 'https://api.openai.com/v1' },
+    openai:        { model: 'gpt-5.4', baseUrl: 'https://api.openai.com/v1' },
     groq:          { model: 'llama-3.3-70b-versatile', baseUrl: 'https://api.groq.com/openai/v1' },
     gemini:        { model: 'gemini-3-pro-preview', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
     'openai-compat': { model: 'default' },
@@ -357,9 +359,12 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
   const d = defaults[providerName];
 
   // Resolve API key: pass store → env vars
-  const apiKey = getSecret('MARVIN_API_KEY')
-    ?? getSecret(`${providerName.toUpperCase().replace(/-/g, '_')}_API_KEY`)
-    ?? getSecret('OPENAI_API_KEY');
+  // OpenAI should prefer OPENAI_API_KEY over generic MARVIN_API_KEY.
+  const apiKey = providerName === 'openai'
+    ? (getSecret('OPENAI_API_KEY') ?? getSecret('MARVIN_API_KEY'))
+    : (getSecret('MARVIN_API_KEY')
+      ?? getSecret(`${providerName.toUpperCase().replace(/-/g, '_')}_API_KEY`)
+      ?? getSecret('OPENAI_API_KEY'));
 
   return {
     provider: providerName as ProviderConfig['provider'],

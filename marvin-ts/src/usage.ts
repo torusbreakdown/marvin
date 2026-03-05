@@ -9,6 +9,7 @@ const COST_TABLE: Record<string, [number, number]> = {
   'gpt-5.1':                   [2.00,   8.00],
   'gpt-5.2':                   [2.50,  10.00],
   'gpt-5.3-codex':             [3.00,  12.00],
+  'gpt-5.4':                   [2.00,   8.00],
   'claude-haiku-4.5':          [0.80,   4.00],
   'claude-sonnet-4.5':         [3.00,  15.00],
   'claude-opus-4.6':           [15.00,  75.00],

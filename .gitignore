@@ -5,6 +5,13 @@ dist/
 coverage/
 .vitest/
 .DS_Store
-.marvin/notes/
+.marvin/
 target/
+
+# Local artifacts (voice + training)
+marvin-ts/.marvin/
+marvin-ts/checkpoints/
+marvin-ts/data/
 marvin-ts/src/wakeword/training/
+marvin-ts/src/wakeword/training.log
+marvin-ts/voice_ref.wav

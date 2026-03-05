@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { OpenAICompatProvider } from '../../src/llm/openai.js';
 import type { ProviderConfig, Message } from '../../src/types.js';
@@ -67,14 +67,14 @@ function makeSSEStream(deltas: Array<{ content?: string; tool_calls?: any[] }>, 
   return result;
 }
 
-describe('OpenAICompatProvider', () => {
+describe('OpenAICompatProvider (chat/completions)', () => {
   const mock = createMockServer();
   let baseConfig: ProviderConfig;
 
   beforeAll(async () => {
     await mock.start();
     baseConfig = {
-      provider: 'openai',
+      provider: 'groq',
       model: 'gpt-4',
       apiKey: 'test-key-123',
       baseUrl: `http://127.0.0.1:${mock.port()}`,
@@ -90,13 +90,13 @@ describe('OpenAICompatProvider', () => {
   describe('Construction', () => {
     it('constructs with ProviderConfig', () => {
       const provider = new OpenAICompatProvider(baseConfig);
-      expect(provider.name).toBe('openai');
+      expect(provider.name).toBe('groq');
       expect(provider.model).toBe('gpt-4');
     });
 
     it('exposes name and model as readonly', () => {
       const provider = new OpenAICompatProvider(baseConfig);
-      expect(provider.name).toBe('openai');
+      expect(provider.name).toBe('groq');
       expect(provider.model).toBe('gpt-4');
     });
   });
@@ -226,6 +226,7 @@ describe('OpenAICompatProvider', () => {
         .rejects.toThrow(/Rate limited/);
     });
   });
+
 
   describe('Gemini thinking config', () => {
     it('injects thinking_level:low for gemini-3 models', async () => {

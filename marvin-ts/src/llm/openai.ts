@@ -102,7 +102,7 @@ export class OpenAICompatProvider implements Provider {
     const body: Record<string, unknown> = {
       model: this.model,
       ...(effort ? { reasoning: { effort } } : {}),
-      ...(hasTools ? { tools: options!.tools } : {}),
+      ...(hasTools ? { tools: this.convertToolsForResponses(options!.tools!) } : {}),
       ...(options?.extraBody ?? {}),
       ...(shouldStream ? { stream: true } : {}),
     };
@@ -281,6 +281,17 @@ export class OpenAICompatProvider implements Provider {
     if (this.name !== 'openai') return null;
     if (!this.model.startsWith('gpt-5')) return null;
     return 'xhigh';
+  }
+
+  // Responses API uses a flat tool schema: {type, name, description, parameters}
+  // Chat Completions uses nested: {type, function: {name, description, parameters}}
+  private convertToolsForResponses(tools: Array<{ type: string; function: { name: string; description: string; parameters: any } }>): any[] {
+    return tools.map(t => ({
+      type: 'function',
+      name: t.function.name,
+      description: t.function.description,
+      parameters: t.function.parameters,
+    }));
   }
 
   private async parseResponsesNonStreamingResponse(response: Response): Promise<ChatResult> {

@@ -83,6 +83,8 @@ describe('OpenAICompatProvider (Responses API)', () => {
     const body = JSON.parse(req.body);
     expect(body.reasoning?.effort).toBe('xhigh');
     expect(body.tools).toBeDefined();
+    expect(body.tools[0].name).toBe('test');
+    expect(body.tools[0].type).toBe('function');
   });
 
   it('continues tool calls via previous_response_id + function_call_output input', async () => {

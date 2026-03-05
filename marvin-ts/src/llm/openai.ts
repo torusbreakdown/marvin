@@ -107,10 +107,8 @@ export class OpenAICompatProvider implements Provider {
       ...(shouldStream ? { stream: true } : {}),
     };
 
-    if (isToolContinuation) {
-      if (!this.lastResponseId) {
-        throw new Error('OpenAI Responses tool continuation missing previous response id');
-      }
+    if (isToolContinuation && this.lastResponseId) {
+      // Continuation mode: send tool results referencing the previous response
       const toolMsgs: Message[] = [];
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
@@ -126,10 +124,19 @@ export class OpenAICompatProvider implements Provider {
         output: m.content ?? '',
       }));
     } else {
-      // Do NOT include prior tool messages in input; Responses API won't accept injected tool call history.
+      // Non-continuation: convert full history to Responses API input format.
+      // Inline tool results as user messages since Responses API doesn't support role=tool in input.
+      this.lastResponseId = null;
       body.input = messages
         .filter(m => m.role !== 'tool')
-        .map(m => ({ role: m.role, content: m.content ?? '' }));
+        .map(m => {
+          if (m.tool_calls?.length) {
+            // Convert assistant tool_call messages to plain text so context isn't lost
+            const callSummary = m.tool_calls.map(tc => `Called ${tc.function.name}(${tc.function.arguments})`).join('; ');
+            return { role: 'assistant', content: m.content ? `${m.content}\n[${callSummary}]` : `[${callSummary}]` };
+          }
+          return { role: m.role, content: m.content ?? '' };
+        });
     }
 
     const controller = new AbortController();
@@ -403,6 +410,11 @@ export class OpenAICompatProvider implements Provider {
 
   destroy(): void {
     // No persistent resources to clean up for HTTP-based provider
+  }
+
+  /** Clear continuation state (e.g. after context compaction). */
+  resetContinuation(): void {
+    this.lastResponseId = null;
   }
 }
 

@@ -16,6 +16,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
 import { buildSystemMessage } from './system-prompt.js';
 import { appendChatLog, popChatLogEntries, loadChatLog } from './history.js';
+import { OpenAICompatProvider } from './llm/openai.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -348,6 +349,12 @@ export class SessionManager {
       ], { stream: false });
 
       const summary = compactResult.message.content || '[Compaction failed — no summary generated]';
+
+      // Reset provider continuation state — compaction's LLM call corrupts
+      // the Responses API's lastResponseId, making tool continuations fail.
+      if (this.provider instanceof OpenAICompatProvider) {
+        this.provider.resetContinuation();
+      }
 
       const summaryMsg: Message = {
         role: 'system',

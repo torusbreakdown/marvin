@@ -133,4 +133,54 @@ describe('OpenAICompatProvider (Responses API)', () => {
     const r2 = await provider.chat(messages, { stream: false, tools });
     expect(r2.message.content).toBe('done');
   });
+
+  it('falls back to non-continuation when lastResponseId is cleared (after compaction)', async () => {
+    let call = 0;
+    mock.setHandler((_req, bodyStr) => {
+      call++;
+      const body = JSON.parse(bodyStr);
+      if (call === 1) {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            id: 'resp_1',
+            output: [{ type: 'function_call', call_id: 'call_1', name: 'web_search', arguments: '{"q":"x"}' }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+        };
+      }
+      // After resetContinuation, should NOT use previous_response_id
+      expect(body.previous_response_id).toBeUndefined();
+      // Tool results should be dropped, assistant tool_call inlined as text
+      const inputs = body.input as Array<{ role: string; content: string }>;
+      expect(inputs.some((i: { content: string }) => i.content.includes('web_search'))).toBe(true);
+      return {
+        status: 200,
+        body: JSON.stringify({
+          id: 'resp_3',
+          output: [{ type: 'message', content: [{ type: 'output_text', text: 'recovered' }] }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      };
+    });
+
+    const provider = new OpenAICompatProvider(openaiConfig);
+    const tools = [{
+      type: 'function' as const,
+      function: { name: 'web_search', description: 'Search', parameters: { type: 'object' as const, properties: {}, required: [] as string[] } },
+    }];
+
+    const r1 = await provider.chat([{ role: 'user', content: 'hi' }], { stream: false, tools });
+
+    // Simulate compaction clearing continuation state
+    provider.resetContinuation();
+
+    const messages: Message[] = [
+      { role: 'user', content: 'hi' },
+      r1.message,
+      { role: 'tool', tool_call_id: 'call_1', name: 'web_search', content: 'RESULT' },
+    ];
+    const r2 = await provider.chat(messages, { stream: false, tools });
+    expect(r2.message.content).toBe('recovered');
+  });
 });

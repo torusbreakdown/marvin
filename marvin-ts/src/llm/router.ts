@@ -128,6 +128,12 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
       return { message: msg, usage: totalUsage };
     }
 
+    // Intermediate tool-call response: strip any content (often reasoning/CoT leakage)
+    // to prevent it from polluting history and being echoed to the user.
+    if (msg.content) {
+      msg.content = null;
+    }
+
     // Execute tool calls in parallel
     const toolNames = msg.tool_calls.map(tc => tc.function.name);
     onToolCall?.(toolNames);

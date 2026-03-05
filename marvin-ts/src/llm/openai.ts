@@ -306,16 +306,16 @@ export class OpenAICompatProvider implements Provider {
     if (json?.id) this.lastResponseId = json.id;
 
     const toolCalls: ToolCall[] = (json?.output ?? [])
-      .filter((o: any) => o?.type === 'function_call' && o?.name)
+      .filter((o: any) => o?.type === 'function_call' && o?.name && o?.call_id
+        && o?.status !== 'incomplete' && o?.status !== 'in_progress')
       .map((o: any) => ({
-        id: o.call_id ?? o.id ?? '',
+        id: o.call_id,
         type: 'function' as const,
         function: {
           name: o.name,
           arguments: o.arguments ?? '{}',
         },
-      }))
-      .filter((tc: ToolCall) => !!tc.id);
+      }));
 
     const content = this.extractResponsesOutputText(json);
 

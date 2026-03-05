@@ -527,9 +527,9 @@ export class CursesUI implements UI {
     const ss = String(now.getSeconds()).padStart(2, '0');
     const clock = `${hh}:${mm}:${ss}`;
     const dayNight = (hour >= 6 && hour < 18) ? '*' : 'o';
-    const modeLabel: Record<string, string> = { surf: 'SURF', coding: 'CODE', lockin: 'LOCKIN' };
+    const modeLabel: Record<string, string> = { surf: 'SURF', coding: 'CODE', lockin: 'LOCKIN', full: 'FULL' };
 
-    const left = `  Marvin | ${s.profileName} | ${s.model} $${s.costUsd.toFixed(4)}`;
+    const left = `  Marvin | ${s.profileName} | ${s.providerEmoji} ${s.model} $${s.costUsd.toFixed(4)}`;
     const flags: string[] = [];
     if (s.codingMode) flags.push('CODE');
     if (s.shellMode) flags.push('SHELL');

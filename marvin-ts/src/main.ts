@@ -321,13 +321,23 @@ function makeStreamCallbacks(ui: UI, speakResponse = false): StreamCallbacks {
   };
 }
 
-function refreshStatus(ui: UI, session: SessionManager, providerConfig: ProviderConfig): void {
+function refreshStatus(ui: UI, session: SessionManager): void {
   const state = session.getState();
   const usage = session.getUsage().getSessionUsage();
   const profile = session.getProfile();
+  const provider = state.provider.provider;
+  const providerEmoji = provider === 'openai' ? '🧠'
+    : provider === 'moonshot' ? '🌙'
+      : provider === 'groq' ? '⚡'
+        : provider === 'gemini' ? '✨'
+          : provider === 'copilot' ? '🐙'
+            : provider === 'ollama' ? '🦙'
+              : provider === 'llama-server' ? '🦙'
+                : '🤖';
+
   ui.showStatus({
-    providerEmoji: '🤖',
-    model: providerConfig.model,
+    providerEmoji,
+    model: `${provider} ${state.provider.model}`,
     profileName: profile.name,
     messageCount: state.messages.length,
     costUsd: usage.totalCostUsd,
@@ -497,7 +507,7 @@ export async function main(): Promise<void> {
     ui.displayHistory(recent);
   }
 
-  refreshStatus(ui, session, providerConfig);
+  refreshStatus(ui, session);
 
   // Voice state — shared between slash commands and curses callbacks
   const voiceState = { enabled: args.voice };
@@ -552,7 +562,7 @@ export async function main(): Promise<void> {
       try {
         await session.submit(text, callbacks);
       } catch { /* error reported via callbacks */ }
-      refreshStatus(ui, session, providerConfig);
+      refreshStatus(ui, session);
     };
   }
 
@@ -569,7 +579,7 @@ export async function main(): Promise<void> {
     } catch {
       // error already reported via callbacks.onError
     }
-    refreshStatus(ui, session, providerConfig);
+    refreshStatus(ui, session);
   }
 
   // IPC socket — allows external processes (e.g., wake word detector) to send commands
@@ -613,6 +623,7 @@ export async function main(): Promise<void> {
 
     if (handleSlashCommand(input, slashCtx)) {
       if (input.trim() === 'quit' || input.trim() === 'exit') break;
+      refreshStatus(ui, session);
       continue;
     }
 
@@ -637,7 +648,7 @@ export async function main(): Promise<void> {
     } catch {
       // error already reported via callbacks.onError
     }
-    refreshStatus(ui, session, providerConfig);
+    refreshStatus(ui, session);
   }
 
   // Cleanup copilot ACP session on exit

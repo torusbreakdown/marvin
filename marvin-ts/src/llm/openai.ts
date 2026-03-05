@@ -355,7 +355,8 @@ export class OpenAICompatProvider implements Provider {
           continue;
         }
 
-        if (chunk?.type && typeof chunk.type === 'string' && chunk.type.endsWith('.delta') && typeof chunk.delta === 'string') {
+        // Only capture output_text deltas, skip reasoning deltas
+        if (chunk?.type && typeof chunk.type === 'string' && chunk.type === 'response.output_text.delta' && typeof chunk.delta === 'string') {
           contentParts.push(chunk.delta);
           onDelta?.(chunk.delta);
         }
@@ -381,21 +382,19 @@ export class OpenAICompatProvider implements Provider {
   }
 
   private extractResponsesOutputText(json: any): string | null {
-    if (typeof json?.output_text === 'string') {
-      return json.output_text.length > 0 ? json.output_text : null;
-    }
-
+    // Do NOT use json.output_text — it includes reasoning/thinking summaries.
+    // Only extract text from explicit 'message' output items.
     const parts: string[] = [];
     for (const item of json?.output ?? []) {
+      // Skip reasoning items entirely
+      if (item?.type === 'reasoning') continue;
+
       if (item?.type === 'message') {
         for (const c of item.content ?? []) {
           if (c?.type === 'output_text' && typeof c.text === 'string') {
             parts.push(c.text);
           }
         }
-      }
-      if (item?.type === 'output_text' && typeof item.text === 'string') {
-        parts.push(item.text);
       }
     }
 

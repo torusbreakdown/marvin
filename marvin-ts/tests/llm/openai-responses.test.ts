@@ -183,4 +183,49 @@ describe('OpenAICompatProvider (Responses API)', () => {
     const r2 = await provider.chat(messages, { stream: false, tools });
     expect(r2.message.content).toBe('recovered');
   });
+
+  it('groups tools into namespaces with tool_search when tool count > 15', async () => {
+    mock.setHandler(() => ({
+      status: 200,
+      body: JSON.stringify({
+        id: 'resp_ns',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok' }] }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    }));
+
+    const provider = new OpenAICompatProvider(openaiConfig);
+    const makeT = (n: string) => ({
+      type: 'function' as const,
+      function: { name: n, description: `${n} desc`, parameters: { type: 'object' as const, properties: {}, required: [] as string[] } },
+    });
+    const tools = [
+      makeT('run_command'), makeT('set_working_dir'), makeT('get_working_dir'),
+      makeT('web_search'), makeT('search_news'), makeT('browse_web'), makeT('scrape_page'),
+      makeT('wiki_search'), makeT('wiki_summary'),
+      makeT('read_file'), makeT('create_file'), makeT('list_files'), makeT('grep_files'),
+      makeT('git_status'), makeT('git_diff'), makeT('git_log'),
+      makeT('exit_app'), makeT('get_usage'), makeT('custom_tool_1'), makeT('custom_tool_2'),
+    ];
+
+    await provider.chat([{ role: 'user', content: 'test' }], { stream: false, tools });
+
+    const req = mock.lastRequest()!;
+    const body = JSON.parse(req.body);
+    const toolTypes = body.tools.map((t: any) => t.type);
+
+    expect(toolTypes).toContain('namespace');
+    expect(toolTypes).toContain('tool_search');
+
+    const directNames = body.tools.filter((t: any) => t.type === 'function').map((t: any) => t.name);
+    expect(directNames).toContain('run_command');
+    expect(directNames).toContain('set_working_dir');
+    expect(directNames).toContain('exit_app');
+    expect(directNames).toContain('custom_tool_1');
+
+    const webNs = body.tools.find((t: any) => t.type === 'namespace' && t.name === 'web');
+    expect(webNs).toBeDefined();
+    expect(webNs.tools.every((t: any) => t.defer_loading === true)).toBe(true);
+    expect(webNs.tools.map((t: any) => t.name)).toContain('web_search');
+  });
 });

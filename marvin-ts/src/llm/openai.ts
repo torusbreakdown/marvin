@@ -295,13 +295,140 @@ export class OpenAICompatProvider implements Provider {
 
   // Responses API uses a flat tool schema: {type, name, description, parameters}
   // Chat Completions uses nested: {type, function: {name, description, parameters}}
+  // When tool count is large, group into namespaces with tool_search for efficiency.
   private convertToolsForResponses(tools: Array<{ type: string; function: { name: string; description: string; parameters: any } }>): any[] {
-    return tools.map(t => ({
-      type: 'function',
-      name: t.function.name,
-      description: t.function.description,
-      parameters: t.function.parameters,
-    }));
+    // For small tool sets, use flat format directly
+    if (tools.length <= 15) {
+      return tools.map(t => ({
+        type: 'function',
+        name: t.function.name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+      }));
+    }
+
+    // Large tool sets: group into namespaces with deferred loading
+    // so the model uses tool_search instead of loading 100+ schemas
+    const namespaceMap: Record<string, { description: string; tools: string[] }> = {
+      web: {
+        description: 'Web search, news, browsing, and scraping tools.',
+        tools: ['web_search', 'search_news', 'browse_web', 'scrape_page', 'read_rss'],
+      },
+      wiki: {
+        description: 'Wikipedia search, summaries, full articles, and grep.',
+        tools: ['wiki_search', 'wiki_summary', 'wiki_full', 'wiki_grep'],
+      },
+      academic: {
+        description: 'Academic paper search on Semantic Scholar and arXiv.',
+        tools: ['search_papers', 'search_arxiv'],
+      },
+      files: {
+        description: 'Read, create, edit, patch, list, grep, and find files in the working directory.',
+        tools: ['read_file', 'create_file', 'append_file', 'apply_patch', 'list_files', 'grep_files', 'find_files'],
+      },
+      git: {
+        description: 'Git operations: status, diff, log, blame, commit, branch, checkout.',
+        tools: ['git_status', 'git_diff', 'git_log', 'git_blame', 'git_commit', 'git_branch', 'git_checkout'],
+      },
+      github: {
+        description: 'GitHub operations: clone repos, read files, grep code.',
+        tools: ['github_clone', 'github_read_file', 'github_grep'],
+      },
+      notes: {
+        description: 'Personal notes: write, read, list, search, organize.',
+        tools: ['write_note', 'read_note', 'notes_ls', 'notes_mkdir', 'search_notes'],
+      },
+      media: {
+        description: 'Search movies (TMDB), games (IGDB/RAWG), and Steam.',
+        tools: ['search_movies', 'get_movie_details', 'search_games', 'get_game_details', 'steam_search', 'steam_app_details', 'steam_featured', 'steam_player_stats', 'steam_user_games', 'steam_user_summary'],
+      },
+      music: {
+        description: 'Music search/lookup (MusicBrainz) and Spotify playback/playlists.',
+        tools: ['music_search', 'music_lookup', 'spotify_auth', 'spotify_search', 'spotify_create_playlist', 'spotify_add_tracks', 'spotify_playback', 'spotify_now_playing'],
+      },
+      calendar_time: {
+        description: 'Calendar events, alarms, and timers.',
+        tools: ['calendar_list_upcoming', 'calendar_add_event', 'calendar_delete_event', 'set_alarm', 'list_alarms', 'cancel_alarm', 'timer_start', 'timer_check', 'timer_stop'],
+      },
+      location: {
+        description: 'Location, maps (OSM/Overpass), weather, travel directions, and places.',
+        tools: ['get_my_location', 'osm_search', 'overpass_query', 'weather_forecast', 'estimate_travel_time', 'get_directions', 'places_text_search', 'places_nearby_search', 'setup_google_auth'],
+      },
+      downloads: {
+        description: 'Download files and media (including yt-dlp for video/audio).',
+        tools: ['download_file', 'yt_dlp_download'],
+      },
+      blender: {
+        description: 'Blender 3D: scene inspection, object CRUD, materials, code execution, screenshots.',
+        tools: ['blender_get_scene', 'blender_get_object', 'blender_create_object', 'blender_modify_object', 'blender_delete_object', 'blender_set_material', 'blender_execute_code', 'blender_screenshot'],
+      },
+      utilities: {
+        description: 'Unit conversion, dictionary, translation, system info, OCR, transcription, image generation, recipes, ntfy notifications, bookmarks, tickets.',
+        tools: ['convert_units', 'dictionary_lookup', 'translate_text', 'system_info', 'ocr', 'transcribe_audio', 'generate_image', 'recipe_search', 'recipe_lookup', 'generate_ntfy_topic', 'ntfy_subscribe', 'ntfy_unsubscribe', 'ntfy_publish', 'ntfy_list', 'bookmark_save', 'bookmark_list', 'bookmark_search', 'tk', 'install_packages'],
+      },
+    };
+
+    // Always-loaded tools (not deferred) — essential for basic operation
+    const alwaysLoaded = new Set([
+      'run_command', 'set_working_dir', 'get_working_dir',
+      'review_codebase', 'review_status',
+      'exit_app', 'get_usage', 'switch_profile', 'update_preferences',
+    ]);
+
+    // Build namespace index for quick lookup
+    const toolToNamespace = new Map<string, string>();
+    for (const [ns, def] of Object.entries(namespaceMap)) {
+      for (const name of def.tools) {
+        toolToNamespace.set(name, ns);
+      }
+    }
+
+    // Separate tools into always-loaded and namespaced
+    const directTools: any[] = [];
+    const namespacedTools = new Map<string, any[]>();
+
+    for (const t of tools) {
+      const name = t.function.name;
+      const flat = {
+        type: 'function',
+        name,
+        description: t.function.description,
+        parameters: t.function.parameters,
+      };
+
+      if (alwaysLoaded.has(name)) {
+        directTools.push(flat);
+      } else {
+        const ns = toolToNamespace.get(name);
+        if (ns) {
+          if (!namespacedTools.has(ns)) namespacedTools.set(ns, []);
+          namespacedTools.get(ns)!.push({ ...flat, defer_loading: true });
+        } else {
+          // Ungrouped tool — load directly
+          directTools.push(flat);
+        }
+      }
+    }
+
+    // Build namespace objects
+    const namespaces: any[] = [];
+    for (const [ns, nsTools] of namespacedTools) {
+      const def = namespaceMap[ns];
+      if (def && nsTools.length > 0) {
+        namespaces.push({
+          type: 'namespace',
+          name: ns,
+          description: def.description,
+          tools: nsTools,
+        });
+      }
+    }
+
+    return [
+      ...directTools,
+      ...namespaces,
+      { type: 'tool_search' },
+    ];
   }
 
   private async parseResponsesNonStreamingResponse(response: Response): Promise<ChatResult> {

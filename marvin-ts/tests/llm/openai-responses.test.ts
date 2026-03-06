@@ -76,7 +76,10 @@ describe('OpenAICompatProvider (Responses API)', () => {
       type: 'function' as const,
       function: { name: 'test', description: 'test', parameters: { type: 'object' as const, properties: {}, required: [] as string[] } },
     }];
-    await provider.chat([{ role: 'user', content: 'test' }], { stream: false, tools });
+    await provider.chat([
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: 'test' },
+    ], { stream: false, tools });
 
     const req = mock.lastRequest()!;
     expect(req.url).toBe('/responses');
@@ -85,6 +88,12 @@ describe('OpenAICompatProvider (Responses API)', () => {
     expect(body.tools).toBeDefined();
     expect(body.tools[0].name).toBe('test');
     expect(body.tools[0].type).toBe('function');
+    // System message extracted to instructions parameter
+    expect(body.instructions).toContain('You are a helpful assistant.');
+    expect(body.instructions).toContain('function_call mechanism');
+    // System message NOT in input
+    const inputRoles = body.input.map((m: any) => m.role);
+    expect(inputRoles).not.toContain('system');
   });
 
   it('continues tool calls via previous_response_id + function_call_output input', async () => {

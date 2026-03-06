@@ -102,10 +102,29 @@ export class OpenAICompatProvider implements Provider {
     const isToolContinuation = messages.length > 0 && messages[messages.length - 1].role === 'tool';
 
     const effort = this.getOpenAIReasoningEffort();
+
+    // Extract system message into the `instructions` parameter (Responses API best practice).
+    // This prevents the model from confusing system instructions with conversation history.
+    let instructions: string | undefined;
+    const nonSystemMessages = messages.filter(m => {
+      if (m.role === 'system') {
+        instructions = (instructions ? instructions + '\n\n' : '') + (m.content ?? '');
+        return false;
+      }
+      return true;
+    });
+
+    // Add explicit tool-calling instruction to prevent the model from
+    // outputting ChatGPT-style "to=functions.xxx" syntax as text content.
+    if (hasTools && instructions) {
+      instructions += '\n\nIMPORTANT: To call tools, use the function_call mechanism provided by the API. Do NOT output tool calls as text. Never write "to=functions" or similar syntax in your responses.';
+    }
+
     const body: Record<string, unknown> = {
       model: this.model,
       ...(effort ? { reasoning: { effort } } : {}),
       ...(hasTools ? { tools: this.convertToolsForResponses(options!.tools!) } : {}),
+      ...(instructions ? { instructions } : {}),
       ...(options?.extraBody ?? {}),
       ...(shouldStream ? { stream: true } : {}),
     };
@@ -130,11 +149,10 @@ export class OpenAICompatProvider implements Provider {
       // Non-continuation: convert full history to Responses API input format.
       // Inline tool results as user messages since Responses API doesn't support role=tool in input.
       this.lastResponseId = null;
-      body.input = messages
+      body.input = nonSystemMessages
         .filter(m => m.role !== 'tool')
         .map(m => {
           if (m.tool_calls?.length) {
-            // Convert assistant tool_call messages to plain text so context isn't lost
             const callSummary = m.tool_calls.map(tc => `Called ${tc.function.name}(${tc.function.arguments})`).join('; ');
             return { role: 'assistant', content: m.content ? `${m.content}\n[${callSummary}]` : `[${callSummary}]` };
           }
@@ -470,6 +488,17 @@ export class OpenAICompatProvider implements Provider {
   private async parseResponsesStreamingResponse(response: Response, onDelta?: (text: string) => void): Promise<ChatResult> {
     const contentParts: string[] = [];
     let usage = { inputTokens: 0, outputTokens: 0 };
+    // Buffer streaming content to detect CoT patterns before emitting to UI.
+    // We accumulate a small window and only flush when we're confident it's clean.
+    let streamBuffer = '';
+    let cotDetected = false;
+
+    const flushBuffer = () => {
+      if (streamBuffer && !cotDetected) {
+        onDelta?.(streamBuffer);
+      }
+      streamBuffer = '';
+    };
 
     const reader = response.body!.getReader();
     const decoder = new TextDecoder();
@@ -497,8 +526,19 @@ export class OpenAICompatProvider implements Provider {
 
         // Only capture output_text deltas, skip reasoning deltas
         if (chunk?.type && typeof chunk.type === 'string' && chunk.type === 'response.output_text.delta' && typeof chunk.delta === 'string') {
-          contentParts.push(chunk.delta);
-          onDelta?.(chunk.delta);
+          const delta = chunk.delta;
+          contentParts.push(delta);
+          streamBuffer += delta;
+
+          // Check accumulated buffer for CoT patterns
+          if (this.looksLikeCoT(streamBuffer)) {
+            cotDetected = true;
+          }
+
+          // Flush clean content periodically (after sentence boundaries)
+          if (!cotDetected && streamBuffer.length > 80 && /[.!?\n]/.test(delta)) {
+            flushBuffer();
+          }
         }
 
         if (chunk?.response?.id) {
@@ -512,6 +552,9 @@ export class OpenAICompatProvider implements Provider {
         }
       }
     }
+
+    // Flush remaining clean content
+    flushBuffer();
 
     const rawContent = contentParts.length > 0 ? contentParts.join('') : null;
     const message: Message = {
@@ -579,12 +622,26 @@ export class OpenAICompatProvider implements Provider {
    * - Multilingual reasoning tokens (Chinese, Thai, Armenian, etc.)
    * - Internal deliberation text about tool selection
    */
+  /**
+   * Detect chain-of-thought artifacts in text.
+   * gpt-5.4 leaks internal reasoning as: ChatGPT tool call syntax,
+   * multilingual reasoning tokens, meta-commentary about tool selection.
+   */
+  private looksLikeCoT(text: string): boolean {
+    // ChatGPT internal tool call format
+    if (/to=functions\.\w+/.test(text)) return true;
+    if (/to=multi_tool_use\./.test(text)) return true;
+    // Internal tool call JSON attempts
+    if (/\{"(?:command|tool_uses|recipient_name)"/.test(text) && /to=functions/.test(text)) return true;
+    // Heavy non-Latin script mixed with tool-like patterns (reasoning tokens)
+    const nonLatinRatio = (text.match(/[\u4e00-\u9fff\u0e00-\u0e7f\u0530-\u058f\u0d00-\u0d7f\u10a0-\u10ff\u0400-\u04ff]/g) || []).length / Math.max(text.length, 1);
+    if (nonLatinRatio > 0.15 && /(?:json|functions|tool|command)/i.test(text)) return true;
+    return false;
+  }
+
   private sanitizeCoT(text: string | null): string | null {
     if (!text) return text;
-    // Detect ChatGPT internal tool call format leaking through
-    if (/to=functions\.\w+/.test(text) || /to=multi_tool_use\./.test(text)) {
-      return null;
-    }
+    if (this.looksLikeCoT(text)) return null;
     return text;
   }
 }

@@ -10,7 +10,7 @@ import type {
   AppMode,
   OpenAIFunctionDef,
 } from './types.js';
-import { ContextBudgetManager, compactContext } from './context.js';
+import { ContextBudgetManager, compactContext, COMPACT_THRESHOLD_1M, COMPACT_THRESHOLD_DEFAULT } from './context.js';
 import { UsageTracker } from './usage.js';
 import { ToolRegistry } from './tools/registry.js';
 import { runToolLoop } from './llm/router.js';
@@ -83,7 +83,7 @@ export class SessionManager {
     this.providerConfig = config.providerConfig;
     this.profile = config.profile;
     this.registry = config.registry;
-    this.contextBudget = new ContextBudgetManager();
+    this.contextBudget = new ContextBudgetManager(config.providerConfig.model);
     this.usage = new UsageTracker(config.persistDir);
     this.usage.load();
 
@@ -118,6 +118,10 @@ export class SessionManager {
 
   getContextBudget(): ContextBudgetManager {
     return this.contextBudget;
+  }
+
+  private getCompactThreshold(): number {
+    return this.contextBudget.getBudget().compactThreshold;
   }
 
   async submit(prompt: string, callbacks?: StreamCallbacks): Promise<ChatResult> {
@@ -195,7 +199,7 @@ export class SessionManager {
         signal: this.state.abortController.signal,
         onToolCall: callbacks?.onToolCallStart,
         onDelta: callbacks?.onDelta,
-        compactThreshold: 100_000,
+        compactThreshold: this.getCompactThreshold(),
         onCompact: async (messages) => this.compactMessages(messages),
       });
 

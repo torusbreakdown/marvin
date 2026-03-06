@@ -2,17 +2,33 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Message, ContextBudget } from './types.js';
 
-export const WARN_THRESHOLD = 180_000;
-export const COMPACT_THRESHOLD = 200_000;
-export const HARD_LIMIT = 226_000;
+// Conservative defaults for 128k models
+export const WARN_THRESHOLD_DEFAULT = 180_000;
+export const COMPACT_THRESHOLD_DEFAULT = 200_000;
+export const HARD_LIMIT_DEFAULT = 226_000;
+
+// gpt-5.4 / 1M-context models
+export const WARN_THRESHOLD_1M = 700_000;
+export const COMPACT_THRESHOLD_1M = 800_000;
+export const HARD_LIMIT_1M = 950_000;
+
+// Aliases for backward compat
+export const WARN_THRESHOLD = WARN_THRESHOLD_DEFAULT;
+export const COMPACT_THRESHOLD = COMPACT_THRESHOLD_DEFAULT;
+export const HARD_LIMIT = HARD_LIMIT_DEFAULT;
 
 export class ContextBudgetManager {
-  private budget: ContextBudget = {
-    warnThreshold: WARN_THRESHOLD,
-    compactThreshold: COMPACT_THRESHOLD,
-    hardLimit: HARD_LIMIT,
-    currentTokens: 0,
-  };
+  private budget: ContextBudget;
+
+  constructor(modelHint?: string) {
+    const large = modelHint && /gpt-5|o[1-9]|1m/i.test(modelHint);
+    this.budget = {
+      warnThreshold: large ? WARN_THRESHOLD_1M : WARN_THRESHOLD_DEFAULT,
+      compactThreshold: large ? COMPACT_THRESHOLD_1M : COMPACT_THRESHOLD_DEFAULT,
+      hardLimit: large ? HARD_LIMIT_1M : HARD_LIMIT_DEFAULT,
+      currentTokens: 0,
+    };
+  }
 
   getBudget(): ContextBudget {
     return { ...this.budget };

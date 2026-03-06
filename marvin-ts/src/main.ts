@@ -382,7 +382,7 @@ function resolveProviderConfig(args: CliArgs): ProviderConfig {
     apiKey,
     baseUrl: process.env['MARVIN_BASE_URL'] ?? d.baseUrl,
     timeoutMs: 300_000,
-    maxToolRounds: 15,
+    maxToolRounds: 200,
   };
 }
 

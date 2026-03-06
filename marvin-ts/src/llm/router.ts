@@ -64,7 +64,7 @@ export interface RunToolLoopOptions {
   onDelta?: (text: string) => void;
   /** Called when context is near full. Should compact messages in-place and return the new array. */
   onCompact?: (messages: Message[]) => Promise<Message[]>;
-  /** Token threshold at which to trigger compaction (default: 100000) */
+  /** Token threshold at which to trigger compaction (default: 800000) */
   compactThreshold?: number;
 }
 
@@ -80,7 +80,7 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
     onToolCall,
     onDelta,
     onCompact,
-    compactThreshold = 100_000,
+    compactThreshold = 800_000,
   } = options;
 
   const tools = options.tools;

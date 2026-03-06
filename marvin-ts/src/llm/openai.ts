@@ -6,6 +6,9 @@ import type {
   ChatResult,
   ToolCall,
 } from '../types.js';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 export class OpenAICompatProvider implements Provider {
   readonly name: string;
@@ -305,6 +308,8 @@ export class OpenAICompatProvider implements Provider {
     const json = await response.json() as any;
     if (json?.id) this.lastResponseId = json.id;
 
+    this.debugLogResponse(json);
+
     const toolCalls: ToolCall[] = (json?.output ?? [])
       .filter((o: any) => o?.type === 'function_call' && o?.name && o?.call_id
         && o?.status !== 'incomplete' && o?.status !== 'in_progress')
@@ -317,7 +322,8 @@ export class OpenAICompatProvider implements Provider {
         },
       }));
 
-    const content = this.extractResponsesOutputText(json);
+    const rawContent = this.extractResponsesOutputText(json);
+    const content = this.sanitizeCoT(rawContent);
 
     const message: Message = {
       role: 'assistant',
@@ -380,9 +386,10 @@ export class OpenAICompatProvider implements Provider {
       }
     }
 
+    const rawContent = contentParts.length > 0 ? contentParts.join('') : null;
     const message: Message = {
       role: 'assistant',
-      content: contentParts.length > 0 ? contentParts.join('') : null,
+      content: this.sanitizeCoT(rawContent),
     };
 
     return { message, usage };
@@ -415,6 +422,43 @@ export class OpenAICompatProvider implements Provider {
   /** Clear continuation state (e.g. after context compaction). */
   resetContinuation(): void {
     this.lastResponseId = null;
+  }
+
+  /** Log raw Responses API JSON for debugging reasoning leaks. */
+  private debugLogResponse(json: any): void {
+    try {
+      const logDir = join(homedir(), '.config', 'local-finder');
+      mkdirSync(logDir, { recursive: true });
+      const entry = {
+        ts: new Date().toISOString(),
+        model: this.model,
+        id: json?.id,
+        outputTypes: (json?.output ?? []).map((o: any) => o?.type),
+        outputSummary: (json?.output ?? []).map((o: any) => {
+          if (o?.type === 'reasoning') return { type: 'reasoning', len: JSON.stringify(o).length };
+          if (o?.type === 'message') return { type: 'message', content: (o.content ?? []).map((c: any) => ({ type: c?.type, len: c?.text?.length ?? 0, preview: c?.text?.slice(0, 100) })) };
+          if (o?.type === 'function_call') return { type: 'function_call', name: o?.name, call_id: o?.call_id };
+          return { type: o?.type };
+        }),
+      };
+      appendFileSync(join(logDir, 'responses-debug.jsonl'), JSON.stringify(entry) + '\n');
+    } catch { /* ignore logging errors */ }
+  }
+
+  /**
+   * Strip chain-of-thought artifacts from response content.
+   * gpt-5.4 sometimes leaks internal reasoning into message content:
+   * - ChatGPT-style tool calls (to=functions.xxx)
+   * - Multilingual reasoning tokens (Chinese, Thai, Armenian, etc.)
+   * - Internal deliberation text about tool selection
+   */
+  private sanitizeCoT(text: string | null): string | null {
+    if (!text) return text;
+    // Detect ChatGPT internal tool call format leaking through
+    if (/to=functions\.\w+/.test(text) || /to=multi_tool_use\./.test(text)) {
+      return null;
+    }
+    return text;
   }
 }
 

@@ -101,7 +101,9 @@ export class OpenAICompatProvider implements Provider {
 
     const isToolContinuation = messages.length > 0 && messages[messages.length - 1].role === 'tool';
 
-    const effort = this.getOpenAIReasoningEffort();
+    // Use lower reasoning effort when tools are present — xhigh with many tools
+    // causes massive reasoning chains that degenerate after many rounds.
+    const effort = hasTools ? 'high' : this.getOpenAIReasoningEffort();
 
     // Extract system message into the `instructions` parameter (Responses API best practice).
     // This prevents the model from confusing system instructions with conversation history.

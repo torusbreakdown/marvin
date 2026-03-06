@@ -121,6 +121,17 @@ export async function runToolLoop(options: RunToolLoopOptions): Promise<ChatResu
 
     // No tool calls → final response
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
+      // If content is null/empty after sanitization and we still have rounds left,
+      // the model may have degenerated (outputting tool calls as text).
+      // Give it one more chance with a nudge.
+      if (!msg.content && rounds < maxRounds) {
+        messages.push(
+          { role: 'assistant', content: null },
+          { role: 'user', content: 'Please continue. Use the provided function calling tools to take action.' },
+        );
+        continue;
+      }
+
       // Emit content as delta for streaming UI
       if (msg.content && onDelta) {
         onDelta(msg.content);

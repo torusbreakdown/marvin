@@ -84,7 +84,7 @@ describe('OpenAICompatProvider (Responses API)', () => {
     const req = mock.lastRequest()!;
     expect(req.url).toBe('/responses');
     const body = JSON.parse(req.body);
-    expect(body.reasoning?.effort).toBe('xhigh');
+    expect(body.reasoning?.effort).toBe('high');  // Tool calls use 'high' to prevent CoT bloat
     expect(body.tools).toBeDefined();
     expect(body.tools[0].name).toBe('test');
     expect(body.tools[0].type).toBe('function');

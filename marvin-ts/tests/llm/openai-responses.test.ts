@@ -223,7 +223,7 @@ describe('OpenAICompatProvider (Responses API)', () => {
     expect(directNames).toContain('exit_app');
     expect(directNames).toContain('custom_tool_1');
 
-    const webNs = body.tools.find((t: any) => t.type === 'namespace' && t.name === 'web');
+    const webNs = body.tools.find((t: any) => t.type === 'namespace' && t.name === 'marvin_web');
     expect(webNs).toBeDefined();
     expect(webNs.tools.every((t: any) => t.defer_loading === true)).toBe(true);
     expect(webNs.tools.map((t: any) => t.name)).toContain('web_search');

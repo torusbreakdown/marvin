@@ -310,59 +310,59 @@ export class OpenAICompatProvider implements Provider {
     // Large tool sets: group into namespaces with deferred loading
     // so the model uses tool_search instead of loading 100+ schemas
     const namespaceMap: Record<string, { description: string; tools: string[] }> = {
-      web: {
+      marvin_web: {
         description: 'Web search, news, browsing, and scraping tools.',
         tools: ['web_search', 'search_news', 'browse_web', 'scrape_page', 'read_rss'],
       },
-      wiki: {
+      marvin_wiki: {
         description: 'Wikipedia search, summaries, full articles, and grep.',
         tools: ['wiki_search', 'wiki_summary', 'wiki_full', 'wiki_grep'],
       },
-      academic: {
+      marvin_academic: {
         description: 'Academic paper search on Semantic Scholar and arXiv.',
         tools: ['search_papers', 'search_arxiv'],
       },
-      files: {
+      marvin_files: {
         description: 'Read, create, edit, patch, list, grep, and find files in the working directory.',
         tools: ['read_file', 'create_file', 'append_file', 'apply_patch', 'list_files', 'grep_files', 'find_files'],
       },
-      git: {
+      marvin_git: {
         description: 'Git operations: status, diff, log, blame, commit, branch, checkout.',
         tools: ['git_status', 'git_diff', 'git_log', 'git_blame', 'git_commit', 'git_branch', 'git_checkout'],
       },
-      github: {
+      marvin_github: {
         description: 'GitHub operations: clone repos, read files, grep code.',
         tools: ['github_clone', 'github_read_file', 'github_grep'],
       },
-      notes: {
+      marvin_notes: {
         description: 'Personal notes: write, read, list, search, organize.',
         tools: ['write_note', 'read_note', 'notes_ls', 'notes_mkdir', 'search_notes'],
       },
-      media: {
+      marvin_media: {
         description: 'Search movies (TMDB), games (IGDB/RAWG), and Steam.',
         tools: ['search_movies', 'get_movie_details', 'search_games', 'get_game_details', 'steam_search', 'steam_app_details', 'steam_featured', 'steam_player_stats', 'steam_user_games', 'steam_user_summary'],
       },
-      music: {
+      marvin_music: {
         description: 'Music search/lookup (MusicBrainz) and Spotify playback/playlists.',
         tools: ['music_search', 'music_lookup', 'spotify_auth', 'spotify_search', 'spotify_create_playlist', 'spotify_add_tracks', 'spotify_playback', 'spotify_now_playing'],
       },
-      calendar_time: {
+      marvin_calendar: {
         description: 'Calendar events, alarms, and timers.',
         tools: ['calendar_list_upcoming', 'calendar_add_event', 'calendar_delete_event', 'set_alarm', 'list_alarms', 'cancel_alarm', 'timer_start', 'timer_check', 'timer_stop'],
       },
-      location: {
+      marvin_location: {
         description: 'Location, maps (OSM/Overpass), weather, travel directions, and places.',
         tools: ['get_my_location', 'osm_search', 'overpass_query', 'weather_forecast', 'estimate_travel_time', 'get_directions', 'places_text_search', 'places_nearby_search', 'setup_google_auth'],
       },
-      downloads: {
+      marvin_downloads: {
         description: 'Download files and media (including yt-dlp for video/audio).',
         tools: ['download_file', 'yt_dlp_download'],
       },
-      blender: {
+      marvin_blender: {
         description: 'Blender 3D: scene inspection, object CRUD, materials, code execution, screenshots.',
         tools: ['blender_get_scene', 'blender_get_object', 'blender_create_object', 'blender_modify_object', 'blender_delete_object', 'blender_set_material', 'blender_execute_code', 'blender_screenshot'],
       },
-      utilities: {
+      marvin_utilities: {
         description: 'Unit conversion, dictionary, translation, system info, OCR, transcription, image generation, recipes, ntfy notifications, bookmarks, tickets.',
         tools: ['convert_units', 'dictionary_lookup', 'translate_text', 'system_info', 'ocr', 'transcribe_audio', 'generate_image', 'recipe_search', 'recipe_lookup', 'generate_ntfy_topic', 'ntfy_subscribe', 'ntfy_unsubscribe', 'ntfy_publish', 'ntfy_list', 'bookmark_save', 'bookmark_list', 'bookmark_search', 'tk', 'install_packages'],
       },

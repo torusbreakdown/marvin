@@ -18,6 +18,34 @@ export function validateUrl(url: string): string | null {
   return isPrivateUrl(url);
 }
 
+// Sites that hard-block automated clients via CDN bot management (Akamai,
+// PerimeterX) and/or a JS-only shell. No User-Agent or headless-browser trick
+// reliably gets past them, so we fail fast with actionable guidance instead of
+// returning a confusing "Access Denied" / CAPTCHA page.
+const BOT_BLOCKED_SITES: Array<{ pattern: RegExp; hint: string }> = [
+  {
+    pattern: /(^|\.)apartments\.com$/i,
+    hint: 'apartments.com is not automatically accessible — it blocks automated browsers (Akamai bot protection). '
+      + 'Use web_search for listings, or, for apartment reviews, browse Reddit (e.g. r/<city> or r/apartments) with browse_web.',
+  },
+  {
+    pattern: /(^|\.)yelp\.com$/i,
+    hint: 'yelp.com is not automatically accessible — it requires JavaScript and serves a CAPTCHA to automated clients. '
+      + 'Use web_search to find the business and its reviews instead.',
+  },
+];
+
+// Returns a guidance message if the URL points at a known bot-blocked site.
+export function botBlockedHint(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    for (const site of BOT_BLOCKED_SITES) {
+      if (site.pattern.test(host)) return site.hint;
+    }
+  } catch { /* not a parseable URL */ }
+  return null;
+}
+
 // New Reddit is JS-heavy and blocks simple clients; old.reddit.com renders as
 // static HTML that lynx/fetch can read. Rewrite reddit hosts to old.reddit.com.
 export function normalizeUrl(url: string): string {
@@ -306,6 +334,8 @@ export function registerWebTools(registry: ToolRegistry): void {
       const startIndex = args.start_index || 0;
 
       if (!args.__test_url) {
+        const blocked = botBlockedHint(target);
+        if (blocked) return blocked;
         const urlErr = validateUrl(target);
         if (urlErr) return urlErr;
       }
@@ -368,6 +398,8 @@ export function registerWebTools(registry: ToolRegistry): void {
       const target = args.__test_url || normalizeUrl(args.url);
       // SECURITY: SSRF protection — block internal/private URLs (skip for test URLs)
       if (!args.__test_url) {
+        const blocked = botBlockedHint(target);
+        if (blocked) return blocked;
         const urlErr = validateUrl(target);
         if (urlErr) return urlErr;
       }

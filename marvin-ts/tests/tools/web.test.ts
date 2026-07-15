@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import { z } from 'zod';
 import { ToolRegistry } from '../../src/tools/registry.js';
-import { registerWebTools, normalizeUrl } from '../../src/tools/web.js';
+import { registerWebTools, normalizeUrl, botBlockedHint } from '../../src/tools/web.js';
 import type { ToolContext } from '../../src/types.js';
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -196,6 +196,39 @@ describe('Web Tools', () => {
       expect(receivedUA).toContain('Mozilla/5.0');
       expect(receivedUA).not.toMatch(/Lynx/i);
     }, 15_000);
+  });
+
+  describe('botBlockedHint (anti-bot sites)', () => {
+    it('flags apartments.com and points to web_search + Reddit', () => {
+      const hint = botBlockedHint('https://www.apartments.com/seattle-wa/');
+      expect(hint).toBeTruthy();
+      expect(hint).toMatch(/not automatically accessible/i);
+      expect(hint).toMatch(/web_search/);
+      expect(hint).toMatch(/reddit/i);
+    });
+
+    it('flags yelp.com and points to web_search', () => {
+      const hint = botBlockedHint('https://www.yelp.com/search?find_desc=coffee');
+      expect(hint).toBeTruthy();
+      expect(hint).toMatch(/not automatically accessible/i);
+      expect(hint).toMatch(/web_search/);
+    });
+
+    it('returns null for ordinary sites', () => {
+      expect(botBlockedHint('https://example.com')).toBeNull();
+      expect(botBlockedHint('https://old.reddit.com/r/programming')).toBeNull();
+      expect(botBlockedHint('not a url')).toBeNull();
+    });
+
+    it('browse_web returns the hint instead of fetching', async () => {
+      const result = await registry.executeTool(
+        'browse_web',
+        { url: 'https://www.apartments.com/seattle-wa/' },
+        makeCtx(),
+      );
+      expect(result).toMatch(/not automatically accessible/i);
+      expect(result).toMatch(/reddit/i);
+    });
   });
 
   describe('normalizeUrl (Reddit rewriting)', () => {

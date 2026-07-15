@@ -1,21 +1,46 @@
 import { z } from 'zod';
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { isPrivateUrl } from './ssrf.js';
 import type { ToolRegistry } from './registry.js';
 import { getSecret } from '../secrets.js';
+
+const execFileAsync = promisify(execFile);
+
+// Many sites reject lynx's default User-Agent (e.g. Reddit serves an empty
+// page). Spoof a mainstream desktop browser so pages render normally. lynx
+// prints a "does not contain Lynx" warning to stderr, which we ignore.
+const BROWSER_UA =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 // SECURITY: Block requests to internal/private network addresses (SSRF protection)
 export function validateUrl(url: string): string | null {
   return isPrivateUrl(url);
 }
 
-function lynxDump(url: string): { text: string; error?: string } {
+// New Reddit is JS-heavy and blocks simple clients; old.reddit.com renders as
+// static HTML that lynx/fetch can read. Rewrite reddit hosts to old.reddit.com.
+export function normalizeUrl(url: string): string {
   try {
-    const result = execSync(
-      `lynx -dump -nolist -nonumbers -width=120 -accept_all_cookies ${JSON.stringify(url)}`,
+    const u = new URL(url);
+    if (/^(www\.|new\.|np\.|amp\.)?reddit\.com$/i.test(u.hostname)) {
+      u.hostname = 'old.reddit.com';
+      return u.toString();
+    }
+  } catch { /* not a parseable URL — leave unchanged */ }
+  return url;
+}
+
+// Runs lynx asynchronously (execFile, not execSync) so it never blocks the
+// event loop while a page loads — lynx's timeout can be up to 30s.
+async function lynxDump(url: string): Promise<{ text: string; error?: string }> {
+  try {
+    const { stdout } = await execFileAsync(
+      'lynx',
+      ['-dump', '-nolist', '-nonumbers', '-width=120', '-accept_all_cookies', `-useragent=${BROWSER_UA}`, url],
       { encoding: 'utf-8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
     );
-    return { text: result.trim() };
+    return { text: stdout.trim() };
   } catch (e: any) {
     const stderr = e.stderr?.toString()?.slice(0, 300) || '';
     const msg = e.message?.slice(0, 300) || 'unknown error';
@@ -88,6 +113,36 @@ function parseDdgResults(html: string, maxResults: number): Array<{ title: strin
   return results;
 }
 
+interface SearchResult { title: string; url: string; snippet: string }
+
+// Parse ddgr's `--json` output into the common result shape. ddgr emits an
+// array of { title, url, abstract }.
+function parseDdgrJson(json: string, maxResults: number): SearchResult[] {
+  let parsed: any;
+  try { parsed = JSON.parse(json); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.slice(0, maxResults).map((r: any) => ({
+    title: (r.title || '').trim(),
+    url: (r.url || '').trim(),
+    snippet: (r.abstract || '').trim(),
+  })).filter(r => r.url);
+}
+
+// DuckDuckGo's plain HTML endpoint returns thin results; ddgr scrapes the
+// richer results page and returns clean JSON. Falls back to HTML scraping upstream.
+async function ddgrSearch(query: string, maxResults: number, timeFilter: string): Promise<SearchResult[]> {
+  const n = Math.min(Math.max(maxResults, 1), 25); // ddgr caps at 25 per page
+  const args = ['--json', '--np', '-n', String(n)];
+  if (timeFilter && ['d', 'w', 'm', 'y'].includes(timeFilter)) args.push('-t', timeFilter);
+  args.push(query);
+  const { stdout } = await execFileAsync('ddgr', args, {
+    encoding: 'utf-8',
+    timeout: 20_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  return parseDdgrJson(stdout, maxResults);
+}
+
 function titleSimilarity(a: string, b: string): number {
   const wordsA = new Set(a.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/));
   const wordsB = new Set(b.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/));
@@ -128,21 +183,33 @@ export function registerWebTools(registry: ToolRegistry): void {
 
   registry.registerTool(
     'web_search',
-    'Search the web using DuckDuckGo. Returns titles, URLs, and snippets.',
+    'Search the web using DuckDuckGo (via ddgr). Returns titles, URLs, and snippets.',
     z.object({
       query: z.string().describe('The search query'),
-      max_results: z.number().default(5).describe('Maximum number of results to return (1-20)'),
+      max_results: z.number().default(5).describe('Maximum number of results to return (1-25)'),
       time_filter: z.string().default('').describe("Time filter: '' (any), 'd' (day), 'w' (week), 'm' (month), 'y' (year)"),
+      __test_json: z.string().optional(),
       __test_url: z.string().optional(),
     }),
     async (args) => {
-      const { query, max_results, time_filter, __test_url } = args;
-      const params = new URLSearchParams({ q: query });
-      if (time_filter) params.set('df', time_filter);
-      const url = __test_url || `https://html.duckduckgo.com/html/?${params.toString()}`;
+      const { query, max_results, time_filter, __test_json, __test_url } = args;
       try {
-        const html = await fetchText(url);
-        const results = parseDdgResults(html, max_results);
+        let results: SearchResult[];
+        if (__test_json !== undefined) {
+          // Test seam: parse canned ddgr JSON instead of spawning ddgr.
+          results = parseDdgrJson(__test_json, max_results);
+        } else {
+          try {
+            results = await ddgrSearch(query, max_results, time_filter);
+          } catch {
+            // Fallback: ddgr missing/failed — scrape DuckDuckGo's HTML endpoint.
+            const params = new URLSearchParams({ q: query });
+            if (time_filter) params.set('df', time_filter);
+            const url = __test_url || `https://html.duckduckgo.com/html/?${params.toString()}`;
+            const html = await fetchText(url);
+            results = parseDdgResults(html, max_results);
+          }
+        }
         if (results.length === 0) return `No results found for: ${query}`;
         return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join('\n\n');
       } catch (e: any) {
@@ -235,7 +302,7 @@ export function registerWebTools(registry: ToolRegistry): void {
       __test_url: z.string().optional(),
     }),
     async (args) => {
-      const target = args.__test_url || args.url;
+      const target = args.__test_url || normalizeUrl(args.url);
       const startIndex = args.start_index || 0;
 
       if (!args.__test_url) {
@@ -248,7 +315,7 @@ export function registerWebTools(registry: ToolRegistry): void {
 
       if (fullText === null) {
         // Try lynx first (handles JS-blocked sites, cookies, redirects)
-        const lynx = lynxDump(target);
+        const lynx = await lynxDump(target);
         fullText = lynx.text;
         if (!fullText) {
           // Fallback to fetch if lynx unavailable or fails
@@ -298,7 +365,7 @@ export function registerWebTools(registry: ToolRegistry): void {
       __test_url: z.string().optional(),
     }),
     async (args) => {
-      const target = args.__test_url || args.url;
+      const target = args.__test_url || normalizeUrl(args.url);
       // SECURITY: SSRF protection — block internal/private URLs (skip for test URLs)
       if (!args.__test_url) {
         const urlErr = validateUrl(target);

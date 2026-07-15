@@ -3,7 +3,7 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import { z } from 'zod';
 import { ToolRegistry } from '../../src/tools/registry.js';
-import { registerWebTools } from '../../src/tools/web.js';
+import { registerWebTools, normalizeUrl } from '../../src/tools/web.js';
 import type { ToolContext } from '../../src/types.js';
 
 function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
@@ -61,33 +61,16 @@ describe('Web Tools', () => {
   });
 
   describe('web_search', () => {
-    let server: http.Server;
-    let baseUrl: string;
-
-    afterEach(() => {
-      if (server) server.close();
-    });
-
-    it('returns results with titles, URLs, snippets', async () => {
-      const cannedHtml = `<html><body>
-        <div class="result">
-          <a class="result__a" href="https://example.com/page1">Example Page One</a>
-          <a class="result__snippet">This is the first result snippet</a>
-        </div>
-        <div class="result">
-          <a class="result__a" href="https://example.com/page2">Example Page Two</a>
-          <a class="result__snippet">Second result snippet here</a>
-        </div>
-      </body></html>`;
-
-      ({ server, baseUrl } = await createTestServer((_req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(cannedHtml);
-      }));
+    // Canned ddgr --json output (array of {title, url, abstract}).
+    it('returns results with titles, URLs, snippets (ddgr JSON)', async () => {
+      const ddgrJson = JSON.stringify([
+        { title: 'Example Page One', url: 'https://example.com/page1', abstract: 'This is the first result snippet' },
+        { title: 'Example Page Two', url: 'https://example.com/page2', abstract: 'Second result snippet here' },
+      ]);
 
       const result = await registry.executeTool(
         'web_search',
-        { query: 'test query', __test_url: baseUrl },
+        { query: 'test query', __test_json: ddgrJson },
         makeCtx(),
       );
 
@@ -98,22 +81,15 @@ describe('Web Tools', () => {
     });
 
     it('handles max_results parameter', async () => {
-      // Build HTML with 10 results
-      const results = Array.from({ length: 10 }, (_, i) => `
-        <div class="result">
-          <a class="result__a" href="https://example.com/p${i}">Result ${i}</a>
-          <a class="result__snippet">Snippet ${i}</a>
-        </div>`).join('');
-      const html = `<html><body>${results}</body></html>`;
-
-      ({ server, baseUrl } = await createTestServer((_req, res) => {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(html);
-      }));
+      const ddgrJson = JSON.stringify(
+        Array.from({ length: 10 }, (_, i) => ({
+          title: `Result ${i}`, url: `https://example.com/p${i}`, abstract: `Snippet ${i}`,
+        })),
+      );
 
       const result = await registry.executeTool(
         'web_search',
-        { query: 'test', max_results: 3, __test_url: baseUrl },
+        { query: 'test', max_results: 3, __test_json: ddgrJson },
         makeCtx(),
       );
 
@@ -121,6 +97,15 @@ describe('Web Tools', () => {
       expect(result).toContain('Result 0');
       expect(result).toContain('Result 2');
       expect(result).not.toContain('Result 3');
+    });
+
+    it('reports no results for an empty ddgr array', async () => {
+      const result = await registry.executeTool(
+        'web_search',
+        { query: 'nothing', __test_json: '[]' },
+        makeCtx(),
+      );
+      expect(result).toContain('No results found');
     });
   });
 
@@ -177,7 +162,8 @@ describe('Web Tools', () => {
       if (server) server.close();
     });
 
-    it('fetches page and returns text content (HTML stripped)', async () => {
+    it('fetches page via lynx and spoofs a browser User-Agent', async () => {
+      let receivedUA = '';
       const html = `<html>
         <head><title>Test Page</title></head>
         <body>
@@ -188,7 +174,8 @@ describe('Web Tools', () => {
         </body>
       </html>`;
 
-      ({ server, baseUrl } = await createTestServer((_req, res) => {
+      ({ server, baseUrl } = await createTestServer((req, res) => {
+        receivedUA = req.headers['user-agent'] || '';
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(html);
       }));
@@ -205,6 +192,35 @@ describe('Web Tools', () => {
       // Script/style content should be stripped
       expect(result).not.toContain('var x = 1');
       expect(result).not.toContain('color: red');
+      // lynx should present as a browser, not as "Lynx"
+      expect(receivedUA).toContain('Mozilla/5.0');
+      expect(receivedUA).not.toMatch(/Lynx/i);
+    }, 15_000);
+  });
+
+  describe('normalizeUrl (Reddit rewriting)', () => {
+    it('rewrites reddit.com hosts to old.reddit.com', () => {
+      expect(normalizeUrl('https://www.reddit.com/r/programming'))
+        .toBe('https://old.reddit.com/r/programming');
+      expect(normalizeUrl('https://reddit.com/r/rust/comments/abc/title/'))
+        .toBe('https://old.reddit.com/r/rust/comments/abc/title/');
+      expect(normalizeUrl('https://new.reddit.com/r/news'))
+        .toBe('https://old.reddit.com/r/news');
+    });
+
+    it('preserves query strings and paths when rewriting', () => {
+      expect(normalizeUrl('https://www.reddit.com/search/?q=typescript'))
+        .toBe('https://old.reddit.com/search/?q=typescript');
+    });
+
+    it('leaves non-reddit and already-old URLs unchanged', () => {
+      expect(normalizeUrl('https://old.reddit.com/r/programming'))
+        .toBe('https://old.reddit.com/r/programming');
+      expect(normalizeUrl('https://example.com/reddit.com'))
+        .toBe('https://example.com/reddit.com');
+      expect(normalizeUrl('https://notreddit.com/r/x'))
+        .toBe('https://notreddit.com/r/x');
+      expect(normalizeUrl('not a url')).toBe('not a url');
     });
   });
 
